@@ -4,6 +4,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 use pipetrain::command::{PlanOptions, plan};
+use pipetrain::emit::Emit;
 
 #[derive(Parser)]
 #[command(
@@ -36,6 +37,14 @@ struct PlanArgs {
 
     #[arg(long, help = "Print the plan as JSON")]
     json: bool,
+
+    #[arg(
+        long,
+        value_enum,
+        conflicts_with = "json",
+        help = "Print only a queue of `merge:org/repo#N` lines for a runner; exit 3 if questions are open"
+    )]
+    emit: Option<Emit>,
 
     #[arg(
         long,
@@ -80,6 +89,7 @@ fn main() -> ExitCode {
                 prs: args.prs,
                 all: args.all,
                 json: args.json,
+                emit: args.emit,
                 config: args.config,
                 orgs: args.orgs,
                 date: args.date,
@@ -88,7 +98,8 @@ fn main() -> ExitCode {
         }
     };
     match result {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(0) => ExitCode::SUCCESS,
+        Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
         Err(err) => {
             eprintln!("error: {err:#}");
             ExitCode::FAILURE

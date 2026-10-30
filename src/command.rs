@@ -9,6 +9,7 @@ use crate::contained;
 use crate::content;
 use crate::detect;
 use crate::discovery::{self, Discovered, Scope, Skipped};
+use crate::emit::{self, Emit};
 use crate::github::{self, ApiError, Client};
 use crate::model::{Pr, PrKey, Question};
 use crate::plan::{self, Gathered, Plan};
@@ -22,6 +23,7 @@ pub struct PlanOptions {
     pub prs: Vec<String>,
     pub all: bool,
     pub json: bool,
+    pub emit: Option<Emit>,
     pub config: Option<PathBuf>,
     pub orgs: Vec<String>,
     pub date: Option<String>,
@@ -270,7 +272,33 @@ fn emit(built: &Plan, json: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn plan(opts: PlanOptions) -> Result<()> {
+fn print_queue(built: &Plan) {
+    for line in emit::question_lines(built) {
+        eprintln!("{line}");
+    }
+    let lines = emit::queue_lines(built);
+    if lines.is_empty() {
+        eprintln!("no PRs ready");
+    }
+    for line in lines {
+        println!("{line}");
+    }
+}
+
+fn deliver(built: &Plan, json: bool, mode: Option<Emit>) -> Result<i32> {
+    match mode {
+        Some(Emit::Queue) => {
+            print_queue(built);
+            Ok(emit::exit_code(built))
+        }
+        None => {
+            emit(built, json)?;
+            Ok(0)
+        }
+    }
+}
+
+pub fn plan(opts: PlanOptions) -> Result<i32> {
     let cfg = load_config(&opts)?;
     let rules = Rules::new(&cfg)?;
     let deploy_branch = deploy_branch_for(&cfg, opts.date.as_deref())?;
@@ -303,5 +331,5 @@ pub fn plan(opts: PlanOptions) -> Result<()> {
         publishers,
     };
     let gathered = into_gathered(&cfg, &explicit, train, deploy_branch, &client, collected);
-    emit(&plan::build(&rules, gathered), opts.json)
+    deliver(&plan::build(&rules, gathered), opts.json, opts.emit)
 }

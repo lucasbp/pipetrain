@@ -36,6 +36,7 @@ pipetrain plan [OPTIONS] [PRS]...
 | `pipetrain plan acme/orders-api#12 acme/billing-api#3` | Plans exactly these PRs, no discovery. |
 | `pipetrain plan --all` | Plans every approved open PR in the configured orgs, whatever its branch. For any day, not only the train day. Cannot be combined with explicit PRs. |
 | `pipetrain plan --json` | Prints the plan as JSON instead of text (contract in `docs/plan-json.md`). |
+| `pipetrain plan --emit queue` | Prints only a queue of `merge:org/repo#N` lines for a runner (contract in `docs/queue-output.md`). Cannot be combined with `--json`. |
 
 | Option | Meaning |
 |---|---|
@@ -43,6 +44,7 @@ pipetrain plan [OPTIONS] [PRS]...
 | `--org <org>` | Org to look at. Repeatable. Overrides `orgs` in the config. |
 | `--date <date>` | Train date, instead of today. Accepts the date format of `train_date_format` (default `dd-mm-yyyy`, for example `--date 29-10-2026`) or ISO `yyyy-mm-dd` (`--date 2026-10-29`). |
 | `--verbose` | Log every API request to stderr. |
+| `--emit queue` | Replaces the plan with a queue for a runner: one `merge:org/repo#N` line per ready PR on stdout, questions on stderr, exit 3 when questions are open. See [Feeding a queue runner](#feeding-a-queue-runner). Not combinable with `--json`. |
 | `--color auto\|always\|never` | Colors in the text output. `auto` (the default) colors only on a terminal and honors `NO_COLOR`. `always` colors even when piped, `never` never does. `--json` is never colored. |
 
 PR references are written as `org/repo#123`. A PR that cannot be found stops the run.
@@ -151,13 +153,49 @@ How to read it:
 - **LANE**: a chain of PRs. Lanes are independent of each other, so they can run side by side. Inside a lane, merge top to bottom.
 - **s1, s2, s3**: the stage. PRs with the same stage have nothing between them and can merge at the same time.
 - **after**: the PR that must merge first, the rule that says so, and the reason.
-- **?**: the PR has an open question, listed at the end with a suggested fix. A question never changes the exit code.
+- **?**: the PR has an open question, listed at the end with a suggested fix. A question never changes the exit code, except with `--emit queue` (see [Feeding a queue runner](#feeding-a-queue-runner)).
 - **[api]**, **[lib]**: the layer of the repo, from your config.
 - **deploys**: how many deploys the ready PRs cause today (every PR that does not target a train branch is one), and how many remain if every bundle is applied.
 - **BUNDLES**: a suggestion to merge several PRs of one repo through one train branch. Shown only when there is something to bundle. Nothing was created or retargeted.
 - **SKIPPED**: PRs that are not ready, or that are `already in` a branch. `already in main` means the PR head is already part of `main`.
 
 A `NOTES` section appears at the end when there is something informational, for example a `Depends-On` that points at a PR already merged.
+
+## Feeding a queue runner
+
+```
+pipetrain plan --all --emit queue
+```
+
+stdout carries only the queue, one item per line, ready for any tool that takes `merge:` items:
+
+```
+merge:acme/orders-api#12
+# pause: confirm DDL/infra before continuing
+merge:acme/billing-api#3
+merge:acme/web#7
+```
+
+- **Items.** `merge:<org>/<repo>#<n>`, one per ready PR. Skipped PRs never appear. Lines that start with `#` are comments.
+- **Order.** The plan's execution order: gate PRs first, then the `# pause: ...` line, then every other PR by stage, ties in the planner's order. There is no blank line.
+- **Pause.** The runner should stop at the `# pause` line until a human confirms the database or infrastructure change. If no PR follows the gate, the line is omitted.
+- **Lanes are flattened.** The plan runs independent lanes side by side, the queue lists them one after the other. A serial runner is correct with it, only slower than the lanes would be.
+- **Questions.** Each open question goes to stderr as `? <pr>: <message>` (`? (repo): ...` when it is not about one PR), before anything else. The queue is still printed.
+- **No PRs ready.** stdout stays empty and stderr says `no PRs ready`.
+
+| Exit code | Meaning |
+|---|---|
+| 0 | Queue printed, no open question. |
+| 1 | An error, as in any run. |
+| 3 | Queue printed, and at least one question is open. Read stderr before running the queue. |
+
+`--all`, explicit PRs, `--config`, `--org`, `--date` and `--verbose` work as usual. `--color` and `NO_COLOR` have no effect. PowerShell example:
+
+```powershell
+$items = pipetrain plan --all --emit queue | Where-Object { $_ -notmatch '^#' }; & ship-queue.ps1 @items
+```
+
+The example drops the comment lines, so it does not stop at the pause. Split the queue at the `# pause` line when the runner has to wait there. The format is documented in [docs/queue-output.md](docs/queue-output.md).
 
 ## Configuration
 
@@ -195,6 +233,7 @@ Redirects are not followed. GitHub answers a renamed or moved repo with a redire
 |---|---|
 | 0 | A plan was generated. Skipped PRs and `?` questions do not change this. |
 | 1 | An error: no token, bad config, bad `--date`, a PR not found, budget reached, GitHub failure. The message goes to stderr as `error: ...`. |
+| 3 | Only with `--emit queue`: the queue was printed, but at least one question is open. Without `--emit queue` this code is never used. |
 
 A command-line usage mistake (an unknown option, for example) exits with clap's own code, 2.
 
@@ -206,6 +245,7 @@ pipetrain does not merge, push, approve, comment, label, re-run checks or write 
 
 - [docs/planner.md](docs/planner.md): the rules, in the order they apply, and every question the planner can raise.
 - [docs/plan-json.md](docs/plan-json.md): the `--json` contract.
+- [docs/queue-output.md](docs/queue-output.md): the `--emit queue` contract.
 - [docs/saving-pipelines.md](docs/saving-pipelines.md): why the plan checks "already in the base", why it suggests a deploy branch, and how to apply it by hand.
 - [pipetrain.example.toml](pipetrain.example.toml): the config, annotated.
 
