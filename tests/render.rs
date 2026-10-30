@@ -59,6 +59,7 @@ fn sample() -> String {
             questions: Vec::new(),
             external: BTreeMap::new(),
             publishers: Publishers::new(),
+            references: Default::default(),
             max_parallel: 4,
             requests: 3,
             rate_remaining: Some(4000),

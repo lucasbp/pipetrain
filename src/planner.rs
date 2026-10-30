@@ -5,8 +5,9 @@ use serde::Serialize;
 use crate::config::{GateKind, Rules};
 use crate::detect::{self, Dep};
 use crate::model::{Pr, PrKey, Question};
-use crate::publishers::Publishers;
+use crate::publishers::{Publishers, References};
 
+mod dependency;
 mod order;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -16,6 +17,7 @@ pub enum Rule {
     Package,
     Stacked,
     Order,
+    Dependency,
     Target,
     Layer,
     Gate,
@@ -28,6 +30,7 @@ impl Rule {
             Rule::Package => "package",
             Rule::Stacked => "stacked",
             Rule::Order => "order",
+            Rule::Dependency => "dependency",
             Rule::Target => "target",
             Rule::Layer => "layer",
             Rule::Gate => "gate",
@@ -79,6 +82,7 @@ pub struct PlanInput<'a> {
     pub prs: Vec<(Pr, String)>,
     pub external: BTreeMap<String, DepState>,
     pub publishers: Publishers,
+    pub references: References,
 }
 
 #[derive(Debug)]
@@ -517,6 +521,7 @@ pub fn plan(input: PlanInput<'_>) -> Planned {
     b.apply_packages(&input.publishers);
     b.apply_stacked();
     b.apply_order();
+    b.apply_dependency(&input.references, &input.publishers);
     b.apply_targets();
     b.apply_gates();
     b.apply_layers();

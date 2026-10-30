@@ -19,12 +19,13 @@ pipetrain plans the merge order of pull requests across repos. This file says wh
 - Typed errors that say what happened and what to do next.
 - `doctor`: checks the token source, API reach, rate limit, config and org visibility, with the exact command to fix each problem.
 - Profiles (`--profile`, `profiles`, `orgs`, `init`), selected by flag, working folder, `default_profile` or the only profile, and an explicit repo order in the config (`[[order]]`).
+- Automatic dependency order from the manifests (NuGet and npm): when a repo references a package that another repo in the plan publishes, the publisher goes first and the reason names the package. A project with no `PackageId` publishes its assembly or project name. An explicit `[[order]]` wins, and repos that reference each other raise a `dependency-cycle` question. Dependencies between ecosystems (NuGet to npm) cannot be detected and stay explicit.
 
 ## Next
 
 Small, well understood, in this order:
 
-1. Automatic dependency order from the manifests: when a repo references a package that another repo in the plan publishes, the publisher goes first and the reason names the package. This includes packages with no explicit `PackageId` (the project name is the id) and a `pipetrain order suggest` command that prints the discovered chain as an `[[order]]` block. An explicit `[[order]]` always wins over the automatic one. Dependencies between ecosystems (NuGet to npm) cannot be detected and stay explicit.
+1. `pipetrain order suggest`: print the discovered dependency chain as an `[[order]]` block, so it can be pinned in the config.
 2. A safe cache for data that never changes for a given sha (PR files, trees, manifests), with `--no-cache` and `--refresh`. Mutable data such as reviews and checks is never cached.
 3. More ways to find the train: a label in addition to the branch name.
 4. Package detection for `Cargo.toml` and `pyproject.toml`, next to npm and NuGet.

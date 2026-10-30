@@ -350,6 +350,8 @@ repos = ["acme/shared-*", "acme/api-*"]
 
 Globs match `org/repo` and ignore case. Two PRs matched by the same glob, or from the same repo, get no edge. The rule applies after `stacked` and before `target`, and it loses to `depends-on`, `package` and `stacked`; a lost `order` edge is reported as an `edge-conflict` question. The position of the rule is in [docs/planner.md](docs/planner.md).
 
+You do not have to write an `[[order]]` block for every library and consumer pair. The `dependency` rule reads the manifests of the repos that have a PR in the plan (`.csproj`, `.props` and `package.json`) and puts the PR of a repo that publishes a NuGet or npm package before the PR of a repo that references it. An explicit `[[order]]` block wins over it, and two repos that reference each other raise a `dependency-cycle` question. Details and limits are in [docs/planner.md](docs/planner.md).
+
 `train_date_format` is how the date appears in the train branch name, as a [chrono strftime](https://docs.rs/chrono/latest/chrono/format/strftime/index.html) string. The default is `%d-%m-%Y` (`deploy/29-10-2026`); `%Y-%m-%d` gives `deploy/2026-10-29`. The config is rejected, with the key named in the error, when the format is empty, is not a valid strftime string, cannot format a plain date (for example it uses a time field), or gives the same text for two different days because it has no day field. `--date` accepts this format or ISO `yyyy-mm-dd`.
 
 ## API budget

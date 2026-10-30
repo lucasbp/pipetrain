@@ -77,6 +77,7 @@ fn build() -> Plan {
             questions,
             external: BTreeMap::new(),
             publishers: publishers::collect(&manifests()),
+            references: Default::default(),
             max_parallel: cfg.max_parallel,
             requests: 0,
             rate_remaining: None,

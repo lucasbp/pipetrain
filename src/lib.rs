@@ -9,6 +9,7 @@ pub mod doctor;
 pub mod emit;
 pub mod github;
 pub mod hint;
+pub mod manifest;
 pub mod model;
 pub mod plan;
 pub mod planner;

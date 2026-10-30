@@ -61,7 +61,7 @@ One edge "the PR in `id` goes before this item".
 | Field | Type | Meaning |
 |---|---|---|
 | `id` | string | The PR that goes first. |
-| `rule` | string | `depends-on`, `package`, `stacked`, `order`, `target`, `layer` or `gate`. |
+| `rule` | string | `depends-on`, `package`, `stacked`, `order`, `dependency`, `target`, `layer` or `gate`. |
 | `reason` | string | Human sentence naming the cause. Free text: do not parse it. |
 | `implied` | boolean | `true` when another predecessor of this item already reaches `id`, so the edge adds no constraint. A viewer can hide it. |
 
@@ -95,7 +95,7 @@ One suggestion: in `repo`, several PRs go to the same `base`, so they would depl
 
 | Field | Type | Meaning |
 |---|---|---|
-| `pr` | string or null | The PR the question is about. `null` for a question about a repo (`tree-truncated`, `manifests-truncated`). |
+| `pr` | string or null | The PR the question is about. `null` for a question about a repo (`tree-truncated`, `manifests-truncated`, `dependency-cycle`). |
 | `code` | string | Stable identifier. Full list and meaning in `planner.md`. |
 | `message` | string | What is undecided. Free text. |
 | `hint` | string | How to resolve it. Free text. |

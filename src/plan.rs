@@ -8,7 +8,7 @@ use crate::discovery::Skipped;
 use crate::model::{Pr, Question};
 use crate::planner::{self, DepState, Item, PlanInput};
 use crate::profile::ProfileSource;
-use crate::publishers::Publishers;
+use crate::publishers::{Publishers, References};
 
 pub const SCHEMA: u32 = 1;
 
@@ -69,6 +69,7 @@ pub struct Gathered {
     pub questions: Vec<Question>,
     pub external: BTreeMap<String, DepState>,
     pub publishers: Publishers,
+    pub references: References,
     pub max_parallel: usize,
     pub requests: u32,
     pub rate_remaining: Option<u64>,
@@ -110,6 +111,7 @@ pub fn build(rules: &Rules, gathered: Gathered) -> Plan {
         prs: gathered.ready,
         external: gathered.external,
         publishers: gathered.publishers,
+        references: gathered.references,
     });
     let questions = merged(gathered.questions, planned.questions);
     let skipped = skipped_out(gathered.skipped);

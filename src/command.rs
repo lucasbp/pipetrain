@@ -14,7 +14,7 @@ use crate::github::{self, ApiError, Client};
 use crate::model::{Pr, PrKey, Question};
 use crate::plan::{self, Gathered, Plan};
 use crate::planner::{self, DepState};
-use crate::publishers::{self, Publishers};
+use crate::publishers::{self, Publishers, References};
 use crate::render;
 
 pub mod init;
@@ -42,6 +42,7 @@ struct Collected {
     questions: Vec<Question>,
     external: BTreeMap<String, DepState>,
     publishers: Publishers,
+    references: References,
 }
 
 const ISO_DATE_FORMAT: &str = "%Y-%m-%d";
@@ -177,15 +178,19 @@ fn scan_publishers(
     rules: &Rules,
     ready: &[(Pr, Scope)],
     questions: &mut Vec<Question>,
-) -> Result<Publishers> {
-    if wanted_packages(rules, ready).is_empty() {
-        return Ok(Publishers::new());
+) -> Result<(Publishers, References)> {
+    let repos = repos_to_scan(ready);
+    if repos.len() < 2 && wanted_packages(rules, ready).is_empty() {
+        return Ok((Publishers::new(), References::new()));
     }
     let mut manifests = Vec::new();
-    for (slug, sha) in repos_to_scan(ready).values() {
+    for (slug, sha) in repos.values() {
         manifests.extend(scan_repo(client, slug, sha, questions)?);
     }
-    Ok(publishers::collect(&manifests))
+    Ok((
+        publishers::collect(&manifests),
+        publishers::collect_references(&manifests),
+    ))
 }
 
 fn deploy_branch_for(cfg: &Config, date: Option<&str>) -> Result<String> {
@@ -255,6 +260,7 @@ fn into_gathered(
         questions: collected.questions,
         external: collected.external,
         publishers: collected.publishers,
+        references: collected.references,
         max_parallel: cfg.max_parallel,
         requests: client.requests(),
         rate_remaining: client.remaining(),
@@ -324,7 +330,7 @@ pub fn plan(opts: PlanOptions) -> Result<i32> {
     skipped.extend(same);
 
     let external = external_states(&mut client, &ready)?;
-    let publishers = scan_publishers(&mut client, &rules, &ready, &mut questions)?;
+    let (publishers, references) = scan_publishers(&mut client, &rules, &ready, &mut questions)?;
 
     let collected = Collected {
         ready,
@@ -332,6 +338,7 @@ pub fn plan(opts: PlanOptions) -> Result<i32> {
         questions,
         external,
         publishers,
+        references,
     };
     let gathered = into_gathered(&cfg, &explicit, train, deploy_branch, &client, collected);
     let mut built = plan::build(&rules, gathered);

@@ -40,6 +40,7 @@ fn suggest(prs: Vec<Pr>) -> Vec<Bundle> {
             .collect(),
         external: BTreeMap::new(),
         publishers: Publishers::new(),
+        references: Default::default(),
     });
     bundle::suggest(&planned.items, DEPLOY, "deploy/")
 }

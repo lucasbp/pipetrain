@@ -45,6 +45,7 @@ fn run(prs: Vec<Pr>) -> Planned {
             .collect(),
         external: BTreeMap::new(),
         publishers: Publishers::new(),
+        references: Default::default(),
     })
 }
 

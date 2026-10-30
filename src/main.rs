@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use pipetrain::command::init::{self, InitOptions};
@@ -185,32 +186,35 @@ fn apply_color(choice: clap::ColorChoice) {
     });
 }
 
-fn main() -> ExitCode {
-    let cli = Cli::parse();
-    let result = match cli.command {
-        Command::Doctor(args) => {
-            apply_color(args.color);
-            doctor::run(DoctorOptions {
-                config: args.config,
-                profile: args.profile,
-                orgs: args.orgs,
-                json: args.json,
-            })
-        }
-        Command::Plan(args) => {
-            apply_color(args.color);
-            plan(PlanOptions {
-                prs: args.prs,
-                all: args.all,
-                json: args.json,
-                emit: args.emit,
-                config: args.config,
-                profile: args.profile,
-                orgs: args.orgs,
-                date: args.date,
-                verbose: args.verbose,
-            })
-        }
+fn run_doctor(args: DoctorArgs) -> Result<i32> {
+    apply_color(args.color);
+    doctor::run(DoctorOptions {
+        config: args.config,
+        profile: args.profile,
+        orgs: args.orgs,
+        json: args.json,
+    })
+}
+
+fn run_plan(args: PlanArgs) -> Result<i32> {
+    apply_color(args.color);
+    plan(PlanOptions {
+        prs: args.prs,
+        all: args.all,
+        json: args.json,
+        emit: args.emit,
+        config: args.config,
+        profile: args.profile,
+        orgs: args.orgs,
+        date: args.date,
+        verbose: args.verbose,
+    })
+}
+
+fn run_command(command: Command) -> Result<i32> {
+    match command {
+        Command::Doctor(args) => run_doctor(args),
+        Command::Plan(args) => run_plan(args),
         Command::Profiles(args) => profiles::run(ProfilesOptions {
             config: args.config,
         }),
@@ -223,8 +227,11 @@ fn main() -> ExitCode {
             force: args.force,
             verbose: args.verbose,
         }),
-    };
-    match result {
+    }
+}
+
+fn dispatch(command: Command) -> ExitCode {
+    match run_command(command) {
         Ok(0) => ExitCode::SUCCESS,
         Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
         Err(err) => {
@@ -232,4 +239,8 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn main() -> ExitCode {
+    dispatch(Cli::parse().command)
 }

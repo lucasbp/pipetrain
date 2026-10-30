@@ -4,7 +4,7 @@ The planner turns a set of ready PRs into a directed graph: an edge `A -> B` mea
 
 The guiding principle is **when in doubt, serial**. Waiting is cheap and a wrong parallel merge is not, so every rule only ever adds an ordering constraint. The planner never removes one, and it never guesses a direction it cannot justify: it asks a question instead (see "Questions").
 
-Code: `src/planner.rs` (rules, graph, stages, lanes), `src/planner/order.rs` (the `order` rule), `src/discovery.rs` (which PRs are in), `src/contained.rs` (PRs already in the base or the train by commit), `src/content.rs` (same, by file content), `src/bundle.rs` (deploy bundling suggestion), `src/detect.rs` (Depends-On and package bumps), `src/config.rs` (gate, layer, target matching).
+Code: `src/planner.rs` (rules, graph, stages, lanes), `src/planner/order.rs` (the `order` rule), `src/planner/dependency.rs` (the `dependency` rule), `src/manifest.rs` (manifest parsing: published and referenced package ids), `src/discovery.rs` (which PRs are in), `src/contained.rs` (PRs already in the base or the train by commit), `src/content.rs` (same, by file content), `src/bundle.rs` (deploy bundling suggestion), `src/detect.rs` (Depends-On and package bumps), `src/config.rs` (gate, layer, target matching).
 
 ## What goes into the plan
 
@@ -94,7 +94,7 @@ When a PR bumps a package that another repo in the plan publishes, the publisher
 
 Bumps are read from changed files: `.csproj`, `.fsproj`, `.props` and `.targets` (`PackageReference` or `PackageVersion` with `Include` or `Update` and a `Version` or `VersionOverride`), and `package.json` (semver values, ignoring `name` and `version`). Lock files are ignored.
 
-Publishers come from a scan of the repos that have a ready PR (manifests found by file name: `.csproj`, `.fsproj`, `package.json`, skipping `node_modules`, `bin`, `obj`, `.git`; shallowest first, at most 40 per repo), then `[packages]` in the config overrides the scan for the package it names. The scan only runs when some PR bumps a package that is not pinned in `[packages]`.
+Publishers come from a scan of the repos that have a ready PR (manifests found by file name: `.csproj`, `.fsproj`, `.props`, `package.json`, skipping `node_modules`, `bin`, `obj`, `.git`; shallowest first, at most 40 per repo), then `[packages]` in the config overrides the scan for the package it names. The scan runs when some PR bumps a package that is not pinned in `[packages]`, or when two or more repos have a ready PR (the `dependency` rule needs it). The same scan also collects the package ids each manifest references.
 
 A PR is never made to wait for its own repo.
 
@@ -106,15 +106,31 @@ Within one repo, if PR J has as base the head branch of PR I, then J goes before
 
 Each `[[order]]` table is a list of globs on `org/repo` (case-insensitive). A PR that matches an earlier glob goes before a PR that matches a later glob of the same list, whatever the head branch. PRs matched by the same glob, and PRs of the same repo, get no edge from this rule. A PR that matches none of the globs is left alone. The reason shown is `config order`.
 
-Why it sits here: it is a statement from the config, so it is stronger than the inferred rules that follow (`target`, `gate`, `layer`), and weaker than the three above, which describe this specific change.
+Why it sits here: it is a statement from the config, so it is stronger than the inferred rules that follow (`dependency`, `target`, `gate`, `layer`), and weaker than the three above, which describe this specific change.
 
-### 5. target
+### 5. dependency
+
+When repo B references a package that repo A publishes, a PR of A goes before a PR of B. Why: B's code builds against what A publishes, so A has to land first. The reason shown is `<B> references <package>, published by <A>`, with short repo names.
+
+What counts:
+
+- References are the package ids in `PackageReference` and `PackageVersion` (`Include` or `Update`) of `.csproj`, `.fsproj` and `.props` files, and the keys of `dependencies`, `devDependencies` and `peerDependencies` in `package.json`. Only repos that have a PR in the plan are scanned, within the same request budget as the `package` rule.
+- A `.csproj` publishes its `PackageId`. Without one it publishes its `AssemblyName`, or the file name without extension. It publishes only with `GeneratePackageOnBuild` or `IsPackable` set to `true`, or when it declares a `PackageId`. `IsPackable` set to `false` excludes it, and so do test projects (name ending in `.Tests` or `.Test`, or a reference to `Microsoft.NET.Test.Sdk`). A `package.json` publishes its `name`.
+- Ids compare case-insensitively. An id with an MSBuild `$(...)` stays ambiguous, as in the `package` rule, and `[packages]` still overrides the scan.
+- Only direct references count. A chain A, B, C is found one link at a time.
+- A PR is never made to wait for its own repo.
+
+If A and B reference each other's packages, no edge is added and the question `dependency-cycle` names both repos.
+
+Why it sits here: it is inferred from manifests, so any explicit rule above beats it, and it beats the defaults that follow.
+
+### 6. target
 
 PRs that deploy to the same target are serialized, lowest PR number first (adjusted so it never contradicts an edge already present). The target is `<group>@<base branch>`, where `<group>` is the `[targets]` value for the repo, or the repo itself (`org/repo`) when it is not listed. So two PRs against `main` in the same repo are serial, and two repos mapped to the same group are serial with each other.
 
 Why: two merges to one deploy pipeline race each other. This is the rule that makes "same repo, same branch" serial without anybody asking.
 
-### 6. gate
+### 7. gate
 
 A gate PR is one that needs a human to stop and confirm before anything else proceeds:
 
@@ -127,7 +143,7 @@ Every gate PR is ordered before every PR that is not a gate. Gate PRs have no ed
 
 Why gates are applied before layers: a migration must land before the code that reads it, whatever layer that code lives in. Letting the layer rule decide first could put the migration after its consumer.
 
-### 7. layer
+### 8. layer
 
 For each head branch open in 2 or more repos, PRs are ranked by the `[[layer]]` order in the config (first match on `org/repo`), and each rank goes before the next rank present. Why: a change that spans repos has to land bottom-up (library, client, API, backend-for-frontend, front) or the upper layer deploys against something that does not exist yet.
 
@@ -139,7 +155,7 @@ Why the layer map is config and not code: layers are the shape of one company's 
 
 Rules add edges one by one. An edge that would close a cycle is rejected, and the earlier edge stands. What happens next depends on the rule that lost:
 
-- `depends-on`, `package`, `stacked`, `order`: the loss is reported as `edge-conflict` on the PR that was supposed to wait.
+- `depends-on`, `package`, `stacked`, `order`, `dependency`: the loss is reported as `edge-conflict` on the PR that was supposed to wait.
 - `target` and `gate`: silent. These are defaults for safety, not statements about the change, so losing one is expected.
 - `layer`: reported as `edge-conflict`, except when either PR is a gate, in which case it stays silent (the gate rule already won, on purpose).
 
@@ -173,14 +189,17 @@ A question is something the planner could not decide or that you should know bef
 | `gate-has-predecessor` | planner | A DDL or infra PR must come after a non-gate PR by an earlier rule (for example a stacked PR into the train branch), so it cannot run first. | Confirm the DDL can run after that PR, or split it out. |
 | `manifests-truncated` | scan | A repo has more than 40 package manifests and only the shallowest were read. `pr` is `null`. | Pin the package under `[packages]`. |
 | `edge-conflict` | planner | A rule wanted X before Y, but an earlier rule already puts X after Y. The earlier rule won. | If the order is wrong, add a `Depends-On` to the PR that should go first. |
+| `dependency-cycle` | planner | Two repos reference each other's packages, so the `dependency` rule added no edge between them. `pr` is `null`. | Pin the order under `[[order]]` in the config. |
 | `sibling-not-ready` | discovery | The branch is also open in another repo whose PR is not ready (reasons given). Not raised for explicit PRs. | Hold this PR until the sibling is ready, or drop the sibling from the change. |
 | `stacked-not-ready` | discovery | A PR that merges into the train branch is not ready, so its changes would miss this one. Not raised for explicit PRs. | Get that PR ready before the train, or drop it from the deploy. |
 
-Only `layer-unknown`, `package-ambiguous`, `tree-truncated` and `manifests-truncated` are fixed by editing the TOML. The rest are fixed on the PRs themselves, because they describe the state of the change, not the shape of the architecture.
+Only `layer-unknown`, `package-ambiguous`, `tree-truncated`, `manifests-truncated` and `dependency-cycle` are fixed by editing the TOML. The rest are fixed on the PRs themselves, because they describe the state of the change, not the shape of the architecture.
 
 ## Known limits
 
 - A PR with more than 300 changed files is read partially (`files-truncated`).
 - Package publishers are found by manifest scan, at most 40 manifests per repo, and a truncated tree can hide one.
+- The `dependency` rule sees NuGet and npm references inside one ecosystem. A NuGet package that feeds an npm package, or the reverse, is not detectable from manifests.
+- Only direct references count, and the scan reads at most 40 manifests per repo.
 - No rule reads code: ordering is inferred from branches, files and PR text, never from what the code does.
 - The planner decides order, not safety. It does not know whether a migration is backward compatible.

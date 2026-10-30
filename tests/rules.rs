@@ -49,6 +49,7 @@ fn run(
             .collect(),
         external,
         publishers,
+        references: Default::default(),
     })
 }
 

@@ -45,6 +45,7 @@ fn run(cfg: &Config, prs: Vec<Pr>) -> Planned {
             .collect(),
         external: BTreeMap::new(),
         publishers: Publishers::new(),
+        references: Default::default(),
     })
 }
 
@@ -90,6 +91,7 @@ fn queue(cfg: &Config, prs: Vec<Pr>) -> Vec<String> {
             questions: Vec::new(),
             external: BTreeMap::new(),
             publishers: Publishers::new(),
+            references: Default::default(),
             max_parallel: 4,
             requests: 1,
             rate_remaining: Some(4000),

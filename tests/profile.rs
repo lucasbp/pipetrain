@@ -479,6 +479,7 @@ fn built() -> Plan {
             questions: Vec::new(),
             external: BTreeMap::new(),
             publishers: Publishers::new(),
+            references: Default::default(),
             max_parallel: 4,
             requests: 1,
             rate_remaining: Some(4000),
