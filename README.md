@@ -43,6 +43,7 @@ pipetrain plan [OPTIONS] [PRS]...
 | `--org <org>` | Org to look at. Repeatable. Overrides `orgs` in the config. |
 | `--date dd-mm-yyyy` | Train date, instead of today. For example `--date 29-10-2026`. |
 | `--verbose` | Log every API request to stderr. |
+| `--color auto\|always\|never` | Colors in the text output. `auto` (the default) colors only on a terminal and honors `NO_COLOR`. `always` colors even when piped, `never` never does. `--json` is never colored. |
 
 PR references are written as `org/repo#123`. A PR that cannot be found stops the run.
 
@@ -84,51 +85,68 @@ Both are read-only. The bundle is a suggestion: pipetrain does not create the br
 
 ## Example output
 
-An invented run for the org `acme`:
+An invented run for the org `acme`, shown without colors (what `--color never` prints). When a plan has a single org, the `acme/` prefix is dropped from PR names:
 
 ```
 pipetrain plan  (read-only, nothing was merged)
   train     deploy/29-10-2026
   orgs      acme
-  found     7 ready, 2 skipped, 1 questions
+  found     8 ready, 2 skipped, 1 questions
   parallel  peak 3 at once (cap 4)
-  deploys   7 now, 6 after bundling
+  deploys   8 now, 7 after bundling
   api       23 requests, 4811 left
 
+WHERE IT CAME FROM  how each PR got into the queue
+  ● train   1 ready, 1 skipped  head is deploy/29-10-2026
+  ● shared  7 ready, 1 skipped  same head branch in 2 or more repos
+        feat/invoice-export  billing-api#233 · orders-web#91
+        feat/invoice-totals  billing-api#230 · docs-site#5
+        feat/order-status  shared-lib#7 · orders-client#12 · orders-web#88
+
+ORDER  a step starts when every PR of the step above is merged and deployed
+  pause orders-api#41 DDL  (you confirm first)
+  step 1  billing-api#230 · docs-site#5 · shared-lib#7
+  step 2  billing-api#233 · orders-client#12
+  step 3  orders-web#91 · orders-web#88
+
 GATE  runs first, pauses for your confirmation
-    acme/orders-api#41     [api] Add order status column
-        DDL (db/migrations/0042_status.sql): every lane below waits for this
+    orders-api#41     [api]    train   Add order status column
+        DDL (db/migrations/0042_status.sql)  every lane below waits for this
 
 LANE 1
-  s1    acme/billing-api#230   [api] Round invoice totals to cents
-  s2    acme/billing-api#233   [api] Add invoice export endpoint
-          after acme/billing-api#230  (target: same deploy target acme/billing-api@main)
+  s1   billing-api#230   [api]    shared  Round invoice totals to cents
+  s2   billing-api#233   [api]    shared  Add invoice export endpoint
+            after billing-api#230  (target: same deploy target acme/billing-api@main)
+  s3   orders-web#91     [front]  shared  Show the invoice export button
+            after billing-api#233  (layer: layer api goes before layer front on branch `feat/invoice-export`)
 
 LANE 2
-  s1  ? acme/docs-site#5       Document the order status field
+  s1 ? docs-site#5                shared  Document the invoice totals
 
 LANE 3
-  s1    acme/shared-lib#7      [lib] Add order status enum
-  s2    acme/orders-client#12  [client] Expose order status in the client
-          after acme/shared-lib#7  (layer: layer lib goes before layer client on branch `feat/order-status`)
-  s3    acme/orders-web#88     [front] Show order status badge
-          after acme/orders-client#12  (layer: layer client goes before layer front on branch `feat/order-status`)
+  s1   shared-lib#7      [lib]    shared  Add order status enum
+  s2   orders-client#12  [client] shared  Expose order status in the client
+            after shared-lib#7  (layer: layer lib goes before layer client on branch `feat/order-status`)
+  s3   orders-web#88     [front]  shared  Show order status badge
+            after orders-client#12  (layer: layer client goes before layer front on branch `feat/order-status`)
 
 BUNDLES  one deploy branch instead of N deploys (suggestion, nothing was changed)
-  acme/billing-api  2 PRs into main -> 1 deploy, saves 1
-        create deploy/29-10-2026 from main, retarget acme/billing-api#230, acme/billing-api#233, merge them there, then open one PR deploy/29-10-2026 -> main
+  billing-api  2 PRs into main -> 1 deploy, saves 1
+        create deploy/29-10-2026 from main, retarget billing-api#230, billing-api#233, merge them there, then open one PR deploy/29-10-2026 -> main
 
 SKIPPED  not ready, left out of the plan
-  acme/billing-api#228  Fix rounding in invoice PDF  (already in main)
-  acme/billing-api#231  WIP retry failed charges  (draft)
+  billing-api#228  Fix rounding in invoice PDF  [train: deploy/29-10-2026]  (already in main)
+  billing-api#231  WIP retry failed charges  [shared: feat/retry-charges]  (draft)
 
 ?  QUESTIONS  the planner could not decide these
-  acme/docs-site#5  [layer-unknown]  acme/docs-site is not in any layer, so its place on branch `feat/order-status` is undecided
+  docs-site#5  [layer-unknown]  acme/docs-site is not in any layer, so its place on branch `feat/invoice-totals` is undecided
         fix: add the repo to a [[layer]] in the config
 ```
 
 How to read it:
 
+- **WHERE IT CAME FROM**: how each PR got into the queue, with its scope and the criterion. `train`: the PR head is the train branch. `into-train`: the PR targets the train branch. `shared`: the head branch is open in 2 or more repos. `released`: approved PR on any branch, from `--all`. `explicit`: named on the command line. Each scope shows how many PRs are ready and how many were skipped, and `shared` also lists which PRs share each branch.
+- **ORDER**: the whole plan in one line per step. A step starts only when every PR of the step above is merged and deployed. `pause` is the gate (DDL or infra): you confirm before anything else starts. The lanes below say why each PR is where it is.
 - **GATE**: a PR that needs a human to stop and confirm first (a database change, or infrastructure). It goes before everything else and is not part of any lane.
 - **LANE**: a chain of PRs. Lanes are independent of each other, so they can run side by side. Inside a lane, merge top to bottom.
 - **s1, s2, s3**: the stage. PRs with the same stage have nothing between them and can merge at the same time.
@@ -191,4 +209,4 @@ pipetrain does not merge, push, approve, comment, label, re-run checks or write 
 
 ## License
 
-MIT.
+MIT, by Lucas Passos. See [LICENSE](LICENSE).

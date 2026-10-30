@@ -207,7 +207,7 @@ pub fn plan(opts: PlanOptions) -> Result<()> {
     if opts.json {
         println!("{}", serde_json::to_string_pretty(&built)?);
     } else {
-        print!("{}", render::text(&built));
+        anstream::print!("{}", render::text(&built));
     }
     Ok(())
 }

@@ -54,20 +54,35 @@ struct PlanArgs {
 
     #[arg(long, help = "Log every API request to stderr")]
     verbose: bool,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value = "auto",
+        help = "Colors: auto (only on a terminal, honors NO_COLOR), always, never"
+    )]
+    color: clap::ColorChoice,
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
-        Command::Plan(args) => plan(PlanOptions {
-            prs: args.prs,
-            all: args.all,
-            json: args.json,
-            config: args.config,
-            orgs: args.orgs,
-            date: args.date,
-            verbose: args.verbose,
-        }),
+        Command::Plan(args) => {
+            anstream::ColorChoice::write_global(match args.color {
+                clap::ColorChoice::Always => anstream::ColorChoice::Always,
+                clap::ColorChoice::Never => anstream::ColorChoice::Never,
+                clap::ColorChoice::Auto => anstream::ColorChoice::Auto,
+            });
+            plan(PlanOptions {
+                prs: args.prs,
+                all: args.all,
+                json: args.json,
+                config: args.config,
+                orgs: args.orgs,
+                date: args.date,
+                verbose: args.verbose,
+            })
+        }
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
