@@ -212,6 +212,164 @@ fn a_gate_alone_has_no_trailing_pause() {
     assert_eq!(emit::queue_lines(&plan), vec![format!("merge:{GATE}")]);
 }
 
+fn synthetic(gate: bool, specs: &[(&str, u64, Option<usize>, usize)]) -> Plan {
+    let mut plan = without_gate(build());
+    let template = plan
+        .items
+        .iter()
+        .find(|i| !i.manual_pause)
+        .expect("a non-gate item")
+        .clone();
+    plan.items = specs
+        .iter()
+        .map(|(repo, number, rank, stage)| {
+            let mut item = template.clone();
+            item.id = format!("acme/{repo}#{number}");
+            item.org = "acme".to_string();
+            item.repo = (*repo).to_string();
+            item.number = *number;
+            item.layer_rank = *rank;
+            item.stage = *stage;
+            item.manual_pause = gate;
+            item
+        })
+        .collect();
+    plan.gate = if gate {
+        plan.items.iter().map(|i| i.id.clone()).collect()
+    } else {
+        Vec::new()
+    };
+    plan
+}
+
+fn ids(lines: &[String]) -> Vec<&str> {
+    items_only(lines)
+        .into_iter()
+        .map(|l| l.strip_prefix("merge:").unwrap())
+        .collect()
+}
+
+#[test]
+fn inside_a_stage_layer_rank_then_number_then_slug() {
+    let plan = synthetic(
+        false,
+        &[
+            ("front-a", 2, Some(3), 1),
+            ("svc-b", 9, Some(1), 1),
+            ("svc-a", 9, Some(1), 1),
+            ("lib-z", 40, Some(0), 1),
+            ("svc-c", 3, Some(1), 1),
+            ("bff-a", 1, Some(2), 2),
+            ("lib-y", 50, Some(0), 2),
+        ],
+    );
+    let lines = emit::queue_lines(&plan);
+    assert_eq!(
+        ids(&lines),
+        vec![
+            "acme/lib-z#40",
+            "acme/svc-c#3",
+            "acme/svc-a#9",
+            "acme/svc-b#9",
+            "acme/front-a#2",
+            "acme/lib-y#50",
+            "acme/bff-a#1",
+        ]
+    );
+}
+
+#[test]
+fn prs_without_a_layer_come_after_layered_ones_in_the_stage() {
+    let plan = synthetic(
+        false,
+        &[
+            ("tool-a", 1, None, 1),
+            ("front-a", 8, Some(3), 1),
+            ("tool-b", 2, None, 1),
+            ("svc-a", 5, Some(1), 1),
+            ("tool-c", 1, None, 2),
+        ],
+    );
+    let lines = emit::queue_lines(&plan);
+    assert_eq!(
+        ids(&lines),
+        vec![
+            "acme/svc-a#5",
+            "acme/front-a#8",
+            "acme/tool-a#1",
+            "acme/tool-b#2",
+            "acme/tool-c#1",
+        ]
+    );
+}
+
+#[test]
+fn the_gate_segment_is_first_and_uses_the_same_order() {
+    let mut plan = synthetic(
+        true,
+        &[
+            ("bff-g", 4, Some(2), 1),
+            ("svc-g", 7, Some(1), 1),
+            ("lib-g", 30, Some(0), 1),
+        ],
+    );
+    let mut rest = synthetic(
+        false,
+        &[("front-r", 1, Some(3), 1), ("lib-r", 9, Some(0), 1)],
+    );
+    plan.items.append(&mut rest.items);
+    let lines = emit::queue_lines(&plan);
+    assert_eq!(
+        lines,
+        vec![
+            "merge:acme/lib-g#30".to_string(),
+            "merge:acme/svc-g#7".to_string(),
+            "merge:acme/bff-g#4".to_string(),
+            PAUSE_LINE.to_string(),
+            "merge:acme/lib-r#9".to_string(),
+            "merge:acme/front-r#1".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn the_real_plan_is_sorted_by_the_rule_inside_every_stage() {
+    let plan = build();
+    let lines = emit::queue_lines(&plan);
+    let rest: Vec<&pipetrain::planner::Item> = lines
+        .iter()
+        .skip_while(|l| !l.starts_with('#'))
+        .skip(1)
+        .map(|l| {
+            let id = l.strip_prefix("merge:").unwrap();
+            plan.items.iter().find(|i| i.id == id).unwrap()
+        })
+        .collect();
+    let key = |i: &&pipetrain::planner::Item| {
+        (
+            i.stage,
+            i.layer_rank.unwrap_or(usize::MAX),
+            i.number,
+            i.org.clone(),
+            i.repo.clone(),
+        )
+    };
+    let mixed = rest
+        .windows(2)
+        .filter(|w| w[0].stage == w[1].stage && w[0].layer_rank != w[1].layer_rank)
+        .count();
+    assert!(mixed > 0);
+    assert!(rest.windows(2).all(|w| key(&w[0]) <= key(&w[1])));
+}
+
+#[test]
+fn the_json_shape_does_not_expose_the_layer_rank() {
+    let plan = build();
+    let value = serde_json::to_value(&plan.items[0]).unwrap();
+    assert!(value.get("layer_rank").is_none());
+    assert!(value.get("layer").is_some());
+}
+
 #[test]
 fn every_item_matches_the_format() {
     let shape = Regex::new(r"^merge:[^/\s]+/[^#\s]+#\d+$").unwrap();

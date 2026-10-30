@@ -17,9 +17,11 @@
 
 ## Order
 
-1. Gate PRs (database or infrastructure), in plan order.
+1. Gate PRs (database or infrastructure), in the order of the rule below.
 2. The pause line, only when at least one PR follows the gate. A gate with nothing after it prints no pause.
-3. Every other ready PR by stage, ties in the planner's order.
+3. Every other ready PR, in the order of the rule below.
+
+The rule: by stage first, then, inside one stage, by layer, then PR number, then repo slug (`org/repo`). The layer order is the order of the `[[layer]]` entries in the config, the first entry goes first (for example lib, client, api, bff, front). A PR whose repo is in no layer comes after every layered PR of its stage. The tiebreak only reorders PRs of the same stage: stages and `after` edges are never changed.
 
 Lanes are flattened into one list. The plan lets lanes run side by side, a serial runner cannot, so the queue is correct but slower than the lanes. Every `after` edge of the plan is respected.
 

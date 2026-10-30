@@ -59,6 +59,8 @@ pub struct Item {
     pub base: String,
     pub sha: String,
     pub layer: Option<String>,
+    #[serde(skip)]
+    pub layer_rank: Option<usize>,
     pub scope: String,
     pub gate: Option<GateKind>,
     pub gate_reason: Option<String>,
@@ -566,6 +568,7 @@ pub fn plan(input: PlanInput<'_>) -> Planned {
                     }
                 })
                 .collect();
+            let layer = rules.layer_of(&pr.key.slug());
             Item {
                 id: b.ids[i].clone(),
                 org: pr.key.org.clone(),
@@ -576,7 +579,8 @@ pub fn plan(input: PlanInput<'_>) -> Planned {
                 head: pr.head_ref.clone(),
                 base: pr.base_ref.clone(),
                 sha: pr.head_sha.clone(),
-                layer: rules.layer_of(&pr.key.slug()).map(|(_, n)| n.to_string()),
+                layer: layer.map(|(_, n)| n.to_string()),
+                layer_rank: layer.map(|(rank, _)| rank),
                 scope: scopes[i].clone(),
                 gate: gates[i],
                 gate_reason: gate_info[i].as_ref().map(|(_, reason)| reason.clone()),

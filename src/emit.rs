@@ -16,14 +16,34 @@ fn item_line(id: &str) -> String {
     format!("merge:{id}")
 }
 
+fn order_key(item: &Item) -> (usize, usize, u64, &str, &str) {
+    (
+        item.stage,
+        item.layer_rank.unwrap_or(usize::MAX),
+        item.number,
+        &item.org,
+        &item.repo,
+    )
+}
+
 fn flattened(plan: &Plan) -> Vec<&Item> {
     let mut rest: Vec<&Item> = plan.items.iter().filter(|i| !i.manual_pause).collect();
-    rest.sort_by_key(|i| i.stage);
+    rest.sort_by_key(|i| order_key(i));
     rest
 }
 
+fn gate_ids(plan: &Plan) -> Vec<&str> {
+    let mut gate: Vec<&Item> = plan
+        .gate
+        .iter()
+        .filter_map(|id| plan.items.iter().find(|i| i.id == *id))
+        .collect();
+    gate.sort_by_key(|i| order_key(i));
+    gate.into_iter().map(|i| i.id.as_str()).collect()
+}
+
 pub fn queue_lines(plan: &Plan) -> Vec<String> {
-    let mut lines: Vec<String> = plan.gate.iter().map(|id| item_line(id)).collect();
+    let mut lines: Vec<String> = gate_ids(plan).into_iter().map(item_line).collect();
     let rest = flattened(plan);
     if !lines.is_empty() && !rest.is_empty() {
         lines.push(PAUSE_LINE.to_string());
