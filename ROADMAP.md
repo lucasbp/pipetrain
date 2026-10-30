@@ -17,19 +17,19 @@ pipetrain plans the merge order of pull requests across repos. This file says wh
 - Deploy-branch bundle suggestions that save pipeline runs.
 - `--json` (schema 1), `--emit queue`, colored output with origin and order maps.
 - Typed errors that say what happened and what to do next.
+- `doctor`: checks the token source, API reach, rate limit, config and org visibility, with the exact command to fix each problem.
+- Profiles (`--profile`, `profiles`, `orgs`, `init`), selected by flag, working folder, `default_profile` or the only profile, and an explicit repo order in the config (`[[order]]`).
 
 ## Next
 
 Small, well understood, in this order:
 
-1. `doctor`: check the token source, API reach, rate limit, config and org visibility, with the exact command to fix each problem.
-2. Profiles: `--profile`, selected in this order: explicit flag, working folder, `default_profile`, the only profile, otherwise ask. Per-org sections in the output, `pipetrain orgs`, and `pipetrain init` proposing profiles from the orgs your `gh` login can see (prints the proposal, writes only with `--write`).
-3. A safe cache for data that never changes for a given sha (PR files, trees, manifests), with `--no-cache` and `--refresh`. Mutable data such as reviews and checks is never cached.
-4. More ways to find the train: a label in addition to the branch name.
-5. Package detection for `Cargo.toml` and `pyproject.toml`, next to npm and NuGet.
-6. A read-only conflict report: which PRs of a train will conflict and what kind of conflict it is.
-7. An explicit repo order in the config (`[[order]]`): when two listed repos are both in the plan, the earlier one goes first, even without a shared branch. The reason shows as `config order`.
-8. A `# wait` line in `--emit queue` when a PR publishes a package that a later PR consumes, naming the package and the version, so a runner can wait for the release before continuing. Checking the feed itself starts with GitHub Packages (NuGet) and the npm registry.
+1. Automatic dependency order from the manifests: when a repo references a package that another repo in the plan publishes, the publisher goes first and the reason names the package. This includes packages with no explicit `PackageId` (the project name is the id) and a `pipetrain order suggest` command that prints the discovered chain as an `[[order]]` block. An explicit `[[order]]` always wins over the automatic one. Dependencies between ecosystems (NuGet to npm) cannot be detected and stay explicit.
+2. A safe cache for data that never changes for a given sha (PR files, trees, manifests), with `--no-cache` and `--refresh`. Mutable data such as reviews and checks is never cached.
+3. More ways to find the train: a label in addition to the branch name.
+4. Package detection for `Cargo.toml` and `pyproject.toml`, next to npm and NuGet.
+5. A read-only conflict report: which PRs of a train will conflict and what kind of conflict it is.
+6. A `# wait` line in `--emit queue` when a PR publishes a package that a later PR consumes, naming the package and the version, so a runner can wait for the release before continuing. Checking the feed itself starts with GitHub Packages (NuGet) and the npm registry.
 
 ## Later
 
