@@ -9,7 +9,7 @@ use crate::contained;
 use crate::content;
 use crate::detect;
 use crate::discovery::{self, Discovered, Scope, Skipped};
-use crate::github::{self, Client};
+use crate::github::{self, ApiError, Client};
 use crate::model::{Pr, PrKey, Question};
 use crate::plan::{self, Gathered, Plan};
 use crate::planner::{self, DepState};
@@ -78,7 +78,10 @@ fn discover(
         match client.pr(key)? {
             Some(pr) => prs.push(pr),
             None => {
-                bail!("{key} was not found; check the reference and that the token can read it")
+                return Err(ApiError::NotFound {
+                    what: key.to_string(),
+                }
+                .into());
             }
         }
     }

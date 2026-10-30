@@ -2,8 +2,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, bail};
-
+use super::error::ApiError;
 use crate::config::ApiConfig;
 
 pub(super) struct Guard {
@@ -29,21 +28,29 @@ impl Guard {
         }
     }
 
-    pub(super) fn before(&mut self, resource: &str, label: &str) -> Result<()> {
+    fn check_limits(&self, resource: &str) -> Result<(), ApiError> {
         if self.total >= self.max_total {
-            bail!(
-                "stopped after {} API requests (api.max_requests); raise it in the config if this is expected",
-                self.total
-            );
+            return Err(ApiError::Stopped {
+                message: format!(
+                    "stopped after {} API requests (api.max_requests); raise it in the config if this is expected",
+                    self.total
+                ),
+            });
         }
         if let Some(&left) = self.remaining.get(resource)
             && left < self.min_remaining
         {
-            bail!(
-                "stopped: only {left} GitHub {resource} API requests left in this window (api.min_remaining is {})",
-                self.min_remaining
-            );
+            return Err(ApiError::Stopped {
+                message: format!(
+                    "stopped: only {left} GitHub {resource} API requests left in this window (api.min_remaining is {})",
+                    self.min_remaining
+                ),
+            });
         }
+        Ok(())
+    }
+
+    fn pace(&mut self) {
         let window = Duration::from_secs(60);
         while self.stamps.front().is_some_and(|t| t.elapsed() >= window) {
             self.stamps.pop_front();
@@ -59,6 +66,11 @@ impl Guard {
             self.stamps.pop_front();
         }
         self.stamps.push_back(Instant::now());
+    }
+
+    pub(super) fn before(&mut self, resource: &str, label: &str) -> Result<(), ApiError> {
+        self.check_limits(resource)?;
+        self.pace();
         self.total += 1;
         if self.verbose {
             eprintln!("request {:>3}  {label}", self.total);

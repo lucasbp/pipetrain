@@ -4,30 +4,7 @@ use std::fmt::Write;
 use crate::config::GateKind;
 use crate::plan::Plan;
 use crate::planner::{Item, Rule};
-
-fn paint(code: &str, text: &str) -> String {
-    format!("\x1b[{code}m{text}\x1b[0m")
-}
-
-fn dim(text: &str) -> String {
-    paint("2", text)
-}
-
-fn bold(text: &str) -> String {
-    paint("1", text)
-}
-
-fn red(text: &str) -> String {
-    paint("1;31", text)
-}
-
-fn green(text: &str) -> String {
-    paint("32", text)
-}
-
-fn yellow(text: &str) -> String {
-    paint("33", text)
-}
+use crate::style::{bold, dim, green, paint, red, yellow};
 
 fn heading(color: &str, title: &str, note: &str) -> String {
     format!("{}  {}", paint(&format!("1;{color}"), title), dim(note))
