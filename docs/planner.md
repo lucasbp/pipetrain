@@ -4,7 +4,7 @@ The planner turns a set of ready PRs into a directed graph: an edge `A -> B` mea
 
 The guiding principle is **when in doubt, serial**. Waiting is cheap and a wrong parallel merge is not, so every rule only ever adds an ordering constraint. The planner never removes one, and it never guesses a direction it cannot justify: it asks a question instead (see "Questions").
 
-Code: `src/planner.rs` (rules, graph, stages, lanes), `src/discovery.rs` (which PRs are in), `src/contained.rs` (PRs already in the base or the train), `src/bundle.rs` (deploy bundling suggestion), `src/detect.rs` (Depends-On and package bumps), `src/config.rs` (gate, layer, target matching).
+Code: `src/planner.rs` (rules, graph, stages, lanes), `src/discovery.rs` (which PRs are in), `src/contained.rs` (PRs already in the base or the train by commit), `src/content.rs` (same, by file content), `src/bundle.rs` (deploy bundling suggestion), `src/detect.rs` (Depends-On and package bumps), `src/config.rs` (gate, layer, target matching).
 
 ## What goes into the plan
 
@@ -19,7 +19,7 @@ A ready PR can still have nothing left to merge: its commits may already be in i
 After discovery and before anything is read about the PR's files, each ready PR (explicit ones included) is compared on GitHub, through GraphQL `ref.compare(headRef: <sha>)`, in batches of up to 20 comparisons per request, against:
 
 - its base branch, always;
-- the train branch of the run date (`train_prefix` + `dd-mm-yyyy`), unless the PR targets the train branch or comes from it.
+- the train branch of the run date (`train_prefix` + the date in the configured `train_date_format`, default `dd-mm-yyyy`), unless the PR targets the train branch or comes from it.
 
 When `aheadBy` is 0 against a branch, the PR head adds nothing there, and the PR goes to `skipped` with the single reason `already in <ref>`, where `<ref>` is the first branch that contains it. It takes no part in ordering and raises no question.
 
@@ -28,7 +28,25 @@ Limits of the check:
 - A branch that does not exist in the repo counts as "not contained", so a repo without that train branch is never skipped because of it.
 - A PR with no head SHA is not checked.
 - Any GraphQL error other than a missing ref aborts the run, like any other GitHub failure.
-- It compares commits, not content: a PR squash-merged into the base still looks ahead of it, because the squash commit is a different commit.
+- The commit check alone does not see a squash merge: the squash commit is a different commit, so the PR still looks ahead. The content check below covers that.
+
+#### Same content in the base or in the train
+
+A second check runs on the PRs that survive the commit check, once their changed files are loaded. For each branch from the list above, it compares the Git blob id at `<branch>:<path>` with the one at `<head sha>:<path>`, for every file the PR changes, through GraphQL `object(expression: ...) { oid }`. If every file has the same blob id on that branch, the base already holds exactly what the PR would bring, typically because another PR was squash-merged first. The PR goes to `skipped` with the single reason `already in <ref> (same content)`.
+
+What it detects:
+
+- A PR whose every changed file already has identical content in the base or in the train branch, however it got there (squash merge of another PR, a cherry-pick, a manual commit).
+- A deletion that is already applied: a path missing on both sides counts as equal, as long as the branch itself exists.
+
+What it does not detect, and keeps in the plan:
+
+- Renamed files. Only the new path is compared, so a rename is kept unless the new path already matches the branch.
+- PRs with more than 100 changed files, and PRs with no changed files.
+- PRs whose file list is incomplete (the files API stops at 300 files).
+- Partial overlap: if any one file differs, or any blob id could not be read, the PR is kept. When in doubt, keep.
+
+Cost: the commit check and this one are separate. This one needs 2 lookups per file plus 1 per branch to confirm the branch exists, sent in batches of at most 50 lookups per request, all through the same request guard as every other call. A 100-file PR against one branch is 201 lookups, 5 requests. Files are loaded only for PRs that the commit check did not already remove.
 
 ### Bundling deploys
 
@@ -44,7 +62,7 @@ Review and checks, as read from GitHub:
 
 How PRs are discovered (scope, in this order of precedence):
 
-1. `train`: the head branch is the train branch (`train_prefix` + `dd-mm-yyyy`, case-insensitive).
+1. `train`: the head branch is the train branch (`train_prefix` + the date in the configured `train_date_format`, default `dd-mm-yyyy`; case-insensitive).
 2. `shared-branch`: the same head branch is open in 2 or more repos. Ignored for this purpose: the train branch, anything starting with `train_prefix` or with an `ignore_branch_prefixes` entry, and `main`, `master`, `develop`, `development`.
 3. `into-train`: the base branch is the train branch.
 4. `explicit`: PRs passed on the command line. They skip discovery and go through the same readiness check. A PR that cannot be found aborts the run.

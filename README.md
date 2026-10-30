@@ -41,7 +41,7 @@ pipetrain plan [OPTIONS] [PRS]...
 |---|---|
 | `--config <path>` | Use this config file. An unreadable file is an error. |
 | `--org <org>` | Org to look at. Repeatable. Overrides `orgs` in the config. |
-| `--date dd-mm-yyyy` | Train date, instead of today. For example `--date 29-10-2026`. |
+| `--date <date>` | Train date, instead of today. Accepts the date format of `train_date_format` (default `dd-mm-yyyy`, for example `--date 29-10-2026`) or ISO `yyyy-mm-dd` (`--date 2026-10-29`). |
 | `--verbose` | Log every API request to stderr. |
 | `--color auto\|always\|never` | Colors in the text output. `auto` (the default) colors only on a terminal and honors `NO_COLOR`. `always` colors even when piped, `never` never does. `--json` is never colored. |
 
@@ -49,7 +49,7 @@ PR references are written as `org/repo#123`. A PR that cannot be found stops the
 
 ## How the queue is discovered
 
-The train branch is `train_prefix` plus the date, for example `deploy/29-10-2026`. In each org, pipetrain searches open, non-archived PRs and keeps the ones that are:
+The train branch is `train_prefix` plus the date, for example `deploy/29-10-2026`. The date is written with `train_date_format` (default `dd-mm-yyyy`). In each org, pipetrain searches open, non-archived PRs and keeps the ones that are:
 
 - on the train branch (`train`);
 - on a branch name that is open in 2 or more repos, which is how one change spans repos (`shared-branch`);
@@ -77,7 +77,7 @@ The `train` line of the output reads `all released PRs`. When a plain `pipetrain
 
 ## Two checks before the order
 
-**Already merged.** A ready PR whose commits are already in its base branch, or already in the train branch, has nothing left to merge. pipetrain compares each ready PR with those branches on GitHub (GraphQL, up to 20 comparisons per request). When the PR adds nothing, it goes to `SKIPPED` with the reason `already in <branch>` and stays out of the plan. A branch that does not exist counts as "not contained", and a PR with no head commit is not checked.
+**Already merged.** A ready PR whose commits are already in its base branch, or already in the train branch, has nothing left to merge. pipetrain compares each ready PR with those branches on GitHub (GraphQL, up to 20 comparisons per request). When the PR adds nothing, it goes to `SKIPPED` with the reason `already in <branch>` and stays out of the plan. A branch that does not exist counts as "not contained", and a PR with no head commit is not checked. A second check catches squash merges: when every file the PR changes already has identical content in the base or the train branch, the PR is skipped with `already in <branch> (same content)`. It does not follow renamed files and does not look at PRs with more than 100 files; those stay in the plan.
 
 **Bundling deploys.** When 2 or more ready PRs of the same repo target the same base (for example `main`), each one is a deploy of that repo. The plan then adds a `BUNDLES` section suggesting one train branch instead: create it from the base, retarget those PRs to it, merge them there, and open a single PR from it to the base. N deploys become 1, and the `deploys` line shows both numbers. Bases that are themselves train branches are not bundled.
 
@@ -171,9 +171,11 @@ With no file at all it runs on built-in defaults, which means you must pass `--o
 
 [pipetrain.example.toml](pipetrain.example.toml) lists every key with its default. Unknown keys are rejected, so a typo is an error and not a silent no-op. The layer map is the part you must write yourself: pipetrain cannot know which of your repos is a library and which is a front end. Why is explained in [docs/planner.md](docs/planner.md).
 
+`train_date_format` is how the date appears in the train branch name, as a [chrono strftime](https://docs.rs/chrono/latest/chrono/format/strftime/index.html) string. The default is `%d-%m-%Y` (`deploy/29-10-2026`); `%Y-%m-%d` gives `deploy/2026-10-29`. The config is rejected, with the key named in the error, when the format is empty, is not a valid strftime string, cannot format a plain date (for example it uses a time field), or gives the same text for two different days because it has no day field. `--date` accepts this format or ISO `yyyy-mm-dd`.
+
 ## API budget
 
-A run spends GitHub API requests: a search per org, a few per PR, one batched comparison per 20 PRs for the "already merged" check, one tree per repo it needs to scan. Three settings under `[api]` keep that bounded:
+A run spends GitHub API requests: a search per org, a few per PR, one batched comparison per 20 PRs for the "already merged" check, one request per 25 changed files for the same-content check, one tree per repo it needs to scan. Three settings under `[api]` keep that bounded:
 
 | Key | Default | Behavior |
 |---|---|---|
@@ -206,6 +208,15 @@ pipetrain does not merge, push, approve, comment, label, re-run checks or write 
 - [docs/plan-json.md](docs/plan-json.md): the `--json` contract.
 - [docs/saving-pipelines.md](docs/saving-pipelines.md): why the plan checks "already in the base", why it suggests a deploy branch, and how to apply it by hand.
 - [pipetrain.example.toml](pipetrain.example.toml): the config, annotated.
+
+## Development
+
+CI runs `cargo clippy --all-targets -- -D warnings` and `cargo test --locked` on Linux, macOS and Windows for every push to `main` and every pull request. To run the same checks locally:
+
+```
+cargo clippy --all-targets -- -D warnings
+cargo test --locked
+```
 
 ## License
 

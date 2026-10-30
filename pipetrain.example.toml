@@ -8,8 +8,13 @@ orgs = ["acme"]
 # Cap on PRs the plan shows side by side in one stage.
 max_parallel = 4
 
-# The train branch is train_prefix + dd-mm-yyyy, for example deploy/29-10-2026.
+# The train branch is train_prefix + the date, for example deploy/29-10-2026.
 train_prefix = "deploy/"
+
+# How the date is written in the train branch name (chrono strftime). The
+# default is dd-mm-yyyy. It must include the day, so that two days never name
+# the same branch. Example: "%Y-%m-%d" gives deploy/2026-10-29.
+# train_date_format = "%Y-%m-%d"
 
 # Head branches starting with these prefixes never count as a shared branch.
 ignore_branch_prefixes = ["dependabot/", "renovate/"]

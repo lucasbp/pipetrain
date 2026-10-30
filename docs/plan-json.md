@@ -17,8 +17,8 @@ The structs live in `src/plan.rs` (`Plan`, `SkippedOut`, `Stats`), `src/bundle.r
 |---|---|---|
 | `schema` | integer | Contract version. `1`. |
 | `generated_at` | string | RFC 3339 timestamp with seconds and the local UTC offset, for example `2026-10-29T14:03:11-03:00`. |
-| `train` | string | The train branch (`train_prefix` + `dd-mm-yyyy`), the literal `explicit PRs` when PRs were passed on the command line, or the literal `all released PRs` with `--all`. |
-| `deploy_branch` | string | The train branch of the run date (`train_prefix` + `dd-mm-yyyy`). Unlike `train`, it is always a real branch name, even when PRs were passed on the command line. It is the branch a bundle suggestion names. Never `null`. |
+| `train` | string | The train branch (`train_prefix` + the date in the configured `train_date_format`, default `dd-mm-yyyy`), the literal `explicit PRs` when PRs were passed on the command line, or the literal `all released PRs` with `--all`. |
+| `deploy_branch` | string | The train branch of the run date (`train_prefix` + the date in the configured `train_date_format`, default `dd-mm-yyyy`). Unlike `train`, it is always a real branch name, even when PRs were passed on the command line. It is the branch a bundle suggestion names. Never `null`. |
 | `orgs` | string[] | Organizations searched, after `--org` or the config. |
 | `items` | Item[] | Every ready PR in the plan, sorted by `org`, `repo`, `number`. Gate PRs are included. |
 | `gate` | string[] | Ids of the PRs that are gates, sorted by `org`, `repo`, `number`. Empty when there is none. |
@@ -88,7 +88,7 @@ One suggestion: in `repo`, several PRs go to the same `base`, so they would depl
 | `url` | string | PR web URL. |
 | `scope` | string | `train`, `shared-branch`, `into-train`, `explicit` or `released`. |
 | `head` | string | The head branch of the skipped PR, so a `shared-branch` skip can be traced to the branch name that matched. |
-| `reasons` | string[] | One or more of: `already merged`, `closed`, `draft`, `changes requested`, `review required`, `not approved`, `checks pending`, `checks failing`, `no checks reported`, `merge conflict`, `mergeability unknown, retry in a minute`, `already in <ref>`. A merged or closed PR carries only that one reason. `already in <ref>` also stands alone, where `<ref>` is the branch that already contains the PR head: its base branch, or `deploy_branch`. It is the only reason with a variable part, so match it by the `already in ` prefix. |
+| `reasons` | string[] | One or more of: `already merged`, `closed`, `draft`, `changes requested`, `review required`, `not approved`, `checks pending`, `checks failing`, `no checks reported`, `merge conflict`, `mergeability unknown, retry in a minute`, `already in <ref>`, `already in <ref> (same content)`. A merged or closed PR carries only that one reason. `already in <ref>` also stands alone, where `<ref>` is the branch that already contains the PR head: its base branch, or `deploy_branch`. `already in <ref> (same content)` stands alone too: every file the PR changes has identical content in `<ref>`, though the commits differ (for example after a squash merge). These are the only reasons with a variable part, so match them by the `already in ` prefix; the `(same content)` suffix tells the two apart. |
 
 ## Question
 

@@ -16,12 +16,12 @@ const API: &str = "https://api.github.com";
 const FILE_PAGES: u32 = 3;
 
 pub fn token() -> Result<String> {
-    if let Ok(out) = Command::new("gh").args(["auth", "token"]).output() {
-        if out.status.success() {
-            let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !value.is_empty() {
-                return Ok(value);
-            }
+    if let Ok(out) = Command::new("gh").args(["auth", "token"]).output()
+        && out.status.success()
+    {
+        let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !value.is_empty() {
+            return Ok(value);
         }
     }
     match std::env::var("GH_TOKEN") {
@@ -60,13 +60,13 @@ impl Guard {
                 self.total
             );
         }
-        if let Some(&left) = self.remaining.get(resource) {
-            if left < self.min_remaining {
-                bail!(
-                    "stopped: only {left} GitHub {resource} API requests left in this window (api.min_remaining is {})",
-                    self.min_remaining
-                );
-            }
+        if let Some(&left) = self.remaining.get(resource)
+            && left < self.min_remaining
+        {
+            bail!(
+                "stopped: only {left} GitHub {resource} API requests left in this window (api.min_remaining is {})",
+                self.min_remaining
+            );
         }
         let window = Duration::from_secs(60);
         while self.stamps.front().is_some_and(|t| t.elapsed() >= window) {
@@ -140,10 +140,7 @@ impl Client {
                 .to_string();
             self.guard.remaining.insert(resource, left);
         }
-        let body: Value = response
-            .body_mut()
-            .read_json()
-            .unwrap_or_else(|_| Value::Null);
+        let body: Value = response.body_mut().read_json().unwrap_or(Value::Null);
         if (300..400).contains(&status) {
             bail!(
                 "GitHub redirected {label}: the repo was probably renamed or moved; update the reference"

@@ -1,12 +1,45 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use chrono::NaiveDate;
+use chrono::format::{Item, StrftimeItems};
 use globset::{Glob, GlobBuilder, GlobSet, GlobSetBuilder};
 use serde::Deserialize;
 
 use crate::model::{ChangedFile, Pr};
+
+pub const DEFAULT_TRAIN_DATE_FORMAT: &str = "%d-%m-%Y";
+
+pub fn render_date(format: &str, date: NaiveDate) -> Option<String> {
+    let mut out = String::new();
+    write!(out, "{}", date.format(format)).ok()?;
+    Some(out)
+}
+
+pub fn validate_date_format(format: &str) -> Result<()> {
+    if format.is_empty() {
+        bail!("`train_date_format` is empty");
+    }
+    if StrftimeItems::new(format).any(|item| matches!(item, Item::Error)) {
+        bail!("`train_date_format` is not a valid strftime format: `{format}`");
+    }
+    let first = NaiveDate::from_ymd_opt(2026, 10, 29).expect("constant date is valid");
+    let second = NaiveDate::from_ymd_opt(2026, 10, 30).expect("constant date is valid");
+    let (Some(a), Some(b)) = (render_date(format, first), render_date(format, second)) else {
+        bail!(
+            "`train_date_format` `{format}` cannot format a date (it uses a time or time zone field)"
+        );
+    };
+    if a == b {
+        bail!(
+            "`train_date_format` `{format}` gives the same text for different days (`{a}`), so it needs a day field such as %d"
+        );
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -14,6 +47,7 @@ pub struct Config {
     pub orgs: Vec<String>,
     pub max_parallel: usize,
     pub train_prefix: String,
+    pub train_date_format: String,
     pub ignore_branch_prefixes: Vec<String>,
     pub allow_missing_checks: bool,
     pub checks_optional_repos: Vec<String>,
@@ -53,6 +87,7 @@ impl Default for Config {
             orgs: Vec::new(),
             max_parallel: 4,
             train_prefix: "deploy/".to_string(),
+            train_date_format: DEFAULT_TRAIN_DATE_FORMAT.to_string(),
             ignore_branch_prefixes: vec!["dependabot/".to_string(), "renovate/".to_string()],
             allow_missing_checks: false,
             checks_optional_repos: Vec::new(),
@@ -102,7 +137,9 @@ impl Config {
     }
 
     pub fn parse(text: &str) -> Result<Self> {
-        toml::from_str(text).context("invalid config")
+        let cfg: Self = toml::from_str(text).context("invalid config")?;
+        validate_date_format(&cfg.train_date_format)?;
+        Ok(cfg)
     }
 
     pub fn load(explicit: Option<&Path>) -> Result<(Self, Option<PathBuf>)> {

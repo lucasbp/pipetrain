@@ -49,7 +49,10 @@ struct PlanArgs {
     )]
     orgs: Vec<String>,
 
-    #[arg(long, help = "Train date as dd-mm-yyyy instead of today")]
+    #[arg(
+        long,
+        help = "Train date instead of today: the config's train_date_format (default dd-mm-yyyy) or ISO yyyy-mm-dd"
+    )]
     date: Option<String>,
 
     #[arg(long, help = "Log every API request to stderr")]

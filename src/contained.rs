@@ -118,11 +118,9 @@ pub fn apply(
     (kept, skipped)
 }
 
-pub fn filter(
-    client: &mut Client,
-    ready: Vec<(Pr, Scope)>,
-    train: &str,
-) -> Result<(Vec<(Pr, Scope)>, Vec<Skipped>)> {
+type Filtered = (Vec<(Pr, Scope)>, Vec<Skipped>);
+
+pub fn filter(client: &mut Client, ready: Vec<(Pr, Scope)>, train: &str) -> Result<Filtered> {
     let wanted = targets(&ready, train);
     if wanted.is_empty() {
         return Ok((ready, Vec::new()));

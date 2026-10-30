@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use chrono::NaiveDate;
 
-use crate::config::Config;
+use crate::config::{Config, DEFAULT_TRAIN_DATE_FORMAT, render_date};
 use crate::model::{Pr, Question, Review};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,7 +43,10 @@ pub struct Discovered {
 const PLAIN_BRANCHES: [&str; 4] = ["main", "master", "develop", "development"];
 
 pub fn train_branch(cfg: &Config, date: NaiveDate) -> String {
-    format!("{}{}", cfg.train_prefix, date.format("%d-%m-%Y"))
+    let formatted = render_date(&cfg.train_date_format, date)
+        .or_else(|| render_date(DEFAULT_TRAIN_DATE_FORMAT, date))
+        .unwrap_or_default();
+    format!("{}{}", cfg.train_prefix, formatted)
 }
 
 fn shared_branches(all: &[Pr], cfg: &Config, train: &str) -> HashSet<String> {

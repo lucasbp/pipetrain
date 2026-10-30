@@ -6,7 +6,7 @@ Two things in the plan exist to cut the number of deploys: the "already in the b
 
 A PR whose commits are already in its base branch has nothing to merge. Merging it again, or planning it, wastes a step and can trigger a deploy that changes nothing. Before planning, pipetrain compares the head commit of each ready PR with its base branch and, when the PR is not part of the train itself, with the train branch (`train_prefix` plus the date, for example `deploy/29-10-2026`). If the PR adds no commit to that branch, it goes to `SKIPPED` with the reason `already in <branch>`.
 
-The comparison is by commits, not by content. A PR that was squash-merged or rebased into the base has different commits, so it still looks ahead and is not detected. Close such a PR on GitHub.
+That comparison is by commits, so a PR whose change reached the base through a squash merge or a rebase still looks ahead. A second check covers it: when every file the PR changes already has identical content in the base or the train branch, the PR goes to `SKIPPED` with the reason `already in <branch> (same content)`. It does not follow renamed files and skips PRs with more than 100 files; close those on GitHub if they are redundant.
 
 ## Why the plan suggests a deploy branch
 

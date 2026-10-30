@@ -1,11 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use chrono::{Local, NaiveDate, SecondsFormat};
 
-use crate::config::{Config, Rules};
+use crate::config::{Config, Rules, render_date};
 use crate::contained;
+use crate::content;
 use crate::detect;
 use crate::discovery::{self, Discovered};
 use crate::github::{self, Client};
@@ -27,11 +28,23 @@ pub struct PlanOptions {
     pub verbose: bool,
 }
 
-fn parse_date(value: Option<&str>) -> Result<NaiveDate> {
-    match value {
-        None => Ok(Local::now().date_naive()),
-        Some(text) => NaiveDate::parse_from_str(text, "%d-%m-%Y")
-            .with_context(|| format!("--date must look like 29-10-2026, got `{text}`")),
+const ISO_DATE_FORMAT: &str = "%Y-%m-%d";
+
+pub fn parse_date(text: &str, format: &str) -> Result<NaiveDate> {
+    if let Ok(date) = NaiveDate::parse_from_str(text, format) {
+        return Ok(date);
+    }
+    if let Ok(date) = NaiveDate::parse_from_str(text, ISO_DATE_FORMAT) {
+        return Ok(date);
+    }
+    let sample = NaiveDate::from_ymd_opt(2026, 10, 29).expect("constant date is valid");
+    let configured = render_date(format, sample);
+    let iso = sample.format(ISO_DATE_FORMAT).to_string();
+    match configured {
+        Some(shown) if shown != iso => bail!(
+            "--date must look like {shown} (the configured train_date_format `{format}`) or {iso} (ISO), got `{text}`"
+        ),
+        _ => bail!("--date must look like {iso}, got `{text}`"),
     }
 }
 
@@ -129,7 +142,10 @@ pub fn plan(opts: PlanOptions) -> Result<()> {
         cfg.orgs = opts.orgs.clone();
     }
     let rules = Rules::new(&cfg)?;
-    let date = parse_date(opts.date.as_deref())?;
+    let date = match opts.date.as_deref() {
+        None => Local::now().date_naive(),
+        Some(text) => parse_date(text, &cfg.train_date_format)?,
+    };
     let deploy_branch = discovery::train_branch(&cfg, date);
 
     let mut explicit = Vec::new();
@@ -164,6 +180,9 @@ pub fn plan(opts: PlanOptions) -> Result<()> {
     skipped.extend(merged);
 
     load_files(&mut client, &mut ready)?;
+
+    let (ready, same) = content::filter(&mut client, ready, &deploy_branch)?;
+    skipped.extend(same);
 
     let prs: Vec<Pr> = ready.iter().map(|(p, _)| p.clone()).collect();
     let mut external = BTreeMap::new();
