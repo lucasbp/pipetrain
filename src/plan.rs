@@ -65,17 +65,8 @@ pub struct Gathered {
     pub rate_remaining: Option<u64>,
 }
 
-pub fn build(rules: &Rules, gathered: Gathered) -> Plan {
-    let planned = planner::plan(PlanInput {
-        rules,
-        prs: gathered.ready,
-        external: gathered.external,
-        publishers: gathered.publishers,
-    });
-    let mut questions = gathered.questions;
-    questions.extend(planned.questions);
-    let mut skipped: Vec<SkippedOut> = gathered
-        .skipped
+fn skipped_out(skipped: Vec<Skipped>) -> Vec<SkippedOut> {
+    let mut out: Vec<SkippedOut> = skipped
         .into_iter()
         .map(|s| SkippedOut {
             id: s.pr.key.to_string(),
@@ -86,18 +77,40 @@ pub fn build(rules: &Rules, gathered: Gathered) -> Plan {
             reasons: s.reasons,
         })
         .collect();
-    skipped.sort_by(|a, b| a.id.cmp(&b.id));
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
+}
+
+fn merged(mut first: Vec<Question>, second: Vec<Question>) -> Vec<Question> {
+    first.extend(second);
+    first
+}
+
+fn deploy_counts(items: &[Item], bundles: &[Bundle], train_prefix: &str) -> (usize, usize) {
+    let saved: usize = bundles.iter().map(|b| b.saved).sum();
+    let now = items
+        .iter()
+        .filter(|i| !bundle::is_stacked(&i.base, train_prefix))
+        .count();
+    (saved, now)
+}
+
+pub fn build(rules: &Rules, gathered: Gathered) -> Plan {
+    let planned = planner::plan(PlanInput {
+        rules,
+        prs: gathered.ready,
+        external: gathered.external,
+        publishers: gathered.publishers,
+    });
+    let questions = merged(gathered.questions, planned.questions);
+    let skipped = skipped_out(gathered.skipped);
     let bundles = bundle::suggest(
         &planned.items,
         &gathered.deploy_branch,
         &gathered.train_prefix,
     );
-    let deploys_saved: usize = bundles.iter().map(|b| b.saved).sum();
-    let deploys_now = planned
-        .items
-        .iter()
-        .filter(|i| !bundle::is_stacked(&i.base, &gathered.train_prefix))
-        .count();
+    let (deploys_saved, deploys_now) =
+        deploy_counts(&planned.items, &bundles, &gathered.train_prefix);
     Plan {
         schema: SCHEMA,
         generated_at: gathered.generated_at,

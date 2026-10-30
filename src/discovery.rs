@@ -77,26 +77,20 @@ fn shared_branches(all: &[Pr], cfg: &Config, train: &str) -> HashSet<String> {
         .collect()
 }
 
-pub fn discover(all: Vec<Pr>, cfg: &Config, train: &str) -> Discovered {
-    let shared = shared_branches(&all, cfg, train);
-    let mut out = Discovered::default();
-    for pr in all {
-        let scope = if pr.head_ref.eq_ignore_ascii_case(train) {
-            Scope::Train
-        } else if shared.contains(&pr.head_ref) {
-            Scope::SharedBranch
-        } else if pr.base_ref.eq_ignore_ascii_case(train) {
-            Scope::IntoTrain
-        } else {
-            continue;
-        };
-        let reasons = pr.blockers(cfg.allows_missing_checks(&pr.key.slug()));
-        if reasons.is_empty() {
-            out.ready.push((pr, scope));
-        } else {
-            out.skipped.push(Skipped { pr, scope, reasons });
-        }
+fn classify_scope(pr: &Pr, shared: &HashSet<String>, train: &str) -> Option<Scope> {
+    if pr.head_ref.eq_ignore_ascii_case(train) {
+        Some(Scope::Train)
+    } else if shared.contains(&pr.head_ref) {
+        Some(Scope::SharedBranch)
+    } else if pr.base_ref.eq_ignore_ascii_case(train) {
+        Some(Scope::IntoTrain)
+    } else {
+        None
     }
+}
+
+fn sibling_questions(out: &Discovered) -> Vec<Question> {
+    let mut questions = Vec::new();
     for (pr, scope) in &out.ready {
         if *scope != Scope::SharedBranch {
             continue;
@@ -106,7 +100,7 @@ pub fn discover(all: Vec<Pr>, cfg: &Config, train: &str) -> Discovered {
             .iter()
             .filter(|s| s.scope == Scope::SharedBranch && s.pr.head_ref == pr.head_ref)
         {
-            out.questions.push(Question::new(
+            questions.push(Question::new(
                 Some(&pr.key),
                 "sibling-not-ready",
                 format!(
@@ -119,6 +113,11 @@ pub fn discover(all: Vec<Pr>, cfg: &Config, train: &str) -> Discovered {
             ));
         }
     }
+    questions
+}
+
+fn stacked_questions(out: &Discovered, train: &str) -> Vec<Question> {
+    let mut questions = Vec::new();
     for (pr, scope) in &out.ready {
         if *scope != Scope::Train {
             continue;
@@ -128,7 +127,7 @@ pub fn discover(all: Vec<Pr>, cfg: &Config, train: &str) -> Discovered {
                 && s.pr.key.slug().eq_ignore_ascii_case(&pr.key.slug())
                 && s.pr.base_ref.eq_ignore_ascii_case(train)
         }) {
-            out.questions.push(Question::new(
+            questions.push(Question::new(
                 Some(&pr.key),
                 "stacked-not-ready",
                 format!(
@@ -141,6 +140,27 @@ pub fn discover(all: Vec<Pr>, cfg: &Config, train: &str) -> Discovered {
             ));
         }
     }
+    questions
+}
+
+pub fn discover(all: Vec<Pr>, cfg: &Config, train: &str) -> Discovered {
+    let shared = shared_branches(&all, cfg, train);
+    let mut out = Discovered::default();
+    for pr in all {
+        let Some(scope) = classify_scope(&pr, &shared, train) else {
+            continue;
+        };
+        let reasons = pr.blockers(cfg.allows_missing_checks(&pr.key.slug()));
+        if reasons.is_empty() {
+            out.ready.push((pr, scope));
+        } else {
+            out.skipped.push(Skipped { pr, scope, reasons });
+        }
+    }
+    let siblings = sibling_questions(&out);
+    out.questions.extend(siblings);
+    let stacked = stacked_questions(&out, train);
+    out.questions.extend(stacked);
     out
 }
 
