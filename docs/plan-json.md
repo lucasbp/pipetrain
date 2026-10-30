@@ -19,6 +19,7 @@ The structs live in `src/plan.rs` (`Plan`, `SkippedOut`, `Stats`), `src/bundle.r
 | `generated_at` | string | RFC 3339 timestamp with seconds and the local UTC offset, for example `2026-10-29T14:03:11-03:00`. |
 | `train` | string | The train branch (`train_prefix` + the date in the configured `train_date_format`, default `dd-mm-yyyy`), the literal `explicit PRs` when PRs were passed on the command line, or the literal `all released PRs` with `--all`. |
 | `deploy_branch` | string | The train branch of the run date (`train_prefix` + the date in the configured `train_date_format`, default `dd-mm-yyyy`). Unlike `train`, it is always a real branch name, even when PRs were passed on the command line. It is the branch a bundle suggestion names. Never `null`. |
+| `profile` | Profile | The config profile in use: `name` (string, `default` for a flat config) and `source` (string), one of `flag`, `args`, `folder`, `default` or `only`, meaning which selection rule chose it. The field is omitted when no profile was resolved. Added without a schema bump: readers that ignore unknown fields are unaffected. |
 | `orgs` | string[] | Organizations searched, after `--org` or the config. |
 | `items` | Item[] | Every ready PR in the plan, sorted by `org`, `repo`, `number`. Gate PRs are included. |
 | `gate` | string[] | Ids of the PRs that are gates, sorted by `org`, `repo`, `number`. Empty when there is none. |
@@ -60,7 +61,7 @@ One edge "the PR in `id` goes before this item".
 | Field | Type | Meaning |
 |---|---|---|
 | `id` | string | The PR that goes first. |
-| `rule` | string | `depends-on`, `package`, `stacked`, `target`, `layer` or `gate`. |
+| `rule` | string | `depends-on`, `package`, `stacked`, `order`, `target`, `layer` or `gate`. |
 | `reason` | string | Human sentence naming the cause. Free text: do not parse it. |
 | `implied` | boolean | `true` when another predecessor of this item already reaches `id`, so the edge adds no constraint. A viewer can hide it. |
 
@@ -121,6 +122,7 @@ Consumers should switch on `code`, never on `message` or `hint`.
   "generated_at": "2026-10-29T14:03:11-03:00",
   "train": "deploy/29-10-2026",
   "deploy_branch": "deploy/29-10-2026",
+  "profile": {"name": "default", "source": "only"},
   "orgs": ["acme"],
   "items": [
     {

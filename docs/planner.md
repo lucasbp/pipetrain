@@ -4,7 +4,7 @@ The planner turns a set of ready PRs into a directed graph: an edge `A -> B` mea
 
 The guiding principle is **when in doubt, serial**. Waiting is cheap and a wrong parallel merge is not, so every rule only ever adds an ordering constraint. The planner never removes one, and it never guesses a direction it cannot justify: it asks a question instead (see "Questions").
 
-Code: `src/planner.rs` (rules, graph, stages, lanes), `src/discovery.rs` (which PRs are in), `src/contained.rs` (PRs already in the base or the train by commit), `src/content.rs` (same, by file content), `src/bundle.rs` (deploy bundling suggestion), `src/detect.rs` (Depends-On and package bumps), `src/config.rs` (gate, layer, target matching).
+Code: `src/planner.rs` (rules, graph, stages, lanes), `src/planner/order.rs` (the `order` rule), `src/discovery.rs` (which PRs are in), `src/contained.rs` (PRs already in the base or the train by commit), `src/content.rs` (same, by file content), `src/bundle.rs` (deploy bundling suggestion), `src/detect.rs` (Depends-On and package bumps), `src/config.rs` (gate, layer, target matching).
 
 ## What goes into the plan
 
@@ -102,13 +102,19 @@ A PR is never made to wait for its own repo.
 
 Within one repo, if PR J has as base the head branch of PR I, then J goes before I. Why: J merges into I's branch, so J's changes ride along when I merges. Merging I first would orphan J.
 
-### 4. target
+### 4. order
+
+Each `[[order]]` table is a list of globs on `org/repo` (case-insensitive). A PR that matches an earlier glob goes before a PR that matches a later glob of the same list, whatever the head branch. PRs matched by the same glob, and PRs of the same repo, get no edge from this rule. A PR that matches none of the globs is left alone. The reason shown is `config order`.
+
+Why it sits here: it is a statement from the config, so it is stronger than the inferred rules that follow (`target`, `gate`, `layer`), and weaker than the three above, which describe this specific change.
+
+### 5. target
 
 PRs that deploy to the same target are serialized, lowest PR number first (adjusted so it never contradicts an edge already present). The target is `<group>@<base branch>`, where `<group>` is the `[targets]` value for the repo, or the repo itself (`org/repo`) when it is not listed. So two PRs against `main` in the same repo are serial, and two repos mapped to the same group are serial with each other.
 
 Why: two merges to one deploy pipeline race each other. This is the rule that makes "same repo, same branch" serial without anybody asking.
 
-### 5. gate
+### 6. gate
 
 A gate PR is one that needs a human to stop and confirm before anything else proceeds:
 
@@ -121,7 +127,7 @@ Every gate PR is ordered before every PR that is not a gate. Gate PRs have no ed
 
 Why gates are applied before layers: a migration must land before the code that reads it, whatever layer that code lives in. Letting the layer rule decide first could put the migration after its consumer.
 
-### 6. layer
+### 7. layer
 
 For each head branch open in 2 or more repos, PRs are ranked by the `[[layer]]` order in the config (first match on `org/repo`), and each rank goes before the next rank present. Why: a change that spans repos has to land bottom-up (library, client, API, backend-for-frontend, front) or the upper layer deploys against something that does not exist yet.
 
@@ -133,7 +139,7 @@ Why the layer map is config and not code: layers are the shape of one company's 
 
 Rules add edges one by one. An edge that would close a cycle is rejected, and the earlier edge stands. What happens next depends on the rule that lost:
 
-- `depends-on`, `package`, `stacked`: the loss is reported as `edge-conflict` on the PR that was supposed to wait.
+- `depends-on`, `package`, `stacked`, `order`: the loss is reported as `edge-conflict` on the PR that was supposed to wait.
 - `target` and `gate`: silent. These are defaults for safety, not statements about the change, so losing one is expected.
 - `layer`: reported as `edge-conflict`, except when either PR is a gate, in which case it stays silent (the gate rule already won, on purpose).
 

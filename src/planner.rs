@@ -7,12 +7,15 @@ use crate::detect::{self, Dep};
 use crate::model::{Pr, PrKey, Question};
 use crate::publishers::Publishers;
 
+mod order;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Rule {
     DependsOn,
     Package,
     Stacked,
+    Order,
     Target,
     Layer,
     Gate,
@@ -24,6 +27,7 @@ impl Rule {
             Rule::DependsOn => "depends-on",
             Rule::Package => "package",
             Rule::Stacked => "stacked",
+            Rule::Order => "order",
             Rule::Target => "target",
             Rule::Layer => "layer",
             Rule::Gate => "gate",
@@ -512,6 +516,7 @@ pub fn plan(input: PlanInput<'_>) -> Planned {
     b.apply_depends_on(&input.external);
     b.apply_packages(&input.publishers);
     b.apply_stacked();
+    b.apply_order();
     b.apply_targets();
     b.apply_gates();
     b.apply_layers();

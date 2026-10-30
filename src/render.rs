@@ -302,6 +302,15 @@ pub fn text(plan: &Plan) -> String {
         dim("(read-only, nothing was merged)")
     );
     let _ = writeln!(out, "  {} {}", dim("train    "), plan.train);
+    if let Some(info) = &plan.profile {
+        let _ = writeln!(
+            out,
+            "  {} {} ({})",
+            dim("profile  "),
+            info.name,
+            info.source.label()
+        );
+    }
     let _ = writeln!(out, "  {} {}", dim("orgs     "), plan.orgs.join(", "));
     let skipped = if plan.skipped.is_empty() {
         format!("{} skipped", plan.skipped.len())

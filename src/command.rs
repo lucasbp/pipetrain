@@ -17,6 +17,11 @@ use crate::planner::{self, DepState};
 use crate::publishers::{self, Publishers};
 use crate::render;
 
+pub mod init;
+pub mod orgs;
+pub mod profiles;
+mod resolve;
+
 const MAX_EXTERNAL_REFS: usize = 20;
 
 pub struct PlanOptions {
@@ -25,6 +30,7 @@ pub struct PlanOptions {
     pub json: bool,
     pub emit: Option<Emit>,
     pub config: Option<PathBuf>,
+    pub profile: Option<String>,
     pub orgs: Vec<String>,
     pub date: Option<String>,
     pub verbose: bool,
@@ -182,14 +188,6 @@ fn scan_publishers(
     Ok(publishers::collect(&manifests))
 }
 
-fn load_config(opts: &PlanOptions) -> Result<Config> {
-    let (mut cfg, _) = Config::load(opts.config.as_deref())?;
-    if !opts.orgs.is_empty() {
-        cfg.orgs = opts.orgs.clone();
-    }
-    Ok(cfg)
-}
-
 fn deploy_branch_for(cfg: &Config, date: Option<&str>) -> Result<String> {
     let date = match date {
         None => Local::now().date_naive(),
@@ -299,7 +297,12 @@ fn deliver(built: &Plan, json: bool, mode: Option<Emit>) -> Result<i32> {
 }
 
 pub fn plan(opts: PlanOptions) -> Result<i32> {
-    let cfg = load_config(&opts)?;
+    let (cfg, profile) = resolve::load(
+        opts.config.as_deref(),
+        opts.profile.as_deref(),
+        &opts.prs,
+        &opts.orgs,
+    )?;
     let rules = Rules::new(&cfg)?;
     let deploy_branch = deploy_branch_for(&cfg, opts.date.as_deref())?;
     let explicit = explicit_targets(&opts.prs, &cfg)?;
@@ -331,5 +334,7 @@ pub fn plan(opts: PlanOptions) -> Result<i32> {
         publishers,
     };
     let gathered = into_gathered(&cfg, &explicit, train, deploy_branch, &client, collected);
-    deliver(&plan::build(&rules, gathered), opts.json, opts.emit)
+    let mut built = plan::build(&rules, gathered);
+    built.profile = Some(profile);
+    deliver(&built, opts.json, opts.emit)
 }

@@ -143,3 +143,28 @@ pub fn config(state: &ConfigState) -> Check {
         ConfigState::Invalid(message) => Check::fail("config", message.clone(), None),
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProfileState {
+    Unknown,
+    Chosen { name: String, label: String },
+    Unresolved(String),
+    Rejected(String),
+}
+
+pub fn profile(state: &ProfileState) -> Check {
+    match state {
+        ProfileState::Unknown => Check::skipped("profile", "no usable config"),
+        ProfileState::Chosen { name, label } => Check::ok("profile", format!("{name} ({label})")),
+        ProfileState::Unresolved(message) => Check::warn(
+            "profile",
+            message.clone(),
+            Some("Pass --profile NAME or run from a profile folder.".to_string()),
+        ),
+        ProfileState::Rejected(message) => Check::fail(
+            "profile",
+            message.clone(),
+            Some("Pass one of the listed names to --profile.".to_string()),
+        ),
+    }
+}

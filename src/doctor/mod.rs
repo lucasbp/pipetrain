@@ -8,25 +8,82 @@ use anyhow::Result;
 use chrono::Utc;
 use serde_json::{Value, json};
 
-use crate::config::{ApiConfig, Config};
+use crate::config::ApiConfig;
 use crate::github::{ApiError, Client, probe_gh, resolve};
 use crate::hint::Os;
-use check::{Check, ConfigState};
+use crate::profile::{self, Inputs, ProfileSet};
+use check::{Check, ConfigState, ProfileState};
 
 const VIEWER_QUERY: &str = "query { viewer { login } }";
 const HEAD_CHECKS: usize = 2;
 
 pub struct DoctorOptions {
     pub config: Option<PathBuf>,
+    pub profile: Option<String>,
     pub orgs: Vec<String>,
     pub json: bool,
 }
 
-fn load_config(path: Option<&Path>) -> (ConfigState, Vec<String>) {
-    match Config::load(path) {
-        Ok((cfg, Some(found))) => (ConfigState::Found(found), cfg.orgs),
-        Ok((_, None)) => (ConfigState::NotFound, Vec::new()),
-        Err(err) => (ConfigState::Invalid(format!("{err:#}")), Vec::new()),
+struct Loaded {
+    state: ConfigState,
+    profile: ProfileState,
+    orgs: Vec<String>,
+}
+
+fn flat_listing(set: &ProfileSet) -> String {
+    set.listing()
+        .lines()
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn pick(set: &ProfileSet, flag: Option<&str>) -> (ProfileState, Vec<String>) {
+    let cwd = profile::working_dir();
+    let inputs = Inputs::new(flag, &[], cwd.as_deref());
+    match profile::select(set, &inputs) {
+        Ok(found) => {
+            let state = ProfileState::Chosen {
+                name: found.profile.name.clone(),
+                label: found.source.label().to_string(),
+            };
+            (state, found.profile.config.orgs.clone())
+        }
+        Err(_) => {
+            let listing = flat_listing(set);
+            let state = match flag {
+                Some(name) => {
+                    ProfileState::Rejected(format!("unknown profile `{name}`; profiles: {listing}"))
+                }
+                None => ProfileState::Unresolved(format!(
+                    "no profile resolves from here; profiles: {listing}"
+                )),
+            };
+            (state, Vec::new())
+        }
+    }
+}
+
+fn load_config(path: Option<&Path>, flag: Option<&str>) -> Loaded {
+    match ProfileSet::load(path) {
+        Ok((set, Some(found))) => {
+            let (profile, orgs) = pick(&set, flag);
+            Loaded {
+                state: ConfigState::Found(found),
+                profile,
+                orgs,
+            }
+        }
+        Ok((_, None)) => Loaded {
+            state: ConfigState::NotFound,
+            profile: ProfileState::Unknown,
+            orgs: Vec::new(),
+        },
+        Err(err) => Loaded {
+            state: ConfigState::Invalid(format!("{err:#}")),
+            profile: ProfileState::Unknown,
+            orgs: Vec::new(),
+        },
     }
 }
 
@@ -72,9 +129,17 @@ pub fn remote(mut client: Client, orgs: &[String]) -> Vec<Check> {
 }
 
 pub fn gather(config: Option<&Path>, extra_orgs: &[String]) -> Vec<Check> {
-    let (state, configured) = load_config(config);
+    gather_with(config, None, extra_orgs)
+}
+
+pub fn gather_with(
+    config: Option<&Path>,
+    profile: Option<&str>,
+    extra_orgs: &[String],
+) -> Vec<Check> {
+    let loaded = load_config(config, profile);
     let orgs = if extra_orgs.is_empty() {
-        configured
+        loaded.orgs.clone()
     } else {
         extra_orgs.to_vec()
     };
@@ -91,13 +156,14 @@ pub fn gather(config: Option<&Path>, extra_orgs: &[String]) -> Vec<Check> {
     };
     let org_checks = rest.split_off(HEAD_CHECKS);
     checks.extend(rest);
-    checks.push(check::config(&state));
+    checks.push(check::config(&loaded.state));
+    checks.push(check::profile(&loaded.profile));
     checks.extend(org_checks);
     checks
 }
 
 pub fn run(opts: DoctorOptions) -> Result<i32> {
-    let checks = gather(opts.config.as_deref(), &opts.orgs);
+    let checks = gather_with(opts.config.as_deref(), opts.profile.as_deref(), &opts.orgs);
     if opts.json {
         println!("{}", report::json(&checks));
     } else {

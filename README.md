@@ -47,10 +47,10 @@ The token is used in memory for the run. It is never written to disk, to the con
 ## Check your setup (doctor)
 
 ```
-pipetrain doctor [--config <path>] [--org <org>]... [--json] [--color auto|always|never]
+pipetrain doctor [--config <path>] [--profile <name>] [--org <org>]... [--json] [--color auto|always|never]
 ```
 
-`doctor` runs five read-only checks, one line each. It sends only `GET` requests and GraphQL queries, installs nothing, changes nothing and never prints the token.
+`doctor` runs six read-only checks, one line each. It sends only `GET` requests and GraphQL queries, installs nothing, changes nothing and never prints the token.
 
 | Check | What it looks at |
 |---|---|
@@ -58,7 +58,8 @@ pipetrain doctor [--config <path>] [--org <org>]... [--json] [--color auto|alway
 | `api` | Whether GitHub accepts the token: a GraphQL `viewer` query. Shows the login. |
 | `rate` | Your REST requests left (`GET /rate_limit`). Warns under 500. |
 | `config` | Whether a config file was found, and whether it parses. |
-| `org:<name>` | One line per org, from the config or `--org`: visible or not. Warns when no private repos come back, which is how SAML SSO usually shows up. That is a heuristic: an org with no private repos gets the same warning. |
+| `profile` | Which [profile](#profiles) applies from here and why, or what is wrong: an unknown `--profile`, or no profile that can be chosen. |
+| `org:<name>` | One line per org, from the profile's `orgs` or `--org`: visible or not. Warns when no private repos come back, which is how SAML SSO usually shows up. That is a heuristic: an org with no private repos gets the same warning. |
 
 Each line starts with a status: `[ ok ]`, `[warn]` or `[fail]`. A `warn` or `fail` is followed by what to do about it. When the token is missing or rejected, the checks that need it are shown as `skipped`. Output from a machine that is set up (names changed):
 
@@ -67,8 +68,9 @@ Each line starts with a status: `[ ok ]`, `[warn]` or `[fail]`. A `warn` or `fai
 [ ok ] api GraphQL answered, signed in as octocat
 [ ok ] rate core: 4914 of 5000 requests left; it resets in about 39 minutes
 [ ok ] config loaded ./pipetrain.toml
+[ ok ] profile default (the only profile)
 [ ok ] org:acme organization is visible, 134 private repos seen
-5 ok, 0 warn, 0 fail
+6 ok, 0 warn, 0 fail
 ```
 
 Output on a machine with no token, no `gh` and no config:
@@ -132,11 +134,15 @@ pipetrain plan [OPTIONS] [PRS]...
 | `pipetrain plan --all` | Plans every approved open PR in the configured orgs, whatever its branch. For any day, not only the train day. Cannot be combined with explicit PRs. |
 | `pipetrain plan --json` | Prints the plan as JSON instead of text (contract in `docs/plan-json.md`). |
 | `pipetrain plan --emit queue` | Prints only a queue of `merge:org/repo#N` lines for a runner (contract in `docs/queue-output.md`). Cannot be combined with `--json`. |
+| `pipetrain profiles` | Read-only: lists the profiles, their orgs and folders, and which one applies from the current folder. |
+| `pipetrain orgs` | Read-only: lists the GitHub orgs your token can see and which profile lists each one. |
+| `pipetrain init` | Prints a proposed config with one profile per visible org. Writes nothing unless `--write [PATH]` is given; an existing file is kept unless `--force` is added. |
 
 | Option | Meaning |
 |---|---|
 | `--config <path>` | Use this config file. An unreadable file is an error. |
-| `--org <org>` | Org to look at. Repeatable. Overrides `orgs` in the config. |
+| `--profile <name>` | Profile to use. Without it the choice follows [the rules below](#profiles). |
+| `--org <org>` | Org to look at. Repeatable. Overrides `orgs` of the selected profile. |
 | `--date <date>` | Train date, instead of today. Accepts the date format of `train_date_format` (default `dd-mm-yyyy`, for example `--date 29-10-2026`) or ISO `yyyy-mm-dd` (`--date 2026-10-29`). |
 | `--verbose` | Log every API request to stderr. |
 | `--emit queue` | Replaces the plan with a queue for a runner: one `merge:org/repo#N` line per ready PR on stdout, questions on stderr, exit 3 when questions are open. See [Feeding a queue runner](#feeding-a-queue-runner). Not combinable with `--json`. |
@@ -303,6 +309,46 @@ pipetrain looks for a config file in this order and uses the first one it finds:
 With no file at all it runs on built-in defaults, which means you must pass `--org` or explicit PRs, because `orgs` is empty by default.
 
 [pipetrain.example.toml](pipetrain.example.toml) lists every key with its default. Unknown keys are rejected, so a typo is an error and not a silent no-op. The layer map is the part you must write yourself: pipetrain cannot know which of your repos is a library and which is a front end. Why is explained in [docs/planner.md](docs/planner.md).
+
+### Profiles
+
+One file can hold several setups. Top-level keys are shared by every profile, and each `[profile.<name>]` table replaces whole top-level keys for that profile, so a profile that sets `orgs` or `layer` ignores the shared value. A file with no `[profile.*]` table is a single profile called `default`, so every existing config keeps working unchanged.
+
+```toml
+default_profile = "acme"
+
+[profile.acme]
+folders = ["/work/acme"]
+orgs = ["acme"]
+
+[profile.sandbox]
+folders = ["/work/sandbox"]
+orgs = ["acme-labs"]
+```
+
+The profile is chosen by the first rule that applies:
+
+1. `--profile <name>`.
+2. The orgs of the `org/repo#N` arguments, when exactly one profile lists all of them.
+3. The current folder, when it is inside the `folders` of a profile; the deepest matching folder wins.
+4. `default_profile`.
+5. The only profile, when there is just one.
+6. Otherwise it stops with an error that lists the profiles.
+
+`folders` is only allowed inside a profile, paths are absolute and not expanded (no `~`), and the same folder cannot be listed in two profiles. Profiles are never merged. `--org` replaces the `orgs` of the selected profile. The text report starts with a line such as `profile acme (from the working folder)`, and `--json` carries `profile {name, source}` with `source` one of `flag`, `args`, `folder`, `default` or `only`.
+
+`pipetrain profiles` shows what applies from the current folder, `pipetrain orgs` lists the orgs your token can see and which profile has each, and `pipetrain init` prints a proposed config with one profile per visible org. `init --write` creates the file only when it does not exist yet, unless `--force` is given.
+
+### Config order
+
+`[[order]]` pins the relative order of repos that the other rules leave open. In each `repos` list the first glob goes first. You can write several `[[order]]` tables.
+
+```toml
+[[order]]
+repos = ["acme/shared-*", "acme/api-*"]
+```
+
+Globs match `org/repo` and ignore case. Two PRs matched by the same glob, or from the same repo, get no edge. The rule applies after `stacked` and before `target`, and it loses to `depends-on`, `package` and `stacked`; a lost `order` edge is reported as an `edge-conflict` question. The position of the rule is in [docs/planner.md](docs/planner.md).
 
 `train_date_format` is how the date appears in the train branch name, as a [chrono strftime](https://docs.rs/chrono/latest/chrono/format/strftime/index.html) string. The default is `%d-%m-%Y` (`deploy/29-10-2026`); `%Y-%m-%d` gives `deploy/2026-10-29`. The config is rejected, with the key named in the error, when the format is empty, is not a valid strftime string, cannot format a plain date (for example it uses a time field), or gives the same text for two different days because it has no day field. `--date` accepts this format or ISO `yyyy-mm-dd`.
 

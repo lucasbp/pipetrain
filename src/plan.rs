@@ -7,6 +7,7 @@ use crate::config::Rules;
 use crate::discovery::Skipped;
 use crate::model::{Pr, Question};
 use crate::planner::{self, DepState, Item, PlanInput};
+use crate::profile::ProfileSource;
 use crate::publishers::Publishers;
 
 pub const SCHEMA: u32 = 1;
@@ -32,12 +33,20 @@ pub struct Stats {
     pub deploys_after: usize,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ProfileInfo {
+    pub name: String,
+    pub source: ProfileSource,
+}
+
 #[derive(Debug, Serialize)]
 pub struct Plan {
     pub schema: u32,
     pub generated_at: String,
     pub train: String,
     pub deploy_branch: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<ProfileInfo>,
     pub orgs: Vec<String>,
     pub items: Vec<Item>,
     pub gate: Vec<String>,
@@ -116,6 +125,7 @@ pub fn build(rules: &Rules, gathered: Gathered) -> Plan {
         generated_at: gathered.generated_at,
         train: gathered.train,
         deploy_branch: gathered.deploy_branch,
+        profile: None,
         orgs: gathered.orgs,
         items: planned.items,
         gate: planned.gate,

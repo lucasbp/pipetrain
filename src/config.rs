@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use chrono::NaiveDate;
@@ -10,6 +9,10 @@ use globset::{Glob, GlobBuilder, GlobSet, GlobSetBuilder};
 use serde::Deserialize;
 
 use crate::model::{ChangedFile, Pr};
+
+mod order;
+
+pub use order::OrderConfig;
 
 pub const DEFAULT_TRAIN_DATE_FORMAT: &str = "%d-%m-%Y";
 
@@ -52,6 +55,7 @@ pub struct Config {
     pub allow_missing_checks: bool,
     pub checks_optional_repos: Vec<String>,
     pub layer: Vec<LayerConfig>,
+    pub order: Vec<OrderConfig>,
     pub deploy: DeployConfig,
     pub targets: BTreeMap<String, String>,
     pub packages: BTreeMap<String, String>,
@@ -92,6 +96,7 @@ impl Default for Config {
             allow_missing_checks: false,
             checks_optional_repos: Vec::new(),
             layer: Vec::new(),
+            order: Vec::new(),
             deploy: DeployConfig::default(),
             targets: BTreeMap::new(),
             packages: BTreeMap::new(),
@@ -137,21 +142,7 @@ impl Config {
     }
 
     pub fn parse(text: &str) -> Result<Self> {
-        let cfg: Self = toml::from_str(text).context("invalid config")?;
-        validate_date_format(&cfg.train_date_format)?;
-        Ok(cfg)
-    }
-
-    pub fn load(explicit: Option<&Path>) -> Result<(Self, Option<PathBuf>)> {
-        if let Some(path) = explicit {
-            return Ok((Self::read(path)?, Some(path.to_path_buf())));
-        }
-        for path in Self::search_paths() {
-            if path.is_file() {
-                return Ok((Self::read(&path)?, Some(path)));
-            }
-        }
-        Ok((Self::default(), None))
+        crate::profile::ProfileSet::parse(text)?.into_single_config()
     }
 
     pub fn search_paths() -> Vec<PathBuf> {
@@ -160,12 +151,6 @@ impl Config {
             paths.push(dir.join("pipetrain").join("config.toml"));
         }
         paths
-    }
-
-    fn read(path: &Path) -> Result<Self> {
-        let text = fs::read_to_string(path)
-            .with_context(|| format!("cannot read config {}", path.display()))?;
-        Self::parse(&text).with_context(|| format!("in {}", path.display()))
     }
 }
 
@@ -178,6 +163,7 @@ pub enum GateKind {
 
 pub struct Rules {
     layers: Vec<(String, GlobSet)>,
+    order: Vec<Vec<GlobSet>>,
     ddl: GlobSet,
     infra_globs: GlobSet,
     infra_repos: HashSet<String>,
@@ -213,6 +199,7 @@ impl Rules {
         }
         Ok(Self {
             layers,
+            order: order::compile(&cfg.order)?,
             ddl: build_set(&cfg.deploy.ddl_globs, "deploy.ddl_globs")?,
             infra_globs: build_set(&cfg.deploy.infra_globs, "deploy.infra_globs")?,
             infra_repos: cfg
@@ -240,6 +227,10 @@ impl Rules {
             .enumerate()
             .find(|(_, (_, set))| set.is_match(slug))
             .map(|(rank, (name, _))| (rank, name.as_str()))
+    }
+
+    pub fn order_ranks(&self, slug: &str) -> Vec<Option<usize>> {
+        order::ranks(&self.order, slug)
     }
 
     pub fn gate_of(&self, pr: &Pr) -> Option<(GateKind, String)> {

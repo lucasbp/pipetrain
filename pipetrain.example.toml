@@ -47,6 +47,24 @@ repos = ["acme/*-bff"]
 name = "front"
 repos = ["acme/*-web", "acme/*-front"]
 
+# Pins the order of repos the other rules leave open: the first glob goes first.
+[[order]]
+repos = ["acme/shared-*", "acme/api-*"]
+
+# Several setups in one file. Top-level keys are shared; a [profile.NAME] table
+# replaces whole keys for that profile. Without any [profile.*] table the file
+# is a single profile called "default".
+#
+# default_profile = "acme"
+#
+# [profile.acme]
+# folders = ["/work/acme"]
+# orgs = ["acme"]
+#
+# [profile.sandbox]
+# folders = ["/work/sandbox"]
+# orgs = ["acme-labs"]
+
 [deploy]
 # A PR touching these paths is a DDL gate.
 ddl_globs = ["**/*.sql", "**/migrations/**", "**/migration/**"]

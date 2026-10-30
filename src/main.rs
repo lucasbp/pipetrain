@@ -3,6 +3,9 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+use pipetrain::command::init::{self, InitOptions};
+use pipetrain::command::orgs::{self, OrgsOptions};
+use pipetrain::command::profiles::{self, ProfilesOptions};
 use pipetrain::command::{PlanOptions, plan};
 use pipetrain::doctor::{self, DoctorOptions};
 use pipetrain::emit::Emit;
@@ -27,6 +30,59 @@ enum Command {
         about = "Read-only: checks the token, the API, the rate limit, the config and the orgs"
     )]
     Doctor(DoctorArgs),
+
+    #[command(about = "Read-only: lists the profiles and which one applies from here")]
+    Profiles(ProfilesArgs),
+
+    #[command(about = "Read-only: lists the GitHub orgs you can see and which profile has them")]
+    Orgs(OrgsArgs),
+
+    #[command(
+        about = "Prints a proposed config with one profile per visible org; writes only with --write"
+    )]
+    Init(InitArgs),
+}
+
+#[derive(clap::Args)]
+struct ProfilesArgs {
+    #[arg(
+        long,
+        help = "Config file (default: ./pipetrain.toml, then the user config dir)"
+    )]
+    config: Option<PathBuf>,
+}
+
+#[derive(clap::Args)]
+struct OrgsArgs {
+    #[arg(
+        long,
+        help = "Config file (default: ./pipetrain.toml, then the user config dir)"
+    )]
+    config: Option<PathBuf>,
+
+    #[arg(long, help = "Log every API request to stderr")]
+    verbose: bool,
+}
+
+#[derive(clap::Args)]
+struct InitArgs {
+    #[arg(
+        long,
+        num_args = 0..=1,
+        value_name = "PATH",
+        help = "Save the proposal (default path: the user config dir); without this nothing is written"
+    )]
+    write: Option<Option<PathBuf>>,
+
+    #[arg(
+        long,
+        requires = "write",
+        help = "Overwrite the file if it already exists"
+    )]
+    force: bool,
+
+    #[arg(long, help = "Log every API request to stderr")]
+    verbose: bool,
 }
 
 #[derive(clap::Args)]
@@ -59,8 +115,14 @@ struct PlanArgs {
     config: Option<PathBuf>,
 
     #[arg(
+        long,
+        help = "Profile to use; without it the folder, the default or the only profile decides"
+    )]
+    profile: Option<String>,
+
+    #[arg(
         long = "org",
-        help = "Org to look at, overrides the config; repeatable"
+        help = "Org to look at, overrides the profile's orgs; repeatable"
     )]
     orgs: Vec<String>,
 
@@ -90,7 +152,16 @@ struct DoctorArgs {
     )]
     config: Option<PathBuf>,
 
-    #[arg(long = "org", help = "Org to check, overrides the config; repeatable")]
+    #[arg(
+        long,
+        help = "Profile to check; without it the folder, the default or the only profile decides"
+    )]
+    profile: Option<String>,
+
+    #[arg(
+        long = "org",
+        help = "Org to check, overrides the profile's orgs; repeatable"
+    )]
     orgs: Vec<String>,
 
     #[arg(long, help = "Print the checks as JSON")]
@@ -121,6 +192,7 @@ fn main() -> ExitCode {
             apply_color(args.color);
             doctor::run(DoctorOptions {
                 config: args.config,
+                profile: args.profile,
                 orgs: args.orgs,
                 json: args.json,
             })
@@ -133,11 +205,24 @@ fn main() -> ExitCode {
                 json: args.json,
                 emit: args.emit,
                 config: args.config,
+                profile: args.profile,
                 orgs: args.orgs,
                 date: args.date,
                 verbose: args.verbose,
             })
         }
+        Command::Profiles(args) => profiles::run(ProfilesOptions {
+            config: args.config,
+        }),
+        Command::Orgs(args) => orgs::run(OrgsOptions {
+            config: args.config,
+            verbose: args.verbose,
+        }),
+        Command::Init(args) => init::run(InitOptions {
+            write: args.write,
+            force: args.force,
+            verbose: args.verbose,
+        }),
     };
     match result {
         Ok(0) => ExitCode::SUCCESS,
