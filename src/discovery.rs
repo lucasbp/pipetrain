@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use chrono::NaiveDate;
 
 use crate::config::Config;
-use crate::model::{Pr, Question};
+use crate::model::{Pr, Question, Review};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
@@ -11,6 +11,7 @@ pub enum Scope {
     SharedBranch,
     IntoTrain,
     Explicit,
+    Released,
 }
 
 impl Scope {
@@ -20,6 +21,7 @@ impl Scope {
             Scope::SharedBranch => "shared-branch",
             Scope::IntoTrain => "into-train",
             Scope::Explicit => "explicit",
+            Scope::Released => "released",
         }
     }
 }
@@ -134,6 +136,29 @@ pub fn discover(all: Vec<Pr>, cfg: &Config, train: &str) -> Discovered {
                 ),
                 "get that PR ready before the train, or drop it from the deploy",
             ));
+        }
+    }
+    out
+}
+
+pub fn released(all: Vec<Pr>, cfg: &Config, train: &str) -> Discovered {
+    let mut out = Discovered::default();
+    for pr in all {
+        if pr.review != Review::Approved {
+            continue;
+        }
+        let scope = if pr.head_ref.eq_ignore_ascii_case(train) {
+            Scope::Train
+        } else if pr.base_ref.eq_ignore_ascii_case(train) {
+            Scope::IntoTrain
+        } else {
+            Scope::Released
+        };
+        let reasons = pr.blockers(cfg.allows_missing_checks(&pr.key.slug()));
+        if reasons.is_empty() {
+            out.ready.push((pr, scope));
+        } else {
+            out.skipped.push(Skipped { pr, scope, reasons });
         }
     }
     out

@@ -34,6 +34,7 @@ pipetrain plan [OPTIONS] [PRS]...
 |---|---|
 | `pipetrain plan` | Discovers today's train in the configured orgs and plans it. |
 | `pipetrain plan acme/orders-api#12 acme/billing-api#3` | Plans exactly these PRs, no discovery. |
+| `pipetrain plan --all` | Plans every approved open PR in the configured orgs, whatever its branch. For any day, not only the train day. Cannot be combined with explicit PRs. |
 | `pipetrain plan --json` | Prints the plan as JSON instead of text (contract in `docs/plan-json.md`). |
 
 | Option | Meaning |
@@ -54,6 +55,24 @@ The train branch is `train_prefix` plus the date, for example `deploy/29-10-2026
 - targeting the train branch (`into-train`).
 
 Of those, only PRs that are ready enter the plan: not draft, approved, checks green, no merge conflict. A repo with no checks at all blocks its PRs, unless `allow_missing_checks` is on or the repo matches a glob in `checks_optional_repos`. The rest are listed as `SKIPPED` with the reasons, and a few of them raise a question when they affect a ready PR. How the order is then decided, rule by rule, is in [docs/planner.md](docs/planner.md).
+
+## Any day: released PRs
+
+The default discovery looks for the train, which exists on one day of the week. On any other day, with approved PRs waiting to go out, run:
+
+```
+pipetrain plan --all
+```
+
+`--all` needs orgs, from the config or from `--org`. It takes every open, non-archived PR in those orgs and treats the approved ones as released, whatever their branch name:
+
+- Approved and ready (not draft, checks green, no merge conflict) enters the plan with scope `released`.
+- Approved but not ready goes to `SKIPPED` with the reasons, for example `checks failing` or `draft`.
+- Not approved is ignored without a trace: no review, review requested or changes requested.
+
+A PR whose head is today's train branch keeps scope `train`, and one targeting it keeps `into-train`. In this mode PRs are not grouped by shared branch, so the `sibling-not-ready` and `stacked-not-ready` questions are not raised. Everything after discovery is the same: the already-merged check, files, dependencies, packages, stacked PRs, targets, gate, layers and bundles.
+
+The `train` line of the output reads `all released PRs`. When a plain `pipetrain plan` finds nothing, it suggests `--all`.
 
 ## Two checks before the order
 

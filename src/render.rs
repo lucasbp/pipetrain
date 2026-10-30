@@ -92,6 +92,13 @@ pub fn text(plan: &Plan) -> String {
 
     if plan.items.is_empty() {
         let _ = writeln!(out, "\nNothing ready to plan.");
+        if plan.train != "explicit PRs" && plan.train != "all released PRs" {
+            let _ = writeln!(
+                out,
+                "Tip: nothing is on {} today. Run with --all to plan every approved PR across the orgs.",
+                plan.train
+            );
+        }
     }
 
     if !plan.gate.is_empty() {

@@ -27,6 +27,13 @@ struct PlanArgs {
     #[arg(help = "PRs to plan as org/repo#123; without any, today's train is discovered")]
     prs: Vec<String>,
 
+    #[arg(
+        long,
+        conflicts_with = "prs",
+        help = "Plan every approved open PR in the orgs, whatever its branch; for days other than the train day"
+    )]
+    all: bool,
+
     #[arg(long, help = "Print the plan as JSON")]
     json: bool,
 
@@ -54,6 +61,7 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Command::Plan(args) => plan(PlanOptions {
             prs: args.prs,
+            all: args.all,
             json: args.json,
             config: args.config,
             orgs: args.orgs,

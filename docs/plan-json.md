@@ -17,7 +17,7 @@ The structs live in `src/plan.rs` (`Plan`, `SkippedOut`, `Stats`), `src/bundle.r
 |---|---|---|
 | `schema` | integer | Contract version. `1`. |
 | `generated_at` | string | RFC 3339 timestamp with seconds and the local UTC offset, for example `2026-10-29T14:03:11-03:00`. |
-| `train` | string | The train branch (`train_prefix` + `dd-mm-yyyy`), or the literal `explicit PRs` when PRs were passed on the command line. |
+| `train` | string | The train branch (`train_prefix` + `dd-mm-yyyy`), the literal `explicit PRs` when PRs were passed on the command line, or the literal `all released PRs` with `--all`. |
 | `deploy_branch` | string | The train branch of the run date (`train_prefix` + `dd-mm-yyyy`). Unlike `train`, it is always a real branch name, even when PRs were passed on the command line. It is the branch a bundle suggestion names. Never `null`. |
 | `orgs` | string[] | Organizations searched, after `--org` or the config. |
 | `items` | Item[] | Every ready PR in the plan, sorted by `org`, `repo`, `number`. Gate PRs are included. |
@@ -45,7 +45,7 @@ One ready PR.
 | `base` | string | Base branch. |
 | `sha` | string | Head commit SHA read at plan time. |
 | `layer` | string or null | Name of the first `[[layer]]` whose `repos` match `org/repo`. `null` when the repo is in no layer. |
-| `scope` | string | Why the PR was discovered: `train`, `shared-branch`, `into-train` or `explicit`. |
+| `scope` | string | Why the PR was discovered: `train`, `shared-branch`, `into-train`, `explicit` or `released`. |
 | `gate` | string or null | `"ddl"`, `"infra"` or `null`. |
 | `gate_reason` | string or null | For a gate PR, the first changed path that matched (`ddl_globs` or `infra_globs`), or `repo is listed in deploy.infra_repos`. `null` when `gate` is `null`. |
 | `manual_pause` | boolean | `true` when the PR is a gate: whoever runs the train must stop and confirm before continuing. |
@@ -86,7 +86,7 @@ One suggestion: in `repo`, several PRs go to the same `base`, so they would depl
 | `id` | string | `org/repo#number`. |
 | `title` | string | PR title. |
 | `url` | string | PR web URL. |
-| `scope` | string | `train`, `shared-branch`, `into-train` or `explicit`. |
+| `scope` | string | `train`, `shared-branch`, `into-train`, `explicit` or `released`. |
 | `head` | string | The head branch of the skipped PR, so a `shared-branch` skip can be traced to the branch name that matched. |
 | `reasons` | string[] | One or more of: `already merged`, `closed`, `draft`, `changes requested`, `review required`, `not approved`, `checks pending`, `checks failing`, `no checks reported`, `merge conflict`, `mergeability unknown, retry in a minute`, `already in <ref>`. A merged or closed PR carries only that one reason. `already in <ref>` also stands alone, where `<ref>` is the branch that already contains the PR head: its base branch, or `deploy_branch`. It is the only reason with a variable part, so match it by the `already in ` prefix. |
 

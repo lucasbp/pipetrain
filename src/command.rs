@@ -19,6 +19,7 @@ const MAX_EXTERNAL_REFS: usize = 20;
 
 pub struct PlanOptions {
     pub prs: Vec<String>,
+    pub all: bool,
     pub json: bool,
     pub config: Option<PathBuf>,
     pub orgs: Vec<String>,
@@ -39,11 +40,15 @@ fn discover(
     cfg: &Config,
     explicit: &[PrKey],
     train: &str,
+    released: bool,
 ) -> Result<Discovered> {
     if explicit.is_empty() {
         let mut all = Vec::new();
         for org in &cfg.orgs {
             all.extend(client.open_prs(org)?);
+        }
+        if released {
+            return Ok(discovery::released(all, cfg, train));
         }
         return Ok(discovery::discover(all, cfg, train));
     }
@@ -140,10 +145,12 @@ pub fn plan(opts: PlanOptions) -> Result<()> {
         );
     }
 
-    let train = if explicit.is_empty() {
-        discovery::train_branch(&cfg, date)
-    } else {
+    let train = if !explicit.is_empty() {
         "explicit PRs".to_string()
+    } else if opts.all {
+        "all released PRs".to_string()
+    } else {
+        deploy_branch.clone()
     };
 
     let mut client = Client::new(github::token()?, &cfg.api, opts.verbose);
@@ -151,7 +158,7 @@ pub fn plan(opts: PlanOptions) -> Result<()> {
         ready,
         mut skipped,
         mut questions,
-    } = discover(&mut client, &cfg, &explicit, &train)?;
+    } = discover(&mut client, &cfg, &explicit, &deploy_branch, opts.all)?;
 
     let (mut ready, merged) = contained::filter(&mut client, ready, &deploy_branch)?;
     skipped.extend(merged);
