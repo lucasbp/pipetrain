@@ -87,6 +87,7 @@ One suggestion: in `repo`, several PRs go to the same `base`, so they would depl
 | `title` | string | PR title. |
 | `url` | string | PR web URL. |
 | `scope` | string | `train`, `shared-branch`, `into-train` or `explicit`. |
+| `head` | string | The head branch of the skipped PR, so a `shared-branch` skip can be traced to the branch name that matched. |
 | `reasons` | string[] | One or more of: `already merged`, `closed`, `draft`, `changes requested`, `review required`, `not approved`, `checks pending`, `checks failing`, `no checks reported`, `merge conflict`, `mergeability unknown, retry in a minute`, `already in <ref>`. A merged or closed PR carries only that one reason. `already in <ref>` also stands alone, where `<ref>` is the branch that already contains the PR head: its base branch, or `deploy_branch`. It is the only reason with a variable part, so match it by the `already in ` prefix. |
 
 ## Question

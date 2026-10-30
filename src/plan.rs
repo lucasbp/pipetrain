@@ -17,6 +17,7 @@ pub struct SkippedOut {
     pub title: String,
     pub url: String,
     pub scope: String,
+    pub head: String,
     pub reasons: Vec<String>,
 }
 
@@ -81,6 +82,7 @@ pub fn build(rules: &Rules, gathered: Gathered) -> Plan {
             title: s.pr.title,
             url: s.pr.url,
             scope: s.scope.as_str().to_string(),
+            head: s.pr.head_ref,
             reasons: s.reasons,
         })
         .collect();

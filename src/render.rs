@@ -172,9 +172,11 @@ pub fn text(plan: &Plan) -> String {
         for s in &plan.skipped {
             let _ = writeln!(
                 out,
-                "  {}  {}  ({})",
+                "  {}  {}  [{}: {}]  ({})",
                 s.id,
-                clip(&s.title, 48),
+                clip(&s.title, 40),
+                s.scope,
+                clip(&s.head, 32),
                 s.reasons.join(", ")
             );
         }
