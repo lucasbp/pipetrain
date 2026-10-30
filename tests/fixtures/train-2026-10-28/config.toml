@@ -1,0 +1,18 @@
+orgs = ["acme"]
+max_parallel = 4
+
+[[layer]]
+name = "client"
+repos = ["acme/connector"]
+
+[[layer]]
+name = "api"
+repos = ["acme/svc-*"]
+
+[[layer]]
+name = "bff"
+repos = ["acme/bff-*"]
+
+[[layer]]
+name = "front"
+repos = ["acme/front-*"]

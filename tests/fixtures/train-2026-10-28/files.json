@@ -1,0 +1,219 @@
+{
+  "acme/svc-auth#39": [
+    {
+      "filename": "src/Acme.Auth.Client/Acme.Auth.Client.csproj",
+      "status": "modified",
+      "patch": "@@ -3,7 +3,7 @@\n   <PropertyGroup>\n     <TargetFramework>net10.0</TargetFramework>\n     <PackageId>Acme.Auth.Client</PackageId>\n-    <Version>2.1.0</Version>\n+    <Version>2.2.0</Version>\n   </PropertyGroup>\n </Project>"
+    },
+    {
+      "filename": "src/Acme.Auth.Client/TokenValidator.cs",
+      "status": "modified",
+      "patch": "@@ -1,3 +1,4 @@\n existing line\n+new line\n existing line\n existing line"
+    }
+  ],
+  "acme/svc-confirm#22": [
+    {
+      "filename": "src/Acme.Confirm/Services/ConfirmationService.cs",
+      "status": "modified",
+      "patch": "@@ -1,3 +1,4 @@\n existing line\n+new line\n existing line\n existing line"
+    }
+  ],
+  "acme/svc-billing#21": [
+    {
+      "filename": "db/migrations/20261028_add_company_pkg.sql",
+      "status": "modified",
+      "patch": "@@ -1,3 +1,4 @@\n existing line\n+new line\n existing line\n existing line"
+    },
+    {
+      "filename": "src/Acme.Billing/Repositories/CompanyRepository.cs",
+      "status": "modified",
+      "patch": "@@ -1,3 +1,4 @@\n existing line\n+new line\n existing line\n existing line"
+    }
+  ],
+  "acme/connector#91": [
+    {
+      "filename": "src/Acme.Connector/Sync/AppointmentSync.cs",
+      "status": "modified",
+      "patch": "@@ -1,3 +1,4 @@\n existing line\n+new line\n existing line\n existing line"
+    },
+    {
+      "filename": "README.md",
+      "status": "modified",
+      "patch": "@@ -1,3 +1,4 @@\n existing line\n+new line\n existing line\n existing line"
+    }
+  ],
+  "acme/bff-appointments#44": [
+    {
+      "filename": "src/App/App.csproj",
+      "status": "modified",
+      "patch": "@@ -10,7 +10,7 @@\n <ItemGroup>\n-    <PackageReference Include=\"Acme.Auth.Client\" Version=\"2.1.0\" />\n+    <PackageReference Include=\"Acme.Auth.Client\" Version=\"2.2.0\" />\n     <PackageReference Include=\"Newtonsoft.Json\" Version=\"13.0.3\" />\n </ItemGroup>"
+    },
+    {
+      "filename": "src/App/Controllers/AppointmentsController.cs",
+      "status": "modified",
+      "patch": "@@ -1,3 +1,4 @@\n existing line\n+new line\n existing line\n existing line"
+    }
+  ],
+  "acme/bff-hub#27": [
+    {
+      "filename": "src/App/App.csproj",
+      "status": "modified",
+      "patch": "@@ -10,7 +10,7 @@\n <ItemGroup>\n-    <PackageReference Include=\"Acme.Auth.Client\" Version=\"2.1.0\" />\n+    <PackageReference Include=\"Acme.Auth.Client\" Version=\"2.2.0\" />\n     <PackageReference Include=\"Newtonsoft.Json\" Version=\"13.0.3\" />\n </ItemGroup>"
+    },
+    {
+      "filename": "src/App/Controllers/HubController.cs",
+      "status": "modified",
+      "patch": "@@ -1,3 +1,4 @@\n existing line\n+new line\n existing line\n existing line"
+    }
+  ],
+  "acme/bff-reports#97": [
+    {
+      "filename": "src/App/Controllers/ProfileController.cs",
+      "status": "modified",
+      "patch": "@@ -1,3 +1,4 @@\n existing line\n+new line\n existing line\n existing line"
+    },
+    {
+      "filename": "docs/reports.md",
+      "status": "modified",
+      "patch": "@@ -1,3 +1,4 @@\n existing line\n+new line\n existing line\n existing line"
+    }
+  ],
+  "acme/bff-manager#2": [
+    {
+      "filename": "src/App/Controllers/ManagerController.cs",
+      "status": "modified",
+      "patch": "@@ -1,3 +1,4 @@\n existing line\n+new line\n existing line\n existing line"
+    }
+  ],
+  "acme/front-appointments#35": [
+    {
+      "filename": "package.json",
+      "status": "modified",
+      "patch": "@@ -5,8 +5,8 @@\n   \"scripts\": {\n-    \"build\": \"tsc\",\n+    \"build\": \"tsc -b\",\n     \"test\": \"vitest\"\n   },\n   \"dependencies\": {\n-    \"@acme/ui-kit\": \"^1.4.0\",\n+    \"@acme/ui-kit\": \"^1.5.0\",\n     \"vue\": \"^3.5.0\"\n   }"
+    },
+    {
+      "filename": "src/views/AppointmentList.ts",
+      "status": "modified",
+      "patch": "@@ -1,3 +1,4 @@\n existing line\n+new line\n existing line\n existing line"
+    }
+  ],
+  "acme/front-hub#40": [
+    {
+      "filename": "package.json",
+      "status": "modified",
+      "patch": "@@ -5,8 +5,8 @@\n   \"scripts\": {\n-    \"build\": \"tsc\",\n+    \"build\": \"tsc -b\",\n     \"test\": \"vitest\"\n   },\n   \"dependencies\": {\n-    \"@acme/ui-kit\": \"^1.4.0\",\n+    \"@acme/ui-kit\": \"^1.5.0\",\n     \"vue\": \"^3.5.0\"\n   }"
+    },
+    {
+      "filename": "src/views/HubHome.ts",
+      "status": "modified",
+      "patch": "@@ -1,3 +1,4 @@\n existing line\n+new line\n existing line\n existing line"
+    }
+  ],
+  "acme/front-portal#39": [
+    {
+      "filename": "src/views/PortalHome.ts",
+      "status": "modified",
+      "patch": "@@ -1,3 +1,4 @@\n existing line\n+new line\n existing line\n existing line"
+    },
+    {
+      "filename": "CHANGELOG.md",
+      "status": "modified",
+      "patch": "@@ -1,3 +1,4 @@\n existing line\n+new line\n existing line\n existing line"
+    }
+  ],
+  "acme/front-reports#44": [
+    {
+      "filename": "src/components/ProfileCard.ts",
+      "status": "modified",
+      "patch": "@@ -1,3 +1,4 @@\n existing line\n+new line\n existing line\n existing line"
+    }
+  ],
+  "acme/front-profile#6": [
+    {
+      "filename": "src/views/ProfileEdit.ts",
+      "status": "modified",
+      "patch": "@@ -1,3 +1,4 @@\n existing line\n+new line\n existing line\n existing line"
+    },
+    {
+      "filename": "README.md",
+      "status": "modified",
+      "patch": "@@ -1,3 +1,4 @@\n existing line\n+new line\n existing line\n existing line"
+    }
+  ],
+  "acme/connector#90": [
+    {
+      "filename": "src/Acme.Connector/Patients/DependentLinker.cs",
+      "status": "modified",
+      "patch": "@@ -1,3 +1,4 @@\n existing line\n+new line\n existing line\n existing line"
+    }
+  ],
+  "acme/bff-appointments#42": [
+    {
+      "filename": "src/App/Services/DependentService.cs",
+      "status": "modified",
+      "patch": "@@ -1,3 +1,4 @@\n existing line\n+new line\n existing line\n existing line"
+    }
+  ],
+  "acme/svc-confirm#20": [
+    {
+      "filename": "src/Acme.Confirm/Reports/DailyReportBuilder.cs",
+      "status": "modified",
+      "patch": "@@ -1,3 +1,4 @@\n existing line\n+new line\n existing line\n existing line"
+    },
+    {
+      "filename": "src/Acme.Confirm/Reports/DailyReportDto.cs",
+      "status": "modified",
+      "patch": "@@ -1,3 +1,4 @@\n existing line\n+new line\n existing line\n existing line"
+    }
+  ],
+  "acme/front-portal#38": [
+    {
+      "filename": "src/views/DailyReport.ts",
+      "status": "modified",
+      "patch": "@@ -1,3 +1,4 @@\n existing line\n+new line\n existing line\n existing line"
+    },
+    {
+      "filename": "src/api/reports.ts",
+      "status": "modified",
+      "patch": "@@ -1,3 +1,4 @@\n existing line\n+new line\n existing line\n existing line"
+    }
+  ],
+  "acme/connector#87": [
+    {
+      "filename": "src/Acme.Connector/Insurance/InsuranceCardMapper.cs",
+      "status": "modified",
+      "patch": "@@ -1,3 +1,4 @@\n existing line\n+new line\n existing line\n existing line"
+    }
+  ],
+  "acme/connector#88": [
+    {
+      "filename": "src/Acme.Connector/Procedures/PreparationSync.cs",
+      "status": "modified",
+      "patch": "@@ -1,3 +1,4 @@\n existing line\n+new line\n existing line\n existing line"
+    },
+    {
+      "filename": "docs/procedure-preparation.md",
+      "status": "modified",
+      "patch": "@@ -1,3 +1,4 @@\n existing line\n+new line\n existing line\n existing line"
+    }
+  ],
+  "acme/connector#89": [
+    {
+      "filename": "src/Acme.Connector/Insurance/AuthorizationClient.cs",
+      "status": "modified",
+      "patch": "@@ -1,3 +1,4 @@\n existing line\n+new line\n existing line\n existing line"
+    }
+  ],
+  "acme/svc-confirm#21": [
+    {
+      "filename": "src/Acme.Confirm/Realtime/PreparationNotifier.cs",
+      "status": "modified",
+      "patch": "@@ -1,3 +1,4 @@\n existing line\n+new line\n existing line\n existing line"
+    },
+    {
+      "filename": "src/Acme.Confirm/Realtime/PreparationHub.cs",
+      "status": "modified",
+      "patch": "@@ -1,3 +1,4 @@\n existing line\n+new line\n existing line\n existing line"
+    }
+  ]
+}

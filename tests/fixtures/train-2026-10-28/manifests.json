@@ -1,0 +1,77 @@
+[
+  {
+    "repo": "acme/svc-auth",
+    "path": "src/Acme.Auth.Client/Acme.Auth.Client.csproj",
+    "text": "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <PropertyGroup>\n    <TargetFramework>net10.0</TargetFramework>\n    <PackageId>Acme.Auth.Client</PackageId>\n  </PropertyGroup>\n</Project>"
+  },
+  {
+    "repo": "acme/svc-auth",
+    "path": "src/Acme.Auth.Api/Acme.Auth.Api.csproj",
+    "text": "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <PropertyGroup>\n    <TargetFramework>net10.0</TargetFramework>\n  </PropertyGroup>\n</Project>"
+  },
+  {
+    "repo": "acme/svc-confirm",
+    "path": "src/Acme.Confirm/Acme.Confirm.csproj",
+    "text": "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <PropertyGroup>\n    <TargetFramework>net10.0</TargetFramework>\n  </PropertyGroup>\n</Project>"
+  },
+  {
+    "repo": "acme/svc-billing",
+    "path": "src/Acme.Billing/Acme.Billing.csproj",
+    "text": "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <PropertyGroup>\n    <TargetFramework>net10.0</TargetFramework>\n  </PropertyGroup>\n</Project>"
+  },
+  {
+    "repo": "acme/connector",
+    "path": "src/Acme.Connector/Acme.Connector.csproj",
+    "text": "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <PropertyGroup>\n    <TargetFramework>net10.0</TargetFramework>\n  </PropertyGroup>\n</Project>"
+  },
+  {
+    "repo": "acme/bff-appointments",
+    "path": "src/App/App.csproj",
+    "text": "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <PropertyGroup>\n    <TargetFramework>net10.0</TargetFramework>\n  </PropertyGroup>\n  <ItemGroup>\n    <PackageReference Include=\"Acme.Auth.Client\" Version=\"2.1.0\" />\n    <PackageReference Include=\"Newtonsoft.Json\" Version=\"13.0.3\" />\n  </ItemGroup>\n</Project>"
+  },
+  {
+    "repo": "acme/bff-hub",
+    "path": "src/App/App.csproj",
+    "text": "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <PropertyGroup>\n    <TargetFramework>net10.0</TargetFramework>\n  </PropertyGroup>\n  <ItemGroup>\n    <PackageReference Include=\"Acme.Auth.Client\" Version=\"2.1.0\" />\n    <PackageReference Include=\"Newtonsoft.Json\" Version=\"13.0.3\" />\n  </ItemGroup>\n</Project>"
+  },
+  {
+    "repo": "acme/bff-reports",
+    "path": "src/App/App.csproj",
+    "text": "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <PropertyGroup>\n    <TargetFramework>net10.0</TargetFramework>\n  </PropertyGroup>\n</Project>"
+  },
+  {
+    "repo": "acme/bff-manager",
+    "path": "src/App/App.csproj",
+    "text": "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <PropertyGroup>\n    <TargetFramework>net10.0</TargetFramework>\n  </PropertyGroup>\n</Project>"
+  },
+  {
+    "repo": "acme/front-appointments",
+    "path": "package.json",
+    "text": "{\n  \"name\": \"appointments\",\n  \"private\": true,\n  \"scripts\": { \"build\": \"tsc\" },\n  \"dependencies\": { \"@acme/ui-kit\": \"^1.4.0\", \"vue\": \"^3.5.0\" }\n}"
+  },
+  {
+    "repo": "acme/front-hub",
+    "path": "package.json",
+    "text": "{\n  \"name\": \"hub\",\n  \"private\": true,\n  \"scripts\": { \"build\": \"tsc\" },\n  \"dependencies\": { \"@acme/ui-kit\": \"^1.4.0\", \"vue\": \"^3.5.0\" }\n}"
+  },
+  {
+    "repo": "acme/front-portal",
+    "path": "packages/ui-kit/package.json",
+    "text": "{\n  \"name\": \"@acme/ui-kit\",\n  \"version\": \"1.5.0\"\n}"
+  },
+  {
+    "repo": "acme/front-portal",
+    "path": "package.json",
+    "text": "{\n  \"name\": \"portal\",\n  \"private\": true\n}"
+  },
+  {
+    "repo": "acme/front-reports",
+    "path": "package.json",
+    "text": "{\n  \"name\": \"reports\",\n  \"private\": true,\n  \"scripts\": { \"build\": \"tsc\" },\n  \"dependencies\": { \"@acme/ui-kit\": \"^1.4.0\", \"vue\": \"^3.5.0\" }\n}"
+  },
+  {
+    "repo": "acme/front-profile",
+    "path": "package.json",
+    "text": "{\n  \"name\": \"profile\",\n  \"private\": true,\n  \"scripts\": { \"build\": \"tsc\" },\n  \"dependencies\": { \"@acme/ui-kit\": \"^1.4.0\", \"vue\": \"^3.5.0\" }\n}"
+  }
+]

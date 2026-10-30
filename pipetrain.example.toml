@@ -1,0 +1,68 @@
+# Copy to pipetrain.toml (current directory) or to the user config directory
+# (<config dir>/pipetrain/config.toml). Unknown keys are rejected.
+# Values shown are the built-in defaults unless marked "example".
+
+# GitHub organizations to search for open PRs (example).
+orgs = ["acme"]
+
+# Cap on PRs the plan shows side by side in one stage.
+max_parallel = 4
+
+# The train branch is train_prefix + dd-mm-yyyy, for example deploy/29-10-2026.
+train_prefix = "deploy/"
+
+# Head branches starting with these prefixes never count as a shared branch.
+ignore_branch_prefixes = ["dependabot/", "renovate/"]
+
+# false: a PR with no checks reported is skipped as "no checks reported".
+allow_missing_checks = false
+
+# Repos (org/repo globs) where missing checks are accepted (example).
+checks_optional_repos = ["acme/docs-*"]
+
+# Layers, in merge order: the first [[layer]] goes first. Repos are
+# case-insensitive globs matched against "org/repo" (example).
+[[layer]]
+name = "lib"
+repos = ["acme/*-lib", "acme/shared-*"]
+
+[[layer]]
+name = "client"
+repos = ["acme/*-client", "acme/*-sdk"]
+
+[[layer]]
+name = "api"
+repos = ["acme/*-api", "acme/api-*"]
+
+[[layer]]
+name = "bff"
+repos = ["acme/*-bff"]
+
+[[layer]]
+name = "front"
+repos = ["acme/*-web", "acme/*-front"]
+
+[deploy]
+# A PR touching these paths is a DDL gate.
+ddl_globs = ["**/*.sql", "**/migrations/**", "**/migration/**"]
+# Every PR of these repos (org/repo, exact) is an infra gate (example).
+infra_repos = ["acme/infra"]
+# A PR touching these paths is an infra gate.
+infra_globs = ["**/*.tf"]
+
+# Deploy targets: repos that deploy together share one serial queue per base
+# branch. Key is org/repo in lowercase, value is the group name (example).
+[targets]
+"acme/orders-api" = "orders"
+"acme/orders-worker" = "orders"
+
+# Package publishers: package name (lowercase) to the org/repo that publishes
+# it. Pin a package here when the scan finds more than one publisher (example).
+[packages]
+"acme.orders.client" = "acme/orders-client"
+
+# Request budget for one run.
+[api]
+max_requests = 150
+max_per_minute = 60
+min_remaining = 200
