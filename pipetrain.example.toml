@@ -63,6 +63,6 @@ infra_globs = ["**/*.tf"]
 
 # Request budget for one run.
 [api]
-max_requests = 150
-max_per_minute = 60
+max_requests = 300
+max_per_minute = 100
 min_remaining = 200

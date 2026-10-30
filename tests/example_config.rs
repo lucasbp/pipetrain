@@ -9,7 +9,9 @@ fn example_text() -> String {
 fn example_config_parses() {
     let cfg = Config::parse(&example_text()).expect("example config parses");
     assert!(cfg.layer.len() >= 4);
-    assert_eq!(cfg.api.max_requests, 150);
+    assert_eq!(cfg.api.max_requests, 300);
+    assert_eq!(cfg.api.max_per_minute, 100);
+    assert_eq!(cfg.api.min_remaining, 200);
 }
 
 #[test]

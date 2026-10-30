@@ -82,8 +82,8 @@ impl Default for DeployConfig {
 impl Default for ApiConfig {
     fn default() -> Self {
         Self {
-            max_requests: 150,
-            max_per_minute: 60,
+            max_requests: 300,
+            max_per_minute: 100,
             min_remaining: 200,
         }
     }

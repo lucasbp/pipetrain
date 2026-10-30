@@ -1,5 +1,7 @@
+pub mod bundle;
 pub mod command;
 pub mod config;
+pub mod contained;
 pub mod detect;
 pub mod discovery;
 pub mod github;

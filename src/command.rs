@@ -5,6 +5,7 @@ use anyhow::{Context, Result, bail};
 use chrono::{Local, NaiveDate, SecondsFormat};
 
 use crate::config::{Config, Rules};
+use crate::contained;
 use crate::detect;
 use crate::discovery::{self, Discovered};
 use crate::github::{self, Client};
@@ -124,6 +125,7 @@ pub fn plan(opts: PlanOptions) -> Result<()> {
     }
     let rules = Rules::new(&cfg)?;
     let date = parse_date(opts.date.as_deref())?;
+    let deploy_branch = discovery::train_branch(&cfg, date);
 
     let mut explicit = Vec::new();
     for raw in &opts.prs {
@@ -146,10 +148,13 @@ pub fn plan(opts: PlanOptions) -> Result<()> {
 
     let mut client = Client::new(github::token()?, &cfg.api, opts.verbose);
     let Discovered {
-        mut ready,
-        skipped,
+        ready,
+        mut skipped,
         mut questions,
     } = discover(&mut client, &cfg, &explicit, &train)?;
+
+    let (mut ready, merged) = contained::filter(&mut client, ready, &deploy_branch)?;
+    skipped.extend(merged);
 
     load_files(&mut client, &mut ready)?;
 
@@ -168,6 +173,8 @@ pub fn plan(opts: PlanOptions) -> Result<()> {
     let gathered = Gathered {
         generated_at: Local::now().to_rfc3339_opts(SecondsFormat::Secs, false),
         train,
+        deploy_branch,
+        train_prefix: cfg.train_prefix.clone(),
         orgs: if explicit.is_empty() {
             cfg.orgs.clone()
         } else {

@@ -4,13 +4,37 @@ The planner turns a set of ready PRs into a directed graph: an edge `A -> B` mea
 
 The guiding principle is **when in doubt, serial**. Waiting is cheap and a wrong parallel merge is not, so every rule only ever adds an ordering constraint. The planner never removes one, and it never guesses a direction it cannot justify: it asks a question instead (see "Questions").
 
-Code: `src/planner.rs` (rules, graph, stages, lanes), `src/discovery.rs` (which PRs are in), `src/detect.rs` (Depends-On and package bumps), `src/config.rs` (gate, layer, target matching).
+Code: `src/planner.rs` (rules, graph, stages, lanes), `src/discovery.rs` (which PRs are in), `src/contained.rs` (PRs already in the base or the train), `src/bundle.rs` (deploy bundling suggestion), `src/detect.rs` (Depends-On and package bumps), `src/config.rs` (gate, layer, target matching).
 
 ## What goes into the plan
 
 Only PRs that are ready: not merged, not closed, not draft, approved (or with no review decision at all, see below), checks green and no merge conflict. A PR that fails any of these shows up under `skipped` with the reasons and takes no part in ordering.
 
 Why only ready PRs: the plan answers "in what order do I merge what can be merged now". A PR that is not ready cannot be merged, so ordering it would be fiction. When a skipped PR matters to a ready one, the planner raises a question instead (`sibling-not-ready`, `stacked-not-ready`, `depends-on-open`).
+
+### Already in the base or in the train
+
+A ready PR can still have nothing left to merge: its commits may already be in its base branch (merged by another route, or its branch was merged into the base directly), or already in the train branch. Planning it would put a no-op merge in the order.
+
+After discovery and before anything is read about the PR's files, each ready PR (explicit ones included) is compared on GitHub, through GraphQL `ref.compare(headRef: <sha>)`, in batches of up to 20 comparisons per request, against:
+
+- its base branch, always;
+- the train branch of the run date (`train_prefix` + `dd-mm-yyyy`), unless the PR targets the train branch or comes from it.
+
+When `aheadBy` is 0 against a branch, the PR head adds nothing there, and the PR goes to `skipped` with the single reason `already in <ref>`, where `<ref>` is the first branch that contains it. It takes no part in ordering and raises no question.
+
+Limits of the check:
+
+- A branch that does not exist in the repo counts as "not contained", so a repo without that train branch is never skipped because of it.
+- A PR with no head SHA is not checked.
+- Any GraphQL error other than a missing ref aborts the run, like any other GitHub failure.
+- It compares commits, not content: a PR squash-merged into the base still looks ahead of it, because the squash commit is a different commit.
+
+### Bundling deploys
+
+When 2 or more ready PRs of one repo target the same base, and that base is not a train branch (it does not start with `train_prefix`, compared case-insensitively), the plan adds a `bundles` entry. The suggestion is to create the train branch from that base, retarget those PRs to it, merge them there, and open one PR from the train branch to the base: 1 deploy instead of N. If one of the PRs already has the train branch as its head, it is kept as the carrier and the others retarget to its branch.
+
+This is a suggestion only. It is not an ordering rule, adds no edge and changes no stage or lane; `plan` never creates a branch and never retargets a PR. Why it exists and how to apply it by hand: [saving-pipelines.md](saving-pipelines.md). Fields: [plan-json.md](plan-json.md), section "Bundle".
 
 Review and checks, as read from GitHub:
 

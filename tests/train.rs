@@ -63,6 +63,8 @@ fn build() -> Plan {
         Gathered {
             generated_at: "2026-10-28T10:00:00-03:00".to_string(),
             train: TRAIN.to_string(),
+            deploy_branch: TRAIN.to_string(),
+            train_prefix: "deploy/".to_string(),
             orgs: cfg.orgs.clone(),
             ready: ready
                 .into_iter()
@@ -326,22 +328,35 @@ fn nothing_is_left_undecided_and_every_edge_goes_forward() {
 }
 
 #[test]
+fn stacked_train_has_nothing_to_bundle() {
+    let plan = build();
+    assert!(plan.bundles.is_empty(), "{:?}", plan.bundles);
+    assert_eq!(plan.stats.deploys_saved, 0);
+    assert_eq!(plan.stats.deploys_now, plan.stats.deploys_after);
+}
+
+#[test]
 fn json_output_keeps_the_documented_shape() {
     let plan = build();
     let value = serde_json::to_value(&plan).unwrap();
     assert_eq!(value["schema"], 1);
     for key in [
         "train",
+        "deploy_branch",
         "orgs",
         "items",
         "gate",
         "lanes",
+        "bundles",
         "skipped",
         "questions",
         "notes",
         "stats",
     ] {
         assert!(value.get(key).is_some(), "missing {key}");
+    }
+    for key in ["deploys_saved", "deploys_now", "deploys_after"] {
+        assert!(value["stats"].get(key).is_some(), "stats miss {key}");
     }
     let item = &value["items"][0];
     for key in [

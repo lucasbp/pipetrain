@@ -77,6 +77,11 @@ pub fn text(plan: &Plan) -> String {
     );
     let _ = writeln!(
         out,
+        "  deploys   {} now, {} after bundling",
+        plan.stats.deploys_now, plan.stats.deploys_after
+    );
+    let _ = writeln!(
+        out,
         "  api       {} requests, {} left",
         plan.stats.requests,
         plan.stats
@@ -127,6 +132,37 @@ pub fn text(plan: &Plan) -> String {
                     true,
                 );
                 after_lines(&mut out, item, "          ");
+            }
+        }
+    }
+
+    if !plan.bundles.is_empty() {
+        let _ = writeln!(
+            out,
+            "\nBUNDLES  one deploy branch instead of N deploys (suggestion, nothing was changed)"
+        );
+        for b in &plan.bundles {
+            let ids = b.retarget.join(", ");
+            let _ = writeln!(
+                out,
+                "  {}  {} PRs into {} -> 1 deploy, saves {}",
+                b.repo, b.deploys_now, b.base, b.saved
+            );
+            match &b.existing_train_pr {
+                None => {
+                    let _ = writeln!(
+                        out,
+                        "        create {} from {}, retarget {ids}, merge them there, then open one PR {} -> {}",
+                        b.branch, b.base, b.branch, b.base
+                    );
+                }
+                Some(existing) => {
+                    let _ = writeln!(
+                        out,
+                        "        retarget {ids} to {} and merge them there; {existing} then carries all of them",
+                        b.branch
+                    );
+                }
             }
         }
     }

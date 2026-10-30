@@ -53,7 +53,15 @@ The train branch is `train_prefix` plus the date, for example `deploy/29-10-2026
 - on a branch name that is open in 2 or more repos, which is how one change spans repos (`shared-branch`);
 - targeting the train branch (`into-train`).
 
-Of those, only PRs that are ready enter the plan: not draft, approved, checks green, no merge conflict. The rest are listed as `SKIPPED` with the reasons, and a few of them raise a question when they affect a ready PR. How the order is then decided, rule by rule, is in [docs/planner.md](docs/planner.md).
+Of those, only PRs that are ready enter the plan: not draft, approved, checks green, no merge conflict. A repo with no checks at all blocks its PRs, unless `allow_missing_checks` is on or the repo matches a glob in `checks_optional_repos`. The rest are listed as `SKIPPED` with the reasons, and a few of them raise a question when they affect a ready PR. How the order is then decided, rule by rule, is in [docs/planner.md](docs/planner.md).
+
+## Two checks before the order
+
+**Already merged.** A ready PR whose commits are already in its base branch, or already in the train branch, has nothing left to merge. pipetrain compares each ready PR with those branches on GitHub (GraphQL, up to 20 comparisons per request). When the PR adds nothing, it goes to `SKIPPED` with the reason `already in <branch>` and stays out of the plan. A branch that does not exist counts as "not contained", and a PR with no head commit is not checked.
+
+**Bundling deploys.** When 2 or more ready PRs of the same repo target the same base (for example `main`), each one is a deploy of that repo. The plan then adds a `BUNDLES` section suggesting one train branch instead: create it from the base, retarget those PRs to it, merge them there, and open a single PR from it to the base. N deploys become 1, and the `deploys` line shows both numbers. Bases that are themselves train branches are not bundled.
+
+Both are read-only. The bundle is a suggestion: pipetrain does not create the branch and does not retarget anything. Why, the arithmetic and how to apply it by hand: [docs/saving-pipelines.md](docs/saving-pipelines.md).
 
 ## Example output
 
@@ -63,8 +71,9 @@ An invented run for the org `acme`:
 pipetrain plan  (read-only, nothing was merged)
   train     deploy/29-10-2026
   orgs      acme
-  found     7 ready, 1 skipped, 1 questions
+  found     7 ready, 2 skipped, 1 questions
   parallel  peak 3 at once (cap 4)
+  deploys   7 now, 6 after bundling
   api       23 requests, 4811 left
 
 GATE  runs first, pauses for your confirmation
@@ -86,7 +95,12 @@ LANE 3
   s3    acme/orders-web#88     [front] Show order status badge
           after acme/orders-client#12  (layer: layer client goes before layer front on branch `feat/order-status`)
 
+BUNDLES  one deploy branch instead of N deploys (suggestion, nothing was changed)
+  acme/billing-api  2 PRs into main -> 1 deploy, saves 1
+        create deploy/29-10-2026 from main, retarget acme/billing-api#230, acme/billing-api#233, merge them there, then open one PR deploy/29-10-2026 -> main
+
 SKIPPED  not ready, left out of the plan
+  acme/billing-api#228  Fix rounding in invoice PDF  (already in main)
   acme/billing-api#231  WIP retry failed charges  (draft)
 
 ?  QUESTIONS  the planner could not decide these
@@ -102,6 +116,9 @@ How to read it:
 - **after**: the PR that must merge first, the rule that says so, and the reason.
 - **?**: the PR has an open question, listed at the end with a suggested fix. A question never changes the exit code.
 - **[api]**, **[lib]**: the layer of the repo, from your config.
+- **deploys**: how many deploys the ready PRs cause today (every PR that does not target a train branch is one), and how many remain if every bundle is applied.
+- **BUNDLES**: a suggestion to merge several PRs of one repo through one train branch. Shown only when there is something to bundle. Nothing was created or retargeted.
+- **SKIPPED**: PRs that are not ready, or that are `already in` a branch. `already in main` means the PR head is already part of `main`.
 
 A `NOTES` section appears at the end when there is something informational, for example a `Depends-On` that points at a PR already merged.
 
@@ -119,13 +136,17 @@ With no file at all it runs on built-in defaults, which means you must pass `--o
 
 ## API budget
 
-A run spends GitHub API requests: a search per org, a few per PR, one tree per repo it needs to scan. Three settings under `[api]` keep that bounded:
+A run spends GitHub API requests: a search per org, a few per PR, one batched comparison per 20 PRs for the "already merged" check, one tree per repo it needs to scan. Three settings under `[api]` keep that bounded:
 
 | Key | Default | Behavior |
 |---|---|---|
-| `max_requests` | 150 | The run stops with an error when it reaches this many requests. |
-| `max_per_minute` | 60 | The run slows down to stay under this rate. It waits, it does not fail. |
+| `max_requests` | 300 | The run stops with an error when it reaches this many requests. |
+| `max_per_minute` | 100 | The run slows down to stay under this rate. It waits, it does not fail. |
 | `min_remaining` | 200 | The run stops with an error when GitHub reports fewer requests left than this. |
+
+GitHub counts the REST API (`core`) and GraphQL separately, and the guard follows that. `max_requests` and `max_per_minute` count every request of the run, REST and GraphQL together. `min_remaining` is checked per resource, using the `x-ratelimit-resource` header of each response, so a low GraphQL budget stops the run even when `core` is full. The `api` line of the output shows the lowest remaining value seen across resources.
+
+Redirects are not followed. GitHub answers a renamed or moved repo with a redirect, and pipetrain stops with an error saying the repo was renamed or moved, instead of silently planning against a different one. Use the new name.
 
 `--verbose` prints each request, and each wait, to stderr. The `api` line of the output shows how many requests the run used and how many GitHub says remain.
 
@@ -146,6 +167,7 @@ pipetrain does not merge, push, approve, comment, label, re-run checks or write 
 
 - [docs/planner.md](docs/planner.md): the rules, in the order they apply, and every question the planner can raise.
 - [docs/plan-json.md](docs/plan-json.md): the `--json` contract.
+- [docs/saving-pipelines.md](docs/saving-pipelines.md): why the plan checks "already in the base", why it suggests a deploy branch, and how to apply it by hand.
 - [pipetrain.example.toml](pipetrain.example.toml): the config, annotated.
 
 ## License
