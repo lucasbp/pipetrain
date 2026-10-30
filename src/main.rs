@@ -4,6 +4,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 use pipetrain::command::{PlanOptions, plan};
+use pipetrain::doctor::{self, DoctorOptions};
 use pipetrain::emit::Emit;
 
 #[derive(Parser)]
@@ -21,6 +22,11 @@ struct Cli {
 enum Command {
     #[command(about = "Read-only: shows which PRs go in which order, and why")]
     Plan(PlanArgs),
+
+    #[command(
+        about = "Read-only: checks the token, the API, the rate limit, the config and the orgs"
+    )]
+    Doctor(DoctorArgs),
 }
 
 #[derive(clap::Args)]
@@ -76,15 +82,51 @@ struct PlanArgs {
     color: clap::ColorChoice,
 }
 
+#[derive(clap::Args)]
+struct DoctorArgs {
+    #[arg(
+        long,
+        help = "Config file (default: ./pipetrain.toml, then the user config dir)"
+    )]
+    config: Option<PathBuf>,
+
+    #[arg(long = "org", help = "Org to check, overrides the config; repeatable")]
+    orgs: Vec<String>,
+
+    #[arg(long, help = "Print the checks as JSON")]
+    json: bool,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value = "auto",
+        conflicts_with = "json",
+        help = "Colors: auto (only on a terminal, honors NO_COLOR), always, never"
+    )]
+    color: clap::ColorChoice,
+}
+
+fn apply_color(choice: clap::ColorChoice) {
+    anstream::ColorChoice::write_global(match choice {
+        clap::ColorChoice::Always => anstream::ColorChoice::Always,
+        clap::ColorChoice::Never => anstream::ColorChoice::Never,
+        clap::ColorChoice::Auto => anstream::ColorChoice::Auto,
+    });
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
+        Command::Doctor(args) => {
+            apply_color(args.color);
+            doctor::run(DoctorOptions {
+                config: args.config,
+                orgs: args.orgs,
+                json: args.json,
+            })
+        }
         Command::Plan(args) => {
-            anstream::ColorChoice::write_global(match args.color {
-                clap::ColorChoice::Always => anstream::ColorChoice::Always,
-                clap::ColorChoice::Never => anstream::ColorChoice::Never,
-                clap::ColorChoice::Auto => anstream::ColorChoice::Auto,
-            });
+            apply_color(args.color);
             plan(PlanOptions {
                 prs: args.prs,
                 all: args.all,

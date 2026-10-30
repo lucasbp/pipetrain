@@ -4,9 +4,17 @@ pipetrain is a command-line tool that plans the order in which pull requests sho
 
 It is read-only. It never merges, pushes, comments or changes anything on GitHub, and it stores nothing. A `go` command that would execute a plan does not exist yet.
 
+## Requirements
+
+- **No Git needed.** pipetrain talks to the GitHub API over HTTPS. It never clones, fetches or runs `git`.
+- **A GitHub token**, from one of two places: the GitHub CLI (`gh`, optional) once you ran `gh auth login`, or the `GH_TOKEN` environment variable. You need only one of them.
+- **Rust only to build from source.** A prebuilt binary needs nothing else. Building needs a recent stable Rust toolchain (the crate uses edition 2024).
+
+Not sure your setup is right? Run `pipetrain doctor` (see [Check your setup](#check-your-setup-doctor)). It checks the token, the API, your rate limit, the config and each org, and says how to fix what is wrong.
+
 ## Install
 
-Requires a recent stable Rust toolchain (the crate uses edition 2024).
+Only needed when you build from source. See [Requirements](#requirements).
 
 ```
 cargo build --release
@@ -20,9 +28,96 @@ cargo install --path .
 
 ## Authentication
 
-pipetrain asks the GitHub CLI for a token (`gh auth token`) and uses it if the command succeeds. Otherwise it falls back to the `GH_TOKEN` environment variable. With neither, it stops with an error telling you to run `gh auth login` or set `GH_TOKEN`.
+pipetrain asks the GitHub CLI for a token (`gh auth token`) and uses it if the command succeeds. Otherwise it falls back to the `GH_TOKEN` environment variable. With neither, it stops with an error that says how to get one for your system.
 
-The token is used in memory for the run. It is never written to disk, to the config file or to the output. It needs to be able to read the pull requests, checks and file contents of the repositories you plan.
+You do not need `gh`. Without it, create a fine-grained token with read-only access (Pull requests: read, Contents: read, Metadata: read) at <https://github.com/settings/personal-access-tokens/new> and set it for the session:
+
+```powershell
+$env:GH_TOKEN = "<your-token>"
+```
+
+```sh
+export GH_TOKEN="<your-token>"
+```
+
+A classic token is not needed. Keep the token out of files and shell history where you can.
+
+The token is used in memory for the run. It is never written to disk, to the config file or to the output, and `pipetrain doctor` never prints it either. It needs to be able to read the pull requests, checks and file contents of the repositories you plan. When an org enforces SAML SSO, the token must also be authorized for that org, or GitHub hides its private repos.
+
+## Check your setup (doctor)
+
+```
+pipetrain doctor [--config <path>] [--org <org>]... [--json] [--color auto|always|never]
+```
+
+`doctor` runs five read-only checks, one line each. It sends only `GET` requests and GraphQL queries, installs nothing, changes nothing and never prints the token.
+
+| Check | What it looks at |
+|---|---|
+| `token` | Whether a token was found, and where (`gh auth token` or `GH_TOKEN`). |
+| `api` | Whether GitHub accepts the token: a GraphQL `viewer` query. Shows the login. |
+| `rate` | Your REST requests left (`GET /rate_limit`). Warns under 500. |
+| `config` | Whether a config file was found, and whether it parses. |
+| `org:<name>` | One line per org, from the config or `--org`: visible or not. Warns when no private repos come back, which is how SAML SSO usually shows up. That is a heuristic: an org with no private repos gets the same warning. |
+
+Each line starts with a status: `[ ok ]`, `[warn]` or `[fail]`. A `warn` or `fail` is followed by what to do about it. When the token is missing or rejected, the checks that need it are shown as `skipped`. Output from a machine that is set up (names changed):
+
+```
+[ ok ] token found a token from `gh auth token`
+[ ok ] api GraphQL answered, signed in as octocat
+[ ok ] rate core: 4914 of 5000 requests left; it resets in about 39 minutes
+[ ok ] config loaded ./pipetrain.toml
+[ ok ] org:acme organization is visible, 134 private repos seen
+5 ok, 0 warn, 0 fail
+```
+
+Output on a machine with no token, no `gh` and no config:
+
+```
+[fail] token no GitHub token: install the GitHub CLI (winget install --id GitHub.cli) and run `gh auth login`, or set GH_TOKEN to a fine-grained read-only token; run `pipetrain doctor` for details
+       Install the GitHub CLI: winget install --id GitHub.cli
+       Then sign in: gh auth login
+       Without gh: create a fine-grained token with read-only access to the repos or org you plan (Pull requests: read, Contents: read, Metadata: read) at https://github.com/settings/personal-access-tokens/new
+       then set it: $env:GH_TOKEN = "<your-token>"
+       Keep the token out of files and shell history where possible. A classic token is not needed.
+[warn] api skipped: no token
+[warn] rate skipped: no token
+[warn] config no config file found; `plan` needs `orgs` from a config or --org
+       Create ./pipetrain.toml with `orgs = ["your-org"]`, or pass --org.
+[warn] org:acme skipped: needs a working token
+0 ok, 4 warn, 1 fail
+```
+
+| Exit code | Meaning |
+|---|---|
+| 0 | No check failed. Warnings do not change this. |
+| 1 | At least one check failed. |
+
+Colors follow `plan`: `--color auto` (the default) colors only on a terminal and honors `NO_COLOR`.
+
+`--json` prints the same checks for scripts and never colors. `--json` and `--color` cannot be combined (exit 2). Keys are sorted alphabetically, and `fix` is `null` when there is nothing to do:
+
+```json
+{
+  "checks": [
+    {
+      "fix": null,
+      "id": "token",
+      "message": "found a token from `gh auth token`",
+      "status": "ok"
+    },
+    {
+      "fix": "Create ./pipetrain.toml with `orgs = [\"your-org\"]`, or pass --org.",
+      "id": "config",
+      "message": "no config file found; `plan` needs `orgs` from a config or --org",
+      "status": "warn"
+    }
+  ],
+  "schema": 1
+}
+```
+
+`status` is `ok`, `warn` or `fail`. The shape is versioned by `schema` (currently 1). Fields are only ever added, so read the ones you know and ignore the rest.
 
 ## Usage
 
@@ -235,7 +330,7 @@ Redirects are not followed. GitHub answers a renamed or moved repo with a redire
 | 1 | An error: no token, bad config, bad `--date`, a PR not found, budget reached, GitHub failure. The message goes to stderr as `error: ...`. |
 | 3 | Only with `--emit queue`: the queue was printed, but at least one question is open. Without `--emit queue` this code is never used. |
 
-A command-line usage mistake (an unknown option, for example) exits with clap's own code, 2.
+A command-line usage mistake (an unknown option, for example) exits with clap's own code, 2. `pipetrain doctor` has its own two codes, listed in [Check your setup](#check-your-setup-doctor).
 
 ## Out of scope
 
