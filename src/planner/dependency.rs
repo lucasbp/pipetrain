@@ -62,7 +62,7 @@ impl Builder<'_> {
         );
         for &first in &firsts {
             for &second in &seconds {
-                self.link(first, second, Rule::Dependency, reason.clone(), true);
+                self.link_package(first, second, Rule::Dependency, reason.clone(), package);
             }
         }
     }

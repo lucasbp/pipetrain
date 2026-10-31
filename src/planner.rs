@@ -52,6 +52,8 @@ pub struct Dependency {
     pub rule: Rule,
     pub reason: String,
     pub implied: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub package: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -99,6 +101,7 @@ struct Edge {
     from: usize,
     rule: Rule,
     reason: String,
+    package: Option<String>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -146,7 +149,12 @@ impl Graph {
         if self.reaches(to, from) {
             return Added::Cycle;
         }
-        self.preds[to].push(Edge { from, rule, reason });
+        self.preds[to].push(Edge {
+            from,
+            rule,
+            reason,
+            package: None,
+        });
         self.succs[from].push(to);
         Added::Yes
     }
@@ -245,6 +253,16 @@ impl<'a> Builder<'a> {
                 message,
                 "the earlier rule wins; add a Depends-On to the PR that should go first if the order is wrong",
             );
+        }
+    }
+
+    fn link_package(&mut self, from: usize, to: usize, rule: Rule, reason: String, package: &str) {
+        self.link(from, to, rule, reason, true);
+        let tagged = self.graph.preds[to]
+            .iter_mut()
+            .find(|e| e.from == from && e.rule == rule && e.package.is_none());
+        if let Some(edge) = tagged {
+            edge.package = Some(package.to_string());
         }
     }
 
@@ -356,7 +374,7 @@ impl<'a> Builder<'a> {
                     for j in targets {
                         let reason =
                             format!("{} bumps {package}, published by {repo}", self.ids[i]);
-                        self.link(j, i, Rule::Package, reason, true);
+                        self.link_package(j, i, Rule::Package, reason, &package);
                     }
                 }
             }
@@ -575,6 +593,7 @@ pub fn plan(input: PlanInput<'_>) -> Planned {
                         rule: e.rule,
                         reason: e.reason.clone(),
                         implied,
+                        package: e.package.clone(),
                     }
                 })
                 .collect();

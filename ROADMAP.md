@@ -22,6 +22,7 @@ pipetrain plans the merge order of pull requests across repos. This file says wh
 - Automatic dependency order from the manifests (NuGet and npm): when a repo references a package that another repo in the plan publishes, the publisher goes first and the reason names the package. A project with no `PackageId` publishes its assembly or project name. An explicit `[[order]]` wins, and repos that reference each other raise a `dependency-cycle` question. Dependencies between ecosystems (NuGet to npm) cannot be detected and stay explicit.
 
 - Queue output carries a `# bundle` comment per suggested deploy branch.
+- Queue output carries a `# wait` comment before a PR that bumps a package published earlier in the queue. Checking the feed stays with the runner.
 
 ## Next
 
@@ -32,7 +33,6 @@ Small, well understood, in this order:
 3. More ways to find the train: a label in addition to the branch name.
 4. Package detection for `Cargo.toml` and `pyproject.toml`, next to npm and NuGet.
 5. A read-only conflict report: which PRs of a train will conflict and what kind of conflict it is.
-6. A `# wait` line in `--emit queue` when a PR publishes a package that a later PR consumes, naming the package and the version, so a runner can wait for the release before continuing. Checking the feed itself starts with GitHub Packages (NuGet) and the npm registry.
 
 ## Later
 
@@ -45,6 +45,7 @@ Bigger or riskier, no order yet:
 - A GitHub Action and an MCP server on top of `--json`, so automation and AI agents can ask what is safe to merge and in what order.
 - Bump consumers automatically after a package release: wait for the new version to reach the feed, update the reference in the dependent repos, then release them. This writes to repos, so it ships as an opt-in mode.
 - A write mode that creates the day's deploy branch and retargets the PRs. Opt-in, explicit, never the default.
+- Check the package feed (GitHub Packages for NuGet, the npm registry) and block until the version appears.
 - Package detection for Go, Maven and Gradle.
 - Other forges.
 - Optional encryption for local storage.

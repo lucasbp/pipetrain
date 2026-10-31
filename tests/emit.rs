@@ -91,6 +91,13 @@ fn without_gate(mut plan: Plan) -> Plan {
     plan
 }
 
+fn without_waits(lines: Vec<String>) -> Vec<String> {
+    lines
+        .into_iter()
+        .filter(|l| !l.starts_with("# wait"))
+        .collect()
+}
+
 fn items_only(lines: &[String]) -> Vec<&String> {
     lines.iter().filter(|l| !l.starts_with('#')).collect()
 }
@@ -121,7 +128,7 @@ fn every_ready_pr_appears_once_and_none_skipped() {
 #[test]
 fn order_is_the_flattened_stages_and_respects_every_edge() {
     let plan = build();
-    let lines = emit::queue_lines(&plan);
+    let lines = without_waits(emit::queue_lines(&plan));
     let mut edges = 0;
     for item in &plan.items {
         for dep in &item.after {
@@ -153,7 +160,7 @@ fn order_is_the_flattened_stages_and_respects_every_edge() {
 fn a_gate_comes_first_then_the_pause_then_the_rest() {
     let plan = build();
     assert_eq!(plan.gate, vec![GATE.to_string()]);
-    let lines = emit::queue_lines(&plan);
+    let lines = without_waits(emit::queue_lines(&plan));
     assert_eq!(lines[0], format!("merge:{GATE}"));
     assert_eq!(lines[1], PAUSE_LINE);
     assert!(lines[2..].iter().all(|l| !l.starts_with('#')));
@@ -163,7 +170,7 @@ fn a_gate_comes_first_then_the_pause_then_the_rest() {
 #[test]
 fn without_a_gate_there_is_no_pause_line() {
     let plan = without_gate(build());
-    let lines = emit::queue_lines(&plan);
+    let lines = without_waits(emit::queue_lines(&plan));
     assert_eq!(lines.len(), 20);
     assert!(lines.iter().all(|l| !l.starts_with('#')));
 }
@@ -336,7 +343,7 @@ fn the_gate_segment_is_first_and_uses_the_same_order() {
 #[test]
 fn the_real_plan_is_sorted_by_the_rule_inside_every_stage() {
     let plan = build();
-    let lines = emit::queue_lines(&plan);
+    let lines = without_waits(emit::queue_lines(&plan));
     let rest: Vec<&pipetrain::planner::Item> = lines
         .iter()
         .skip_while(|l| !l.starts_with('#'))

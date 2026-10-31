@@ -64,6 +64,7 @@ One edge "the PR in `id` goes before this item".
 | `rule` | string | `depends-on`, `package`, `stacked`, `order`, `dependency`, `target`, `layer` or `gate`. |
 | `reason` | string | Human sentence naming the cause. Free text: do not parse it. |
 | `implied` | boolean | `true` when another predecessor of this item already reaches `id`, so the edge adds no constraint. A viewer can hide it. |
+| `package` | string | Only on `package` and `dependency` edges: the package name that `id` publishes and this item consumes, as the manifests spell it. Omitted on every other edge. Added after schema 1 shipped, and additive only. |
 
 ## Bundle
 

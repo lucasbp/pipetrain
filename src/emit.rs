@@ -1,8 +1,10 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use clap::ValueEnum;
 
 use crate::bundle::Bundle;
 use crate::plan::Plan;
-use crate::planner::Item;
+use crate::planner::{Item, Rule};
 
 pub const PAUSE_LINE: &str = "# pause: confirm DDL/infra before continuing";
 pub const EXIT_QUESTIONS: i32 = 3;
@@ -13,8 +15,33 @@ pub enum Emit {
     Queue,
 }
 
-fn item_line(id: &str) -> String {
-    format!("merge:{id}")
+fn wait_lines(plan: &Plan, item: &Item) -> Vec<String> {
+    let mut waits: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for dep in item.after.iter().filter(|d| d.rule == Rule::Package) {
+        let Some(package) = dep.package.as_deref() else {
+            continue;
+        };
+        if plan.items.iter().any(|i| i.id == dep.id) {
+            waits.entry(package).or_default().insert(dep.id.as_str());
+        }
+    }
+    waits
+        .into_iter()
+        .map(|(package, publishers)| {
+            let from: Vec<&str> = publishers.into_iter().collect();
+            format!(
+                "# wait: package {package} from {} must be published before {}",
+                from.join(" "),
+                item.id
+            )
+        })
+        .collect()
+}
+
+fn item_lines(plan: &Plan, item: &Item) -> Vec<String> {
+    let mut lines = wait_lines(plan, item);
+    lines.push(format!("merge:{}", item.id));
+    lines
 }
 
 fn order_key(item: &Item) -> (usize, usize, u64, &str, &str) {
@@ -33,14 +60,14 @@ fn flattened(plan: &Plan) -> Vec<&Item> {
     rest
 }
 
-fn gate_ids(plan: &Plan) -> Vec<&str> {
+fn gated(plan: &Plan) -> Vec<&Item> {
     let mut gate: Vec<&Item> = plan
         .gate
         .iter()
         .filter_map(|id| plan.items.iter().find(|i| i.id == *id))
         .collect();
     gate.sort_by_key(|i| order_key(i));
-    gate.into_iter().map(|i| i.id.as_str()).collect()
+    gate
 }
 
 fn bundle_line(bundle: &Bundle) -> String {
@@ -61,12 +88,15 @@ fn bundle_line(bundle: &Bundle) -> String {
 }
 
 pub fn queue_lines(plan: &Plan) -> Vec<String> {
-    let mut lines: Vec<String> = gate_ids(plan).into_iter().map(item_line).collect();
+    let mut lines: Vec<String> = gated(plan)
+        .into_iter()
+        .flat_map(|i| item_lines(plan, i))
+        .collect();
     let rest = flattened(plan);
     if !lines.is_empty() && !rest.is_empty() {
         lines.push(PAUSE_LINE.to_string());
     }
-    lines.extend(rest.into_iter().map(|i| item_line(&i.id)));
+    lines.extend(rest.into_iter().flat_map(|i| item_lines(plan, i)));
     if lines.is_empty() {
         return lines;
     }

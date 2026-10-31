@@ -14,7 +14,12 @@
 | `merge:<org>/<repo>#<n>` | Merge this PR. |
 | `# pause: confirm DDL/infra before continuing` | Stop here until a human confirms. |
 | `# bundle <org>/<repo>: <N> PRs into <base> could be 1 deploy (saves <N-1>): <PR ids>` | Informative. One per suggested deploy branch. The runner skips it like any `#` line. |
+| `# wait: package <pkg> from <PR ids> must be published before <org>/<repo>#<n>` | The PRs after `from` publish `<pkg>` and the PR in the `merge:` line right below bumps it to the version they publish. The runner stops there until the package is in the feed. pipetrain does not query the feed. A runner that does not understand the line ignores it like any `#` line. |
 | `# ...` | Any line that starts with `#` is a comment. Skip it. |
+
+## Wait comments
+
+Only a PR that bumps the version of a package that other PRs of the same queue publish waits (edge rule `package`). One `# wait` line is printed immediately before the consumer's `merge:` line for each such package, naming every publisher in the queue, sorted by id. A PR that only references the package (edge rule `dependency`) has an ordering edge and no `# wait` line: it can use the version already in the feed. Gate PRs get the line too. Several lines for one consumer are sorted by package. The line names no version: the planner only knows the package name, and it makes no request to learn the published version. A queue with no such edge has no `# wait` line and is byte-identical to the same queue before this line existed. Every `merge:` and `# pause` line is the same with or without the `# wait` lines, in the same relative order.
 
 ## Bundle comments
 
