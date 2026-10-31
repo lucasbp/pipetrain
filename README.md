@@ -279,6 +279,7 @@ merge:acme/web#7
 
 - **Items.** `merge:<org>/<repo>#<n>`, one per ready PR. Skipped PRs never appear. Lines that start with `#` are comments.
 - **Order.** The plan's execution order: gate PRs first, then the `# pause: ...` line, then every other PR by stage. Inside one stage the order follows your `[[layer]]` entries (the first entry goes first, for example lib, client, api, bff, front), then PR number, then repo slug; a PR with no layer comes last in its stage. The gate PRs follow the same rule among themselves. The tiebreak never moves a PR across stages or against an `after` edge. There is no blank line.
+- **Bundle comments.** When the plan suggests a deploy branch for a repo, the queue opens with one `# bundle <org>/<repo>: <N> PRs into <base> could be 1 deploy (saves <N-1>): <PR ids>` line per suggestion. It is informative: the saving only happens if you create the day's deploy branch first, and the `merge:` lines do not change.
 - **Pause.** The runner should stop at the `# pause` line until a human confirms the database or infrastructure change. If no PR follows the gate, the line is omitted.
 - **Lanes are flattened.** The plan runs independent lanes side by side, the queue lists them one after the other. A serial runner is correct with it, only slower than the lanes would be.
 - **Questions.** Each open question goes to stderr as `? <pr>: <message>` (`? (repo): ...` when it is not about one PR), before anything else. The queue is still printed.

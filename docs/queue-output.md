@@ -13,13 +13,19 @@
 |---|---|
 | `merge:<org>/<repo>#<n>` | Merge this PR. |
 | `# pause: confirm DDL/infra before continuing` | Stop here until a human confirms. |
+| `# bundle <org>/<repo>: <N> PRs into <base> could be 1 deploy (saves <N-1>): <PR ids>` | Informative. One per suggested deploy branch. The runner skips it like any `#` line. |
 | `# ...` | Any line that starts with `#` is a comment. Skip it. |
+
+## Bundle comments
+
+When the plan suggests a deploy branch for a repo, the queue starts with one `# bundle` line per suggestion, before the first `merge:` line and before the gate. The PR ids are the PRs the plan would carry in that branch, the existing train PR first when there is one. The bundles keep the order of the plan's `bundles`. The saving only happens if a person creates the day's deploy branch first and retargets those PRs: the queue itself does not change. Every `merge:` and `# pause` line is the same with or without the bundle lines, in the same relative order.
 
 ## Order
 
-1. Gate PRs (database or infrastructure), in the order of the rule below.
-2. The pause line, only when at least one PR follows the gate. A gate with nothing after it prints no pause.
-3. Every other ready PR, in the order of the rule below.
+1. Bundle comments, when the plan suggests any. They are not items.
+2. Gate PRs (database or infrastructure), in the order of the rule below.
+3. The pause line, only when at least one PR follows the gate. A gate with nothing after it prints no pause.
+4. Every other ready PR, in the order of the rule below.
 
 The rule: by stage first, then, inside one stage, by layer, then PR number, then repo slug (`org/repo`). The layer order is the order of the `[[layer]]` entries in the config, the first entry goes first (for example lib, client, api, bff, front). A PR whose repo is in no layer comes after every layered PR of its stage. The tiebreak only reorders PRs of the same stage: stages and `after` edges are never changed.
 

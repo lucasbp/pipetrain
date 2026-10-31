@@ -21,6 +21,8 @@ pipetrain plans the merge order of pull requests across repos. This file says wh
 - Profiles (`--profile`, `profiles`, `orgs`, `init`), selected by flag, working folder, `default_profile` or the only profile, and an explicit repo order in the config (`[[order]]`).
 - Automatic dependency order from the manifests (NuGet and npm): when a repo references a package that another repo in the plan publishes, the publisher goes first and the reason names the package. A project with no `PackageId` publishes its assembly or project name. An explicit `[[order]]` wins, and repos that reference each other raise a `dependency-cycle` question. Dependencies between ecosystems (NuGet to npm) cannot be detected and stay explicit.
 
+- Queue output carries a `# bundle` comment per suggested deploy branch.
+
 ## Next
 
 Small, well understood, in this order:
@@ -42,6 +44,7 @@ Bigger or riskier, no order yet:
 - An execution mode that performs the merges. Opt-in, resumable, with a report. Never the default.
 - A GitHub Action and an MCP server on top of `--json`, so automation and AI agents can ask what is safe to merge and in what order.
 - Bump consumers automatically after a package release: wait for the new version to reach the feed, update the reference in the dependent repos, then release them. This writes to repos, so it ships as an opt-in mode.
+- A write mode that creates the day's deploy branch and retargets the PRs. Opt-in, explicit, never the default.
 - Package detection for Go, Maven and Gradle.
 - Other forges.
 - Optional encryption for local storage.
