@@ -6,7 +6,36 @@ pub type Publishers = BTreeMap<String, BTreeSet<String>>;
 
 pub type References = BTreeMap<String, BTreeSet<String>>;
 
+pub type Pairs = BTreeMap<(String, String), String>;
+
 pub const MAX_MANIFESTS_PER_REPO: usize = 40;
+
+pub fn dependency_pairs(
+    known: impl Fn(&str) -> bool,
+    references: &References,
+    publishers: &Publishers,
+) -> Pairs {
+    let mut pairs = Pairs::new();
+    for (consumer, packages) in references {
+        if !known(consumer) {
+            continue;
+        }
+        for package in packages {
+            let Some(repos) = publishers.get(package) else {
+                continue;
+            };
+            if repos.contains(consumer) {
+                continue;
+            }
+            for publisher in repos.iter().filter(|repo| known(repo.as_str())) {
+                pairs
+                    .entry((publisher.clone(), consumer.clone()))
+                    .or_insert_with(|| package.clone());
+            }
+        }
+    }
+    pairs
+}
 
 pub fn candidate_paths(tree: &[String]) -> (Vec<String>, bool) {
     let mut paths: Vec<String> = tree

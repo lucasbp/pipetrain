@@ -2,6 +2,7 @@ use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
 
 use super::client::Client;
+use super::error::ApiError;
 use super::parse::{parse_files, parse_pr, parse_search};
 use crate::model::{ChangedFile, Pr, PrKey, PrState};
 use crate::planner::DepState;
@@ -85,6 +86,28 @@ impl Client {
             }
         }
         Ok((files, complete))
+    }
+
+    pub fn default_branch_sha(&mut self, slug: &str) -> Result<String> {
+        let (owner, name) = slug
+            .split_once('/')
+            .ok_or_else(|| anyhow!("bad repo slug {slug}"))?;
+        let query = "query($o: String!, $r: String!) { repository(owner: $o, name: $r) { defaultBranchRef { target { oid } } } }";
+        let response = self.graphql(
+            &format!("read the default branch of {slug}"),
+            query,
+            json!({ "o": owner, "r": name }),
+        )?;
+        let sha = response
+            .pointer("/data/repository/defaultBranchRef/target/oid")
+            .and_then(|oid| oid.as_str());
+        match sha {
+            Some(oid) => Ok(oid.to_string()),
+            None => Err(ApiError::NotFound {
+                what: format!("the default branch of {slug}"),
+            }
+            .into()),
+        }
     }
 
     pub fn tree(&mut self, slug: &str, sha: &str) -> Result<(Vec<String>, bool)> {

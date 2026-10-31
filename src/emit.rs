@@ -8,7 +8,7 @@ use crate::planner::{Item, Rule};
 
 pub const PAUSE_LINE: &str = "# pause: confirm DDL/infra before continuing";
 pub const EXIT_QUESTIONS: i32 = 3;
-const REPO_LEVEL: &str = "(repo)";
+pub const REPO_LEVEL: &str = "(repo)";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Emit {

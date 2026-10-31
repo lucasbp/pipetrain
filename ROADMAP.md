@@ -23,16 +23,16 @@ pipetrain plans the merge order of pull requests across repos. This file says wh
 
 - Queue output carries a `# bundle` comment per suggested deploy branch.
 - Queue output carries a `# wait` comment before a PR that bumps a package published earlier in the queue. Checking the feed stays with the runner.
+- `pipetrain order suggest` prints the discovered chain as an `[[order]]` block, read-only.
 
 ## Next
 
 Small, well understood, in this order:
 
-1. `pipetrain order suggest`: print the discovered dependency chain as an `[[order]]` block, so it can be pinned in the config.
-2. A safe cache for data that never changes for a given sha (PR files, trees, manifests), with `--no-cache` and `--refresh`. Mutable data such as reviews and checks is never cached.
-3. More ways to find the train: a label in addition to the branch name.
-4. Package detection for `Cargo.toml` and `pyproject.toml`, next to npm and NuGet.
-5. A read-only conflict report: which PRs of a train will conflict and what kind of conflict it is.
+1. A safe cache for data that never changes for a given sha (PR files, trees, manifests), with `--no-cache` and `--refresh`. Mutable data such as reviews and checks is never cached.
+2. More ways to find the train: a label in addition to the branch name.
+3. Package detection for `Cargo.toml` and `pyproject.toml`, next to npm and NuGet.
+4. A read-only conflict report: which PRs of a train will conflict and what kind of conflict it is.
 
 ## Later
 

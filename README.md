@@ -354,6 +354,15 @@ Globs match `org/repo` and ignore case. Two PRs matched by the same glob, or fro
 
 You do not have to write an `[[order]]` block for every library and consumer pair. The `dependency` rule reads the manifests of the repos that have a PR in the plan (`.csproj`, `.props` and `package.json`) and puts the PR of a repo that publishes a NuGet or npm package before the PR of a repo that references it. An explicit `[[order]]` block wins over it, and two repos that reference each other raise a `dependency-cycle` question. Details and limits are in [docs/planner.md](docs/planner.md).
 
+To pin the discovered chain in the config, `pipetrain order suggest [REPOS...]` reads the manifests at the tip of each default branch and prints an `[[order]]` block per group of connected repos, publisher first, with one `#` line of evidence per edge. Without REPOS it uses the exact names (no glob) in the `layer` and `order` entries of the selected profile. It is read-only: it never writes the config, and it exits 3 with a `? (repo)` line when two repos reference each other. A dependency from NuGet to npm is not detectable and stays explicit.
+
+```text
+$ pipetrain order suggest acme/shared acme/api
+# acme/api references acme.shared, published by acme/shared
+[[order]]
+repos = ["acme/shared", "acme/api"]
+```
+
 `train_date_format` is how the date appears in the train branch name, as a [chrono strftime](https://docs.rs/chrono/latest/chrono/format/strftime/index.html) string. The default is `%d-%m-%Y` (`deploy/29-10-2026`); `%Y-%m-%d` gives `deploy/2026-10-29`. The config is rejected, with the key named in the error, when the format is empty, is not a valid strftime string, cannot format a plain date (for example it uses a time field), or gives the same text for two different days because it has no day field. `--date` accepts this format or ISO `yyyy-mm-dd`.
 
 ## API budget

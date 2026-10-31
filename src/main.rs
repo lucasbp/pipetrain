@@ -5,6 +5,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use pipetrain::command::init::{self, InitOptions};
+use pipetrain::command::order::{self, OrderOptions};
 use pipetrain::command::orgs::{self, OrgsOptions};
 use pipetrain::command::profiles::{self, ProfilesOptions};
 use pipetrain::command::{PlanOptions, plan};
@@ -39,6 +40,11 @@ enum Command {
     Orgs(OrgsArgs),
 
     #[command(
+        about = "Read-only: discovers the publication order between repos from their manifests"
+    )]
+    Order(OrderArgs),
+
+    #[command(
         about = "Prints a proposed config with one profile per visible org; writes only with --write"
     )]
     Init(InitArgs),
@@ -60,6 +66,42 @@ struct OrgsArgs {
         help = "Config file (default: ./pipetrain.toml, then the user config dir)"
     )]
     config: Option<PathBuf>,
+
+    #[arg(long, help = "Log every API request to stderr")]
+    verbose: bool,
+}
+
+#[derive(clap::Args)]
+struct OrderArgs {
+    #[command(subcommand)]
+    action: OrderAction,
+}
+
+#[derive(Subcommand)]
+enum OrderAction {
+    #[command(about = "Read-only: prints an [[order]] block ready to paste into the config")]
+    Suggest(SuggestArgs),
+}
+
+#[derive(clap::Args)]
+struct SuggestArgs {
+    #[arg(
+        value_name = "REPOS",
+        help = "Repos as org/repo (default: the exact names in the profile's layer and order)"
+    )]
+    repos: Vec<String>,
+
+    #[arg(
+        long,
+        help = "Config file (default: ./pipetrain.toml, then the user config dir)"
+    )]
+    config: Option<PathBuf>,
+
+    #[arg(
+        long,
+        help = "Profile to use; without it the folder, the default or the only profile decides"
+    )]
+    profile: Option<String>,
 
     #[arg(long, help = "Log every API request to stderr")]
     verbose: bool,
@@ -222,9 +264,21 @@ fn run_command(command: Command) -> Result<i32> {
             config: args.config,
             verbose: args.verbose,
         }),
+        Command::Order(args) => run_order(args),
         Command::Init(args) => init::run(InitOptions {
             write: args.write,
             force: args.force,
+            verbose: args.verbose,
+        }),
+    }
+}
+
+fn run_order(args: OrderArgs) -> Result<i32> {
+    match args.action {
+        OrderAction::Suggest(args) => order::run(OrderOptions {
+            repos: args.repos,
+            config: args.config,
+            profile: args.profile,
             verbose: args.verbose,
         }),
     }

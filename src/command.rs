@@ -18,6 +18,7 @@ use crate::publishers::{self, Publishers, References};
 use crate::render;
 
 pub mod init;
+pub mod order;
 pub mod orgs;
 pub mod profiles;
 mod resolve;
@@ -139,7 +140,7 @@ fn repos_to_scan(ready: &[(Pr, Scope)]) -> BTreeMap<String, (String, String)> {
     repos
 }
 
-fn scan_repo(
+pub(crate) fn scan_repo(
     client: &mut Client,
     slug: &str,
     sha: &str,
