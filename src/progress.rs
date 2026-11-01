@@ -12,6 +12,9 @@ const REDRAW: Duration = Duration::from_millis(80);
 const HIDE_CURSOR: &str = "\x1b[?25l";
 const ERASE_LINE: &str = "\r\x1b[2K";
 const RESTORE: &[u8] = b"\r\x1b[2K\x1b[?25h";
+const CYAN: &str = "\x1b[36m";
+const DIM: &str = "\x1b[2m";
+const RESET: &str = "\x1b[0m";
 
 type Active = Option<Painter<Box<dyn Write + Send>>>;
 
@@ -27,6 +30,7 @@ pub struct Painter<W: Write> {
     frame: usize,
     hidden: bool,
     enabled: bool,
+    color: bool,
 }
 
 impl<W: Write> Painter<W> {
@@ -39,7 +43,13 @@ impl<W: Write> Painter<W> {
             frame: 0,
             hidden: false,
             enabled,
+            color: false,
         }
+    }
+
+    pub fn with_color(mut self, color: bool) -> Self {
+        self.color = color;
+        self
     }
 
     pub fn hidden(&self) -> bool {
@@ -63,13 +73,20 @@ impl<W: Write> Painter<W> {
             return;
         };
         let hide = if self.hidden { "" } else { HIDE_CURSOR };
-        let mut text = format!(
-            "{hide}{ERASE_LINE}{} {phase}",
-            FRAMES[self.frame % FRAMES.len()]
-        );
+        let glyph = FRAMES[self.frame % FRAMES.len()];
+        let (glyph_on, dim_on, off) = if self.color {
+            (CYAN, DIM, RESET)
+        } else {
+            ("", "", "")
+        };
+        let mut text = format!("{hide}{ERASE_LINE}{glyph_on}{glyph}{off} {phase}");
         if let Some((done, total)) = self.counter {
             text.push_str(&format!(" {done}/{total}"));
         }
+        text.push_str(&format!(
+            "{dim_on} \u{b7} {}{off}",
+            crate::elapsed::format(elapsed)
+        ));
         self.emit(text.as_bytes());
         self.hidden = true;
         self.frame += 1;
@@ -141,15 +158,21 @@ impl Progress {
             return Progress { handle: None };
         }
         install_panic_hook();
-        Progress::start_into(Box::new(std::io::stderr()), DEFAULT_DELAY, REDRAW)
+        Progress::start_into(
+            Box::new(std::io::stderr()),
+            DEFAULT_DELAY,
+            REDRAW,
+            color_enabled(),
+        )
     }
 
     pub(crate) fn start_into(
         writer: Box<dyn Write + Send>,
         delay: Duration,
         redraw: Duration,
+        color: bool,
     ) -> Progress {
-        *active() = Some(Painter::new(writer, true, delay));
+        *active() = Some(Painter::new(writer, true, delay).with_color(color));
         let started = Instant::now();
         let handle = thread::spawn(move || {
             loop {
@@ -219,6 +242,28 @@ pub fn enabled(
         value.eq_ignore_ascii_case("true") || value == "1"
     });
     !(no_progress || json || !stderr_is_terminal || in_ci || (emit_queue && !stdout_is_terminal))
+}
+
+pub fn color_from(
+    no_color: Option<&str>,
+    term: Option<&str>,
+    choice: anstream::ColorChoice,
+) -> bool {
+    if matches!(choice, anstream::ColorChoice::Never) {
+        return false;
+    }
+    if matches!(choice, anstream::ColorChoice::Always) {
+        return true;
+    }
+    !(no_color.is_some_and(|value| !value.is_empty()) || term == Some("dumb"))
+}
+
+pub fn color_enabled() -> bool {
+    color_from(
+        std::env::var("NO_COLOR").ok().as_deref(),
+        std::env::var("TERM").ok().as_deref(),
+        anstream::ColorChoice::global(),
+    )
 }
 
 pub fn detect(no_progress: bool, json: bool, emit_queue: bool) -> bool {
@@ -291,8 +336,59 @@ mod tests {
         let (mut p, sink) = painter(true);
         p.set_phase("discovering");
         p.tick(DELAY);
-        assert_eq!(sink.text(), format!("{HIDE}{ERASE}⠋ discovering"));
+        assert_eq!(sink.text(), format!("{HIDE}{ERASE}⠋ discovering · 0.3 s"));
         assert!(p.hidden());
+    }
+
+    #[test]
+    fn first_frame_with_color_wraps_the_glyph_and_dims_the_elapsed_time() {
+        let sink = Sink::default();
+        let mut p = Painter::new(sink.clone(), true, DELAY).with_color(true);
+        p.set_phase("discovering");
+        p.tick(DELAY);
+        assert_eq!(
+            sink.text(),
+            format!("{HIDE}{ERASE}\x1b[36m⠋\x1b[0m discovering\x1b[2m · 0.3 s\x1b[0m")
+        );
+    }
+
+    #[test]
+    fn counter_with_color_stays_plain() {
+        let sink = Sink::default();
+        let mut p = Painter::new(sink.clone(), true, DELAY).with_color(true);
+        p.set_phase("reading");
+        p.set_count(12, 34);
+        p.tick(DELAY);
+        assert_eq!(
+            sink.text(),
+            format!("{HIDE}{ERASE}\x1b[36m⠋\x1b[0m reading 12/34\x1b[2m · 0.3 s\x1b[0m")
+        );
+    }
+
+    #[test]
+    fn without_color_no_style_codes_are_written() {
+        let (mut p, sink) = painter(true);
+        p.set_phase("reading");
+        p.set_count(1, 2);
+        p.tick(DELAY);
+        p.tick(Duration::from_millis(65_000));
+        let text = sink.text();
+        assert!(!text.contains("\x1b[3"));
+        assert!(!text.contains("\x1b[2m"));
+        assert!(!text.contains("\x1b[0m"));
+    }
+
+    #[test]
+    fn elapsed_time_updates_on_every_redraw() {
+        let (mut p, sink) = painter(true);
+        p.set_phase("a");
+        p.tick(DELAY);
+        p.tick(Duration::from_millis(1_500));
+        p.tick(Duration::from_millis(65_000));
+        assert_eq!(
+            sink.text(),
+            format!("{HIDE}{ERASE}⠋ a · 0.3 s{ERASE}⠙ a · 1.5 s{ERASE}⠹ a · 1m 05s")
+        );
     }
 
     #[test]
@@ -308,7 +404,10 @@ mod tests {
         p.set_phase("a");
         p.tick(DELAY);
         p.tick(DELAY);
-        assert_eq!(sink.text(), format!("{HIDE}{ERASE}⠋ a{ERASE}⠙ a"));
+        assert_eq!(
+            sink.text(),
+            format!("{HIDE}{ERASE}⠋ a · 0.3 s{ERASE}⠙ a · 0.3 s")
+        );
     }
 
     #[test]
@@ -317,7 +416,7 @@ mod tests {
         p.set_phase("reading");
         p.set_count(12, 34);
         p.tick(DELAY);
-        assert_eq!(sink.text(), format!("{HIDE}{ERASE}⠋ reading 12/34"));
+        assert_eq!(sink.text(), format!("{HIDE}{ERASE}⠋ reading 12/34 · 0.3 s"));
     }
 
     #[test]
@@ -327,7 +426,7 @@ mod tests {
         p.set_count(1, 2);
         p.set_phase("checking");
         p.tick(DELAY);
-        assert!(sink.text().ends_with("checking"));
+        assert!(sink.text().ends_with("checking · 0.3 s"));
     }
 
     #[test]
@@ -339,7 +438,7 @@ mod tests {
         p.tick(DELAY);
         assert_eq!(
             sink.text(),
-            format!("{HIDE}{ERASE}⠋ reading manifests{ERASE}⠙ ab")
+            format!("{HIDE}{ERASE}⠋ reading manifests · 0.3 s{ERASE}⠙ ab · 0.3 s")
         );
     }
 
@@ -350,7 +449,10 @@ mod tests {
         p.tick(DELAY);
         p.finish();
         let text = sink.text();
-        assert_eq!(text, format!("{HIDE}{ERASE}⠋ abc{SHOW_AFTER_ERASE}"));
+        assert_eq!(
+            text,
+            format!("{HIDE}{ERASE}⠋ abc · 0.3 s{SHOW_AFTER_ERASE}")
+        );
         assert!(text.ends_with(SHOW_AFTER_ERASE));
         assert!(!p.hidden());
     }
@@ -371,7 +473,10 @@ mod tests {
         p.tick(DELAY);
         p.finish();
         p.finish();
-        assert_eq!(sink.text(), format!("{HIDE}{ERASE}⠋ abc{SHOW_AFTER_ERASE}"));
+        assert_eq!(
+            sink.text(),
+            format!("{HIDE}{ERASE}⠋ abc · 0.3 s{SHOW_AFTER_ERASE}")
+        );
     }
 
     #[test]
@@ -435,6 +540,7 @@ mod tests {
             Box::new(sink.clone()),
             Duration::from_secs(30),
             Duration::from_millis(5),
+            false,
         );
         phase("reading");
         count(1, 3);
@@ -452,6 +558,7 @@ mod tests {
             Box::new(sink.clone()),
             Duration::from_millis(20),
             Duration::from_millis(5),
+            false,
         );
         phase("reading");
         count(1, 3);
@@ -469,6 +576,21 @@ mod tests {
         let length = sink.len();
         thread::sleep(Duration::from_millis(50));
         assert_eq!(sink.len(), length);
+    }
+
+    #[test]
+    fn color_truth_table() {
+        use anstream::ColorChoice::{Always, Auto, Never};
+        assert!(color_from(None, None, Auto));
+        assert!(color_from(None, Some("xterm-256color"), Auto));
+        assert!(color_from(Some(""), None, Auto));
+        assert!(!color_from(Some("1"), None, Auto));
+        assert!(!color_from(None, Some("dumb"), Auto));
+        assert!(!color_from(Some("1"), Some("dumb"), Auto));
+        assert!(!color_from(None, None, Never));
+        assert!(!color_from(Some(""), Some("xterm"), Never));
+        assert!(color_from(None, None, Always));
+        assert!(color_from(Some("1"), Some("dumb"), Always));
     }
 
     fn interactive(

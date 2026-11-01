@@ -458,7 +458,7 @@ GitHub counts the REST API (`core`) and GraphQL separately, and the guard follow
 
 Redirects are not followed. GitHub answers a renamed or moved repo with a redirect, and pipetrain stops with an error saying the repo was renamed or moved, instead of silently planning against a different one. Use the new name.
 
-`--verbose` prints each request, and each wait, to stderr. The `api` line of the output shows how many requests the run used and how many GitHub says remain. On a terminal, a small spinner on stderr shows the phase and a counter while pipetrain talks to GitHub; it never touches stdout. The `time` line is the wall-clock time of the run until the data was gathered; with the cache it is shorter.
+`--verbose` prints each request, and each wait, to stderr. The `api` line of the output shows how many requests the run used and how many GitHub says remain. On a terminal, a small spinner on stderr shows the phase, a counter and the elapsed time while pipetrain talks to GitHub, in color unless `NO_COLOR` is set or `--color never` is used; it never touches stdout. The `time` line is the wall-clock time of the run until the data was gathered; with the cache it is shorter.
 
 ## Local cache
 
