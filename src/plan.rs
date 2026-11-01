@@ -1,12 +1,13 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
 use crate::bundle::{self, Bundle};
 use crate::config::Rules;
+use crate::conflicts::{self, Conflict, Snapshot};
 use crate::discovery::Skipped;
 use crate::model::{Pr, Question};
-use crate::planner::{self, DepState, Item, PlanInput};
+use crate::planner::{self, DepState, Item, PlanInput, Rule};
 use crate::profile::ProfileSource;
 use crate::publishers::{Publishers, References};
 
@@ -55,6 +56,7 @@ pub struct Plan {
     pub gate: Vec<String>,
     pub lanes: Vec<Vec<String>>,
     pub bundles: Vec<Bundle>,
+    pub conflicts: Vec<Conflict>,
     pub skipped: Vec<SkippedOut>,
     pub questions: Vec<Question>,
     pub notes: Vec<String>,
@@ -108,7 +110,30 @@ fn deploy_counts(items: &[Item], bundles: &[Bundle], train_prefix: &str) -> (usi
     (saved, now)
 }
 
+fn snapshots(ready: &[(Pr, String)]) -> Vec<Snapshot> {
+    ready
+        .iter()
+        .map(|(pr, _)| Snapshot {
+            id: pr.key.to_string(),
+            repo: pr.key.slug().to_lowercase(),
+            paths: pr.files.iter().map(|f| f.path.clone()).collect(),
+        })
+        .collect()
+}
+
+fn stacked_pairs(items: &[Item]) -> BTreeSet<(String, String)> {
+    let mut pairs = BTreeSet::new();
+    for item in items {
+        for dep in item.after.iter().filter(|d| d.rule == Rule::Stacked) {
+            pairs.insert((item.id.clone(), dep.id.clone()));
+            pairs.insert((dep.id.clone(), item.id.clone()));
+        }
+    }
+    pairs
+}
+
 pub fn build(rules: &Rules, gathered: Gathered) -> Plan {
+    let snapshots = snapshots(&gathered.ready);
     let planned = planner::plan(PlanInput {
         rules,
         prs: gathered.ready,
@@ -123,6 +148,7 @@ pub fn build(rules: &Rules, gathered: Gathered) -> Plan {
         &gathered.deploy_branch,
         &gathered.train_prefix,
     );
+    let conflicts = conflicts::find(&snapshots, &stacked_pairs(&planned.items));
     let (deploys_saved, deploys_now) =
         deploy_counts(&planned.items, &bundles, &gathered.train_prefix);
     Plan {
@@ -136,6 +162,7 @@ pub fn build(rules: &Rules, gathered: Gathered) -> Plan {
         gate: planned.gate,
         lanes: planned.lanes,
         bundles,
+        conflicts,
         skipped,
         questions,
         notes: planned.notes,

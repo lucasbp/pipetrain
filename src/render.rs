@@ -27,6 +27,19 @@ fn heading(color: &str, title: &str, note: &str) -> String {
     format!("{}  {}", paint(&format!("1;{color}"), title), dim(note))
 }
 
+fn conflict_files(files: &[String]) -> String {
+    let shown = files
+        .iter()
+        .take(3)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    match files.len().saturating_sub(3) {
+        0 => shown,
+        extra => format!("{shown}, +{extra} more"),
+    }
+}
+
 fn layer_paint(layer: &str, text: &str) -> String {
     let code = match layer {
         "lib" => "35",
@@ -517,6 +530,29 @@ pub fn text(plan: &Plan) -> String {
                     );
                 }
             }
+        }
+    }
+
+    if !plan.conflicts.is_empty() {
+        let _ = writeln!(
+            out,
+            "\n{}",
+            heading(
+                "35",
+                "CONFLICTS",
+                "same repo, same files; the order does not change"
+            )
+        );
+        for c in &plan.conflicts {
+            let _ = writeln!(
+                out,
+                "  {} and {}  {} ({})",
+                bold(&names.short(&c.a)),
+                bold(&names.short(&c.b)),
+                c.file_count(),
+                c.kind
+            );
+            let _ = writeln!(out, "        {}", dim(&conflict_files(&c.files)));
         }
     }
 

@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use clap::ValueEnum;
 
 use crate::bundle::Bundle;
+use crate::conflicts::Conflict;
 use crate::plan::Plan;
 use crate::planner::{Item, Rule, is_late_rule};
 
@@ -118,6 +119,16 @@ fn bundle_line(bundle: &Bundle) -> String {
     )
 }
 
+fn conflict_line(conflict: &Conflict) -> String {
+    format!(
+        "# conflict: {} and {} both change {} ({})",
+        conflict.a,
+        conflict.b,
+        conflict.file_count(),
+        conflict.kind
+    )
+}
+
 pub fn queue_lines(plan: &Plan) -> Vec<String> {
     let mut lines: Vec<String> = gated(plan)
         .into_iter()
@@ -138,7 +149,8 @@ pub fn queue_lines(plan: &Plan) -> Vec<String> {
     if lines.is_empty() {
         return lines;
     }
-    let mut out: Vec<String> = plan.bundles.iter().map(bundle_line).collect();
+    let mut out: Vec<String> = plan.conflicts.iter().map(conflict_line).collect();
+    out.extend(plan.bundles.iter().map(bundle_line));
     out.extend(lines);
     out
 }

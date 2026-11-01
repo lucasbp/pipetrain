@@ -25,6 +25,7 @@ The structs live in `src/plan.rs` (`Plan`, `SkippedOut`, `Stats`), `src/bundle.r
 | `gate` | string[] | Ids of the PRs that are gates, sorted by `org`, `repo`, `number`. Empty when there is none. |
 | `lanes` | string[][] | Chains of PR ids. Within a lane, PRs merge in the order listed. Gate PRs never appear in a lane. |
 | `bundles` | Bundle[] | Suggestions to replace several deploys of one repo with a single one. Empty when there is nothing to bundle. Read-only: nothing is created or retargeted. See `saving-pipelines.md`. |
+| `conflicts` | Conflict[] | PRs of the same repo that change the same files. Always present, `[]` when there is none. Read-only: it never changes `items`, `gate` or `lanes`. Added after schema 1 shipped, and additive only. |
 | `skipped` | SkippedOut[] | PRs found but not ready, or already contained in their base or in the train branch, sorted by `id`. They are not in the plan. |
 | `questions` | Question[] | What the planner could not decide. Discovery and scan questions come first, then planner questions. |
 | `notes` | string[] | Informational lines. Today only `X depends on Y, already merged`. |
@@ -82,6 +83,18 @@ One suggestion: in `repo`, several PRs go to the same `base`, so they would depl
 | `deploys_after` | integer | Deploys with the bundle. Always `1`. |
 | `saved` | integer | `deploys_now - deploys_after`. |
 
+## Conflict
+
+A file-overlap report between two ready PRs of the same repo: a hint that they may conflict, not a merge simulation. PRs stacked on each other (a `stacked` edge, either direction) are left out. Sorted by `a`, then `b`.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `a` | string | Id of the first PR, `org/repo#number`. |
+| `b` | string | Id of the second PR. Sorts after `a`. |
+| `repo` | string | `org/repo`, lowercase. |
+| `files` | string[] | The paths both PRs change, sorted. |
+| `kind` | string | `lockfile` when every shared file is a lockfile (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `packages.lock.json`), `sql` when every one is a `.sql` file under a `db` or `migrations` folder, `generated` when every one is under an `obj` or `bin` folder, `other` otherwise, including mixed kinds. |
+
 ## SkippedOut
 
 | Field | Type | Meaning |
@@ -91,7 +104,7 @@ One suggestion: in `repo`, several PRs go to the same `base`, so they would depl
 | `url` | string | PR web URL. |
 | `scope` | string | `train`, `shared-branch`, `into-train`, `explicit` or `released`. |
 | `head` | string | The head branch of the skipped PR, so a `shared-branch` skip can be traced to the branch name that matched. |
-| `reasons` | string[] | One or more of: `already merged`, `closed`, `draft`, `changes requested`, `review required`, `not approved`, `checks pending`, `checks failing`, `no checks reported`, `merge conflict`, `mergeability unknown, retry in a minute`, `already in <ref>`, `already in <ref> (same content)`. A merged or closed PR carries only that one reason. `already in <ref>` also stands alone, where `<ref>` is the branch that already contains the PR head: its base branch, or `deploy_branch`. `already in <ref> (same content)` stands alone too: every file the PR changes has identical content in `<ref>`, though the commits differ (for example after a squash merge). These are the only reasons with a variable part, so match them by the `already in ` prefix; the `(same content)` suffix tells the two apart. |
+| `reasons` | string[] | One or more of: `already merged`, `closed`, `draft`, `changes requested`, `review required`, `not approved`, `checks pending`, `checks failing`, `checks failing: <names>`, `no checks reported`, `merge conflict`, `mergeability unknown, retry in a minute`, `already in <ref>`, `already in <ref> (same content)`. A merged or closed PR carries only that one reason. `already in <ref>` also stands alone, where `<ref>` is the branch that already contains the PR head: its base branch, or `deploy_branch`. `already in <ref> (same content)` stands alone too: every file the PR changes has identical content in `<ref>`, though the commits differ (for example after a squash merge). `checks failing: <names>` lists the failing checks, for example `checks failing: build, test`: sorted, at most 5 names and then `, +N more`; the plain `checks failing` stays when GitHub gives no name. These are the only reasons with a variable part, so match them by the `already in ` and `checks failing` prefixes; the `(same content)` suffix tells the two `already in` forms apart. |
 
 ## Question
 
@@ -153,6 +166,7 @@ Consumers should switch on `code`, never on `message` or `hint`.
   "gate": ["acme/orders-api#41"],
   "lanes": [],
   "bundles": [],
+  "conflicts": [],
   "skipped": [],
   "questions": [],
   "notes": [],
@@ -187,6 +201,15 @@ A non-empty `bundles` entry, for two PRs of `acme/billing-api` against `main`, a
       "saved": 1
     }
   ],
+  "conflicts": [
+    {
+      "a": "acme/billing-api#230",
+      "b": "acme/billing-api#233",
+      "repo": "acme/billing-api",
+      "files": ["package-lock.json"],
+      "kind": "lockfile"
+    }
+  ],
   "skipped": [
     {
       "id": "acme/billing-api#228",
@@ -194,6 +217,13 @@ A non-empty `bundles` entry, for two PRs of `acme/billing-api` against `main`, a
       "url": "https://github.com/acme/billing-api/pull/228",
       "scope": "shared-branch",
       "reasons": ["already in main"]
+    },
+    {
+      "id": "acme/billing-api#231",
+      "title": "Add retry to the webhook",
+      "url": "https://github.com/acme/billing-api/pull/231",
+      "scope": "train",
+      "reasons": ["checks failing: build, test"]
     }
   ]
 }

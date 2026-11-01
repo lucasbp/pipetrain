@@ -458,6 +458,7 @@ fn pr(number: u64, slug: &str) -> Pr {
         review: Review::Approved,
         checks: Checks::Success,
         conflicting: false,
+        failed_checks: Vec::new(),
         mergeable_unknown: false,
         files: Vec::new(),
         files_complete: true,

@@ -14,6 +14,7 @@
 | `merge:<org>/<repo>#<n>` | Merge this PR. |
 | `# pause: confirm DDL/infra before continuing` | Stop here until a human confirms. |
 | `# bundle <org>/<repo>: <N> PRs into <base> could be 1 deploy (saves <N-1>): <PR ids>` | Informative. One per suggested deploy branch. The runner skips it like any `#` line. |
+| `# conflict: <PR id> and <PR id> both change <N file(s)> (<kind>)` | Informative. Two PRs of the same repo change the same files. `<N file(s)>` reads `1 file` or `N files`, and `<kind>` is `lockfile`, `sql`, `generated` or `other`. The runner skips it like any `#` line. |
 | `# wait: package <pkg> from <PR ids> must be published before <org>/<repo>#<n>` | The PRs after `from` publish `<pkg>` and the PR in the `merge:` line right below bumps it to the version they publish. The runner stops there until the package is in the feed. pipetrain does not query the feed. A runner that does not understand the line ignores it like any `#` line. |
 | `# ...` | Any line that starts with `#` is a comment. Skip it. |
 
@@ -25,9 +26,13 @@ Only a PR that bumps the version of a package that other PRs of the same queue p
 
 When the plan suggests a deploy branch for a repo, the queue starts with one `# bundle` line per suggestion, before the first `merge:` line and before the gate. The PR ids are the PRs the plan would carry in that branch, the existing train PR first when there is one. The bundles keep the order of the plan's `bundles`. The saving only happens if a person creates the day's deploy branch first and retargets those PRs: the queue itself does not change. Every `merge:` and `# pause` line is the same with or without the bundle lines, in the same relative order.
 
+## Conflict comments
+
+When two ready PRs of the same repo change the same files, the queue starts with one `# conflict` line per pair, before the `# bundle` lines and before the first `merge:` line. The format is `# conflict: <a> and <b> both change <N file(s)> (<kind>)`, with the pairs in the order of the plan's `conflicts`. It is a report and never changes the order: every `merge:` and `# pause` line is the same with or without the conflict lines, in the same relative order. PRs stacked on each other are not reported.
+
 ## Order
 
-1. Bundle comments, when the plan suggests any. They are not items.
+1. Conflict comments, then bundle comments, when the plan has any. They are not items.
 2. Gate PRs (database or infrastructure) that have no predecessor, in the order of the rule below.
 3. The pause line, only when at least one PR follows those gates. A gate with nothing after it prints no pause.
 4. Every other ready PR, in the order of the rule below, with the late gates among them.

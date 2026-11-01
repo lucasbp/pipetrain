@@ -169,6 +169,10 @@ An edge that already exists under another rule is not added a second time, so `a
 
 To change an outcome the planner got wrong, add a `Depends-On` line to the PR that should go first. It is rule 1, so it wins.
 
+## File conflicts
+
+Separate from the edge conflicts above, the plan carries a read-only report of PRs of the same repo that change the same files (`conflicts` in `--json`, `CONFLICTS` in the text output, `# conflict:` lines in the queue). It is a hint from the files each PR changes, not a merge simulation: two PRs can touch the same file and merge cleanly, and the report says nothing about the lines. Each entry names the kind of file (`lockfile`, `sql`, `generated`, `other`). PRs stacked on each other are left out, because the stack already orders them. The report never adds an edge and never changes the order. See [plan-json.md](plan-json.md).
+
 ## Stages and lanes
 
 **Stage**: the longest chain of predecessors ending at the PR, counting from 1. PRs in one stage have nothing between them and can merge at the same time. Gate edges are not counted: a gate PR is run first by hand, and counting it would push every stage down by one and hide the real parallelism. `max_parallel` is only a number shown beside `peak_parallel`; it does not split stages.

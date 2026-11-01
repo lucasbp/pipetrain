@@ -21,6 +21,7 @@ fn pr(slug: &str, number: u64, head: &str, base: &str, paths: &[&str]) -> Pr {
         review: Review::Approved,
         checks: Checks::Success,
         conflicting: false,
+        failed_checks: Vec::new(),
         mergeable_unknown: false,
         files: paths
             .iter()

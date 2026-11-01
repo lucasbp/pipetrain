@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use serde_json::Value;
 
 use crate::detect;
@@ -61,6 +63,31 @@ fn parse_checks(node: &Value) -> Checks {
     }
 }
 
+fn failed_check_name(context: &Value) -> Option<String> {
+    match context.get("__typename").and_then(|v| v.as_str()) {
+        Some("CheckRun") => match context.get("conclusion").and_then(|v| v.as_str()) {
+            Some("FAILURE") | Some("TIMED_OUT") | Some("STARTUP_FAILURE") => {
+                Some(context.get("name")?.as_str()?.to_string())
+            }
+            _ => None,
+        },
+        Some("StatusContext") => match context.get("state").and_then(|v| v.as_str()) {
+            Some("FAILURE") | Some("ERROR") => Some(context.get("context")?.as_str()?.to_string()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn parse_failed_checks(node: &Value) -> Vec<String> {
+    let names: BTreeSet<String> = node
+        .pointer("/commits/nodes/0/commit/statusCheckRollup/contexts/nodes")
+        .and_then(|v| v.as_array())
+        .map(|nodes| nodes.iter().filter_map(failed_check_name).collect())
+        .unwrap_or_default();
+    names.into_iter().collect()
+}
+
 pub fn parse_pr(node: &Value) -> Option<Pr> {
     let number = node.get("number")?.as_u64()?;
     let repo = node.get("repository")?;
@@ -87,6 +114,7 @@ pub fn parse_pr(node: &Value) -> Option<Pr> {
             .unwrap_or(false),
         review: parse_review(node),
         checks: parse_checks(node),
+        failed_checks: parse_failed_checks(node),
         conflicting: mergeable == Some("CONFLICTING"),
         mergeable_unknown: matches!(mergeable, None | Some("UNKNOWN")),
         files: Vec::new(),

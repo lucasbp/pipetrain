@@ -174,7 +174,7 @@ pipetrain plan --all
 `--all` needs orgs, from the config or from `--org`. It takes every open, non-archived PR in those orgs and treats the approved ones as released, whatever their branch name:
 
 - Approved and ready (not draft, checks green, no merge conflict) enters the plan with scope `released`.
-- Approved but not ready goes to `SKIPPED` with the reasons, for example `checks failing` or `draft`.
+- Approved but not ready goes to `SKIPPED` with the reasons, for example `checks failing: build, test` or `draft`.
 - Not approved is ignored without a trace: no review, review requested or changes requested.
 
 A PR whose head is today's train branch keeps scope `train`, and one targeting it keeps `into-train`. In this mode PRs are not grouped by shared branch, so the `sibling-not-ready` and `stacked-not-ready` questions are not raised. Everything after discovery is the same: the already-merged check, files, dependencies, packages, stacked PRs, targets, gate, layers and bundles.
@@ -197,7 +197,7 @@ An invented run for the org `acme`, shown without colors (what `--color never` p
 pipetrain plan  (read-only, nothing was merged)
   train     deploy/29-10-2026
   orgs      acme
-  found     8 ready, 2 skipped, 1 questions
+  found     8 ready, 3 skipped, 1 questions
   parallel  peak 3 at once (cap 4)
   deploys   8 now, 7 after bundling
   api       23 requests, 4811 left
@@ -241,9 +241,14 @@ BUNDLES  one deploy branch instead of N deploys (suggestion, nothing was changed
   billing-api  2 PRs into main -> 1 deploy, saves 1
         create deploy/29-10-2026 from main, retarget billing-api#230, billing-api#233, merge them there, then open one PR deploy/29-10-2026 -> main
 
+CONFLICTS  same repo, same files; the order does not change
+  billing-api#230 and billing-api#233  1 file (lockfile)
+        package-lock.json
+
 SKIPPED  not ready, left out of the plan
   billing-api#228  Fix rounding in invoice PDF  [train: deploy/29-10-2026]  (already in main)
   billing-api#231  WIP retry failed charges  [shared: feat/retry-charges]  (draft)
+  billing-api#234  Add retry to the webhook  [train: deploy/29-10-2026]  (checks failing: build, test)
 
 ?  QUESTIONS  the planner could not decide these
   docs-site#5  [layer-unknown]  acme/docs-site is not in any layer, so its place on branch `feat/invoice-totals` is undecided
@@ -262,7 +267,8 @@ How to read it:
 - **[api]**, **[lib]**: the layer of the repo, from your config.
 - **deploys**: how many deploys the ready PRs cause today (every PR that does not target a train branch is one), and how many remain if every bundle is applied.
 - **BUNDLES**: a suggestion to merge several PRs of one repo through one train branch. Shown only when there is something to bundle. Nothing was created or retargeted.
-- **SKIPPED**: PRs that are not ready, or that are `already in` a branch. `already in main` means the PR head is already part of `main`.
+- **CONFLICTS**: PRs of the same repo that change the same files, with the kind of file (`lockfile`, `sql`, `generated`, `other`). It is a file-overlap hint, not a merge simulation, and PRs stacked on each other are left out. Shown only when there is something to report. It never changes the order. The queue carries the same finding as `# conflict:` lines.
+- **SKIPPED**: PRs that are not ready, or that are `already in` a branch. `already in main` means the PR head is already part of `main`. A PR skipped for failing checks lists their names, for example `checks failing: build, test` (at most 5, then `+N more`).
 
 A `NOTES` section appears at the end when there is something informational, for example a `Depends-On` that points at a PR already merged.
 

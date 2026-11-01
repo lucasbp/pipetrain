@@ -94,13 +94,35 @@ pub struct Pr {
     pub is_draft: bool,
     pub review: Review,
     pub checks: Checks,
+    pub failed_checks: Vec<String>,
     pub conflicting: bool,
     pub mergeable_unknown: bool,
     pub files: Vec<ChangedFile>,
     pub files_complete: bool,
 }
 
+const MAX_FAILED_NAMES: usize = 5;
+
 impl Pr {
+    fn failing_reason(&self) -> String {
+        if self.failed_checks.is_empty() {
+            return "checks failing".to_string();
+        }
+        let shown = self
+            .failed_checks
+            .iter()
+            .take(MAX_FAILED_NAMES)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let extra = self.failed_checks.len().saturating_sub(MAX_FAILED_NAMES);
+        if extra == 0 {
+            format!("checks failing: {shown}")
+        } else {
+            format!("checks failing: {shown}, +{extra} more")
+        }
+    }
+
     pub fn blockers(&self, allow_missing_checks: bool) -> Vec<String> {
         let mut reasons = Vec::new();
         match self.state {
@@ -126,7 +148,7 @@ impl Pr {
         match self.checks {
             Checks::Success => {}
             Checks::Pending => reasons.push("checks pending".to_string()),
-            Checks::Failure => reasons.push("checks failing".to_string()),
+            Checks::Failure => reasons.push(self.failing_reason()),
             Checks::Missing => {
                 if !allow_missing_checks {
                     reasons.push("no checks reported".to_string());
