@@ -10,6 +10,7 @@ pub mod discovery;
 pub mod doctor;
 pub mod elapsed;
 pub mod emit;
+pub mod feed;
 pub mod github;
 pub mod hint;
 pub mod live;

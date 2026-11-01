@@ -29,20 +29,24 @@ pipetrain plans the merge order of pull requests across repos. This file says wh
 - A progress spinner on stderr for `plan` and `order suggest`, drawn only on a terminal after 300 ms, off with `--no-progress`, `--json`, `CI=true` or a redirected `--emit queue`. stdout is never touched.
 - A DDL or infra PR that must follow another PR by a package, dependency or target edge is a late gate: it runs after its predecessors with the pause right before it, instead of a question. `--json` marks it with `gate_late`.
 - The summaries show how long the run took: a `time` line in `plan`, `... in 3.2 s` on the `order suggest` request line, a `time` line in `doctor` and `stats.elapsed_ms` in `--json`.
-- The `# wait` comment names the version the consumer bumps to, read from the consumer PR's manifest diff, and `--json` carries it as `after[].version`. Checking the package feed stays under Later.
+- The `# wait` comment names the version the consumer bumps to, read from the consumer PR's manifest diff, and `--json` carries it as `after[].version`. Checking the package feed is `pipetrain feed`.
 - A read-only conflict report: PRs of the same repo that change the same files, with the kind of file (lockfile, sql, generated, other), in the text output, `--json` (`conflicts`) and as `# conflict:` lines in the queue. The reason of a PR skipped for failing checks names the failing checks.
 - `pipetrain bundle`: dry run by default, `--apply` creates the deploy branch and retargets the bundled PRs, one write at a time, stops at the first failure. It never merges or opens the deploy PR.
 - PR author in the output and a filter for your own PRs (--mine, --author, authors in the config): the plan is computed with everyone and the PRs of other authors are only hidden, so the order stays right.
 - The spinner is colored and shows the elapsed time while it runs.
 - `pipetrain bundle --apply` shows a live colored checklist on stderr while it writes, one row per action with its duration, and stops with the failed row in red. Off with `--json`, `--no-progress`, `CI=true` or a redirected stderr.
 
+- `pipetrain feed <package> [--version <v>]`: a read-only check of whether a version is published in its NuGet or npm feed (GitHub Packages or a public registry), with `--json` and exit codes a runner can use.
+
 ## Next
 
 Small, well understood, in this order:
 
-1. More ways to find the train: a label in addition to the branch name.
-2. Package detection for `Cargo.toml` and `pyproject.toml`, next to npm and NuGet.
-3. A deeper conflict report that simulates the merge, beyond files changed by more than one PR.
+1. A dry run of the consumer bump, then an opt-in apply, built on `feed`.
+2. A `(published)` marker on the `# wait` comment when `feed` finds the version already in the feed.
+3. More ways to find the train: a label in addition to the branch name.
+4. Package detection for `Cargo.toml` and `pyproject.toml`, next to npm and NuGet.
+5. A deeper conflict report that simulates the merge, beyond files changed by more than one PR.
 
 ## Later
 
@@ -54,7 +58,7 @@ Bigger or riskier, no order yet:
 - An execution mode that performs the merges. Opt-in, resumable, with a report. Never the default.
 - A GitHub Action and an MCP server on top of `--json`, so automation and AI agents can ask what is safe to merge and in what order.
 - Bump consumers automatically after a package release: wait for the new version to reach the feed, update the reference in the dependent repos, then release them. This writes to repos, so it ships as an opt-in mode.
-- Check the package feed (GitHub Packages for NuGet, the npm registry) and block until the version appears.
+- Block until a version appears in the feed (a polling mode on top of `pipetrain feed`).
 - Package detection for Go, Maven and Gradle.
 - Other forges.
 - Optional encryption for local storage.

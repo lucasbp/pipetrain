@@ -136,6 +136,7 @@ pipetrain plan [OPTIONS] [PRS]...
 | `pipetrain plan --emit queue` | Prints only a queue of `merge:org/repo#N` lines for a runner (contract in `docs/queue-output.md`). Cannot be combined with `--json`. |
 | `pipetrain bundle` | Dry run of the bundle suggestion: shows the branch it would create and the PRs it would retarget. Writes nothing. Takes the same PR arguments and options as `plan`. |
 | `pipetrain bundle --apply` | Creates the deploy branch and retargets the bundled PRs. Asks for confirmation unless `--yes` is given. See [Applying the bundle suggestion](#applying-the-bundle-suggestion). |
+| `pipetrain feed <PACKAGE> [--version <V>]` | Read-only: tells whether a package version is published in its NuGet or npm feed. See [Checking a package feed](#checking-a-package-feed). |
 | `pipetrain profiles` | Read-only: lists the profiles, their orgs and folders, and which one applies from the current folder. |
 | `pipetrain orgs` | Read-only: lists the GitHub orgs your token can see and which profile lists each one. |
 | `pipetrain init` | Prints a proposed config with one profile per visible org. Writes nothing unless `--write [PATH]` is given; an existing file is kept unless `--force` is added. |
@@ -485,6 +486,38 @@ What is never cached: anything that can change without a new sha, such as the li
 Where it lives: the `pipetrain` folder inside your user cache directory (`%LOCALAPPDATA%` on Windows, `~/.cache` on Linux, `~/Library/Caches` on macOS). Set `PIPETRAIN_CACHE_DIR` to use another folder. Entries are small JSON files written atomically. Entries older than 14 days are deleted, and the oldest go first when the folder passes 32 MiB. Deleting the folder is always safe; the next run rebuilds it.
 
 `--no-cache` skips the cache completely and `--refresh` ignores what is there and writes it again. The plan is the same with or without the cache. `stats.cache_hits` and `stats.cache_misses` in `--json` count the lookups answered from disk and those that went to GitHub; the `api` line of the text output adds `N from cache` when there were hits, and `order suggest` does the same on its request line. `stats.requests` counts only real requests.
+
+## Checking a package feed
+
+```
+pipetrain feed <PACKAGE> [--version <V>] [--ecosystem nuget|npm] [--org <ORG>] [--registry <URL>] [--json]
+```
+
+`feed` answers one question: is this package, at this version, published in its feed? It is read-only: it only sends `GET` requests, writes nothing and stores nothing. It does not read a config file or call the GitHub API.
+
+| Ecosystem | Chosen when | Feed |
+|---|---|---|
+| `npm` | The package starts with `@`, or `--ecosystem npm`. | `https://npm.pkg.github.com` when the package is scoped and `--org` is given, otherwise `https://registry.npmjs.org`. `--registry <BASE URL>` overrides it. The request is `GET {base}/{package}` with `/` written as `%2f`. |
+| `nuget` | Everything else, or `--ecosystem nuget`. | `https://nuget.pkg.github.com/{org}/index.json`, so `--org` is required unless `--registry <SERVICE INDEX URL>` is given. pipetrain reads the `PackageBaseAddress` resource of the service index and then `{base}{lowercase id}/index.json`. |
+
+Output:
+
+```
+Acme.Util 1.2610.2314.49: published
+Acme.Util 2.0.0: not published (latest 1.2610.2314.49)
+```
+
+Without `--version` it prints the latest version and the last 5, newest first. Versions are compared by their numeric segments, so 4-part NuGet versions work, and a pre-release (`1.0.0-beta`) sorts below `1.0.0`.
+
+`--json` prints `{"schema": 1, "package", "ecosystem", "feed", "version", "published", "latest", "versions"}`. `version` and `published` are `null` when no `--version` was given, and `versions` holds the last 5. A package the feed does not know prints nothing on stdout, so `--json` stays empty in that case; read the exit code.
+
+Token: GitHub Packages needs one, even for public packages. pipetrain uses the same lookup as every other command (`GH_TOKEN`, then `gh auth token`) and sends it only to hosts that end in `pkg.github.com`: as a bearer token for npm and as the password of a basic-auth login for NuGet. It is never printed. The token needs the `read:packages` scope; if the feed answers 401 or 403, check that the token has it. `registry.npmjs.org`, `nuget.org` and any other host get no token.
+
+| Code | Meaning |
+|---|---|
+| 0 | The version is published, or no `--version` was asked. |
+| 1 | The version is not published, the package is not in the feed (`package not found in <feed>`), or an error such as a network failure (`error: ...` on stderr). |
+| 2 | The feed answered 401 or 403: the token is missing or lacks `read:packages`. |
 
 ## Exit code
 

@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand};
 use pipetrain::cache::CacheMode;
 use pipetrain::command::apply::{self, ApplyOptions};
 use pipetrain::command::authors::AuthorFilter;
+use pipetrain::command::feed::{self, FeedOptions};
 use pipetrain::command::init::{self, InitOptions};
 use pipetrain::command::order::{self, OrderOptions};
 use pipetrain::command::orgs::{self, OrgsOptions};
@@ -14,6 +15,7 @@ use pipetrain::command::profiles::{self, ProfilesOptions};
 use pipetrain::command::{PlanOptions, plan};
 use pipetrain::doctor::{self, DoctorOptions};
 use pipetrain::emit::Emit;
+use pipetrain::feed::Ecosystem;
 
 #[derive(Parser)]
 #[command(
@@ -56,6 +58,45 @@ enum Command {
         about = "Prints a proposed config with one profile per visible org; writes only with --write"
     )]
     Init(InitArgs),
+
+    #[command(
+        about = "Read-only: tells whether a package version is published in its NuGet or npm feed"
+    )]
+    Feed(FeedArgs),
+}
+
+#[derive(clap::Args)]
+struct FeedArgs {
+    #[arg(help = "Package id, e.g. Acme.Util or @acme/ui")]
+    package: String,
+
+    #[arg(
+        long,
+        help = "Version to look for; without it the latest versions are listed"
+    )]
+    version: Option<String>,
+
+    #[arg(
+        long,
+        value_enum,
+        help = "nuget or npm (default: npm when the package starts with @, else nuget)"
+    )]
+    ecosystem: Option<Ecosystem>,
+
+    #[arg(
+        long,
+        help = "GitHub org that owns the feed; required for nuget unless --registry is given"
+    )]
+    org: Option<String>,
+
+    #[arg(
+        long,
+        help = "Feed to ask instead of the default: the base URL for npm, the service index URL for nuget"
+    )]
+    registry: Option<String>,
+
+    #[arg(long, help = "Print the result as JSON")]
+    json: bool,
 }
 
 #[derive(clap::Args)]
@@ -448,6 +489,14 @@ fn run_command(command: Command) -> Result<i32> {
             verbose: args.verbose,
         }),
         Command::Order(args) => run_order(args),
+        Command::Feed(args) => feed::run(FeedOptions {
+            package: args.package,
+            version: args.version,
+            ecosystem: args.ecosystem,
+            org: args.org,
+            registry: args.registry,
+            json: args.json,
+        }),
         Command::Init(args) => init::run(InitOptions {
             write: args.write,
             force: args.force,

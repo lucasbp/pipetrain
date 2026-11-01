@@ -25,6 +25,7 @@ use crate::render;
 pub mod apply;
 pub mod authors;
 mod checklist;
+pub mod feed;
 pub mod init;
 pub mod order;
 pub mod orgs;
