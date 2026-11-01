@@ -331,6 +331,15 @@ struct BundleArgs {
 
     #[arg(long, help = "Do not draw the progress indicator on stderr")]
     no_progress: bool,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value = "auto",
+        conflicts_with = "json",
+        help = "Colors: auto (only on a terminal, honors NO_COLOR), always, never"
+    )]
+    color: clap::ColorChoice,
 }
 
 #[derive(clap::Args)]
@@ -404,6 +413,7 @@ fn run_plan(args: PlanArgs) -> Result<i32> {
 }
 
 fn run_bundle(args: BundleArgs) -> Result<i32> {
+    apply_color(args.color);
     let progress = pipetrain::progress::detect(args.no_progress, args.json, false);
     apply::run(ApplyOptions {
         plan: PlanOptions {

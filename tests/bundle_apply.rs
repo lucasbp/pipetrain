@@ -3,8 +3,11 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
-use pipetrain::command::apply::{Gate, Kind, Outcome, Status, apply_plan, gate, render};
+use pipetrain::command::apply::{
+    Gate, Kind, Outcome, Status, apply_plan, gate, render, render_with,
+};
 use pipetrain::config::{ApiConfig, Config, Rules};
 use pipetrain::github::Client;
 use pipetrain::model::{Checks, Pr, PrKey, PrState, Review};
@@ -429,4 +432,122 @@ fn the_gate_follows_its_truth_table() {
     assert_eq!(gate(true, false, true, Some("y")), Gate::Abort);
     assert_eq!(gate(true, false, true, Some("")), Gate::Abort);
     assert_eq!(gate(true, false, true, Some("no")), Gate::Abort);
+}
+
+fn mixed_report() -> Outcome {
+    let server = serve(happy);
+    let mut outcome = run(&server, &two_prs(), true, true);
+    let extra = run(&server, &two_prs(), true, true)
+        .report
+        .bundles
+        .remove(0)
+        .actions
+        .pop()
+        .unwrap();
+    let list = &mut outcome.report.bundles[0].actions;
+    list.push(extra);
+    list[1].status = Status::Skipped;
+    list[2].status = Status::Failed;
+    outcome
+}
+
+#[test]
+fn the_summary_counts_the_actions_by_status() {
+    let outcome = mixed_report();
+    let text = render(&outcome.report);
+
+    assert!(
+        text.ends_with("\n\n2 done, 1 skipped, 1 failed\n"),
+        "{text}"
+    );
+    assert!(!text.contains('\u{1b}'));
+}
+
+#[test]
+fn the_summary_ends_with_the_elapsed_time_when_given() {
+    let outcome = mixed_report();
+    let text = render_with(&outcome.report, false, Some(Duration::from_millis(1500)));
+
+    assert!(
+        text.ends_with("2 done, 1 skipped, 1 failed in 1.5 s\n"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_dry_run_has_no_summary() {
+    let server = serve(happy);
+    let outcome = run(&server, &two_prs(), false, true);
+    let text = render_with(&outcome.report, false, Some(Duration::from_millis(10)));
+
+    assert!(!text.contains(" done"), "{text}");
+    assert!(!text.contains("skipped,"), "{text}");
+}
+
+#[test]
+fn the_plain_render_has_no_escape_codes_and_matches_the_default() {
+    let outcome = mixed_report();
+
+    assert_eq!(
+        render_with(&outcome.report, false, None),
+        render(&outcome.report)
+    );
+}
+
+#[test]
+fn the_colored_dry_run_banner_is_yellow() {
+    let server = serve(happy);
+    let outcome = run(&server, &two_prs(), false, true);
+    let text = render_with(&outcome.report, true, None);
+
+    assert!(
+        text.starts_with(
+            "\u{1b}[33mdry run, nothing was written; pass --apply to do it\u{1b}[0m\n\n"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("\u{1b}[33mcreate branch\u{1b}[0m"), "{text}");
+    assert!(
+        text.contains(&format!("\u{1b}[36m{DEPLOY}\u{1b}[0m")),
+        "{text}"
+    );
+    assert!(text.contains("\u{1b}[1macme/api-core#1\u{1b}[0m"), "{text}");
+}
+
+#[test]
+fn the_colored_statuses_use_green_dim_and_red() {
+    let outcome = mixed_report();
+    let text = render_with(&outcome.report, true, None);
+
+    assert!(text.contains("\u{1b}[32mdone:\u{1b}[0m"), "{text}");
+    assert!(text.contains("\u{1b}[2mskipped:\u{1b}[0m"), "{text}");
+    assert!(text.contains("\u{1b}[1;31mfailed:\u{1b}[0m"), "{text}");
+    assert!(
+        text.contains(
+            "\u{1b}[32m2 done\u{1b}[0m, \u{1b}[2m1 skipped\u{1b}[0m, \u{1b}[1;31m1 failed\u{1b}[0m"
+        ),
+        "{text}"
+    );
+}
+
+#[test]
+fn zero_failures_are_dim() {
+    let server = serve(happy);
+    let outcome = run(&server, &two_prs(), true, true);
+    let text = render_with(&outcome.report, true, None);
+
+    assert!(text.contains("\u{1b}[2m0 failed\u{1b}[0m"), "{text}");
+}
+
+#[test]
+fn the_colored_nothing_to_bundle_is_dim() {
+    let mut plan = two_prs();
+    plan.bundles.clear();
+    let server = serve(happy);
+    let outcome = run(&server, &plan, true, true);
+
+    assert_eq!(
+        render_with(&outcome.report, true, None),
+        "\u{1b}[2mnothing to bundle\u{1b}[0m\n"
+    );
 }

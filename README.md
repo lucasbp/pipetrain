@@ -156,7 +156,7 @@ pipetrain plan [OPTIONS] [PRS]...
 | `--emit queue` | Replaces the plan with a queue for a runner: one `merge:org/repo#N` line per ready PR on stdout, questions on stderr, exit 3 when questions are open. See [Feeding a queue runner](#feeding-a-queue-runner). Not combinable with `--json`. |
 | `--apply` | Only on `bundle`. Writes to GitHub: creates the deploy branches and retargets the PRs. Without it `bundle` is a dry run. |
 | `--yes` | Only on `bundle`, and only together with `--apply`. Skips the confirmation prompt. Required when stdin is not a terminal. |
-| `--color auto\|always\|never` | Colors in the text output. `auto` (the default) colors only on a terminal and honors `NO_COLOR`. `always` colors even when piped, `never` never does. `--json` is never colored. |
+| `--color auto\|always\|never` | On `plan` and `bundle`. Colors in the text output. `auto` (the default) colors only on a terminal and honors `NO_COLOR`. `always` colors even when piped, `never` never does. `--json` is never colored. |
 
 PR references are written as `org/repo#123`. A PR that cannot be found stops the run.
 
@@ -201,6 +201,7 @@ Both checks are read-only, and so is `plan`. The bundle is a suggestion: `plan` 
 ```
 pipetrain bundle [OPTIONS] [PRS]...
 pipetrain bundle --apply [--yes] [OPTIONS] [PRS]...
+pipetrain bundle [--color auto|always|never] [OPTIONS] [PRS]...
 ```
 
 `bundle` takes the `BUNDLES` section of the plan and, when you ask, carries out its first two steps. By default it is a dry run: it reads the tip of each base branch, prints what it would do and writes nothing. `--apply` writes. `--yes` skips the confirmation prompt, and it is required when stdin is not a terminal (without it `--apply` refuses to run before it reads a token or calls GitHub).
@@ -213,6 +214,8 @@ What it does, per bundle:
 What it does not do: it never merges, never opens the deploy PR, never deletes a branch and never force-pushes. Steps 3 and 4 of [docs/saving-pipelines.md](docs/saving-pipelines.md) stay with you.
 
 It stops at the first failed write and never retries. The actions after the failure are reported as `skipped`. Running it again is safe: a branch that already exists is skipped, and so is a PR already based on it, so the second run picks up where the first stopped. When the deploy branch is already the head of an open PR, no branch is created and only the retargets run.
+
+The text report is colored like the plan: `--color auto` (the default) colors only on a terminal and honors `NO_COLOR`, `always` colors when piped, `never` never does. After `--apply` it ends with a summary line such as `2 done, 1 skipped, 0 failed in 1.4 s`, counted by status and timed from the moment the writes start (after the confirmation). A dry run has no summary. `--json` is never colored and cannot be combined with `--color` (exit 2).
 
 Token permissions: Contents: write to create the branch and Pull requests: write to change a base. A read-only token fails on the first write with a message that says so, and nothing after it runs.
 

@@ -46,3 +46,19 @@ fn plan_help_does_not_offer_apply() {
     assert!(out.status.success());
     assert!(!stdout.contains("--apply"), "stdout: {stdout}");
 }
+
+#[test]
+fn bundle_help_lists_color() {
+    let out = run(&["bundle", "--help"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success());
+    assert!(stdout.contains("--color"), "stdout: {stdout}");
+}
+
+#[test]
+fn color_conflicts_with_json_on_bundle() {
+    let out = run(&["bundle", "--color", "never", "--json"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(stderr.contains("--color"), "stderr: {stderr}");
+}
