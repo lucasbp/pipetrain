@@ -7,7 +7,7 @@ use super::resolve;
 use crate::cache::{Cache, CacheMode};
 use crate::config::Config;
 use crate::emit::{EXIT_QUESTIONS, REPO_LEVEL};
-use crate::github::{self, Client};
+use crate::github::{self, ApiError, Client};
 use crate::model::Question;
 use crate::publishers;
 use graph::{Analysis, Chain};
@@ -113,18 +113,56 @@ fn report(analysis: &Analysis, names: &Names, questions: &[Question]) -> Suggest
     }
 }
 
+type Manifests = Vec<(String, String, String)>;
+
+fn read_repo(
+    client: &mut Client,
+    repo: &str,
+    questions: &mut Vec<Question>,
+) -> Result<Option<Manifests>> {
+    let read = client
+        .default_branch_sha(repo)
+        .and_then(|sha| super::scan_repo(client, repo, &sha, questions));
+    match read {
+        Ok(manifests) => Ok(Some(manifests)),
+        Err(error) if is_not_found(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn is_not_found(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<ApiError>(),
+        Some(ApiError::NotFound { .. })
+    )
+}
+
 pub fn suggest(client: &mut Client, names: &Names) -> Result<Suggestion> {
     let mut questions = Vec::new();
     let mut manifests = Vec::new();
-    for repo in names.values() {
-        let sha = client.default_branch_sha(repo)?;
-        manifests.extend(super::scan_repo(client, repo, &sha, &mut questions)?);
+    let mut warnings = Vec::new();
+    let mut readable = Names::new();
+    for (slug, repo) in names {
+        match read_repo(client, repo, &mut questions)? {
+            Some(found) => {
+                manifests.extend(found);
+                readable.insert(slug.clone(), repo.clone());
+            }
+            None => warnings.push(format!(
+                "warning: skipped {repo}: GitHub answered not found, check the name in the config"
+            )),
+        }
+    }
+    if readable.is_empty() {
+        bail!("no repo could be read: every name was not found, check the names in the config");
     }
     let published = publishers::collect(&manifests);
     let references = publishers::collect_references(&manifests);
     let pairs =
-        publishers::dependency_pairs(|repo| names.contains_key(repo), &references, &published);
-    Ok(report(&graph::analyze(&pairs), names, &questions))
+        publishers::dependency_pairs(|repo| readable.contains_key(repo), &references, &published);
+    let mut suggestion = report(&graph::analyze(&pairs), &readable, &questions);
+    suggestion.stderr.splice(0..0, warnings);
+    Ok(suggestion)
 }
 
 pub fn run(opts: OrderOptions) -> Result<i32> {

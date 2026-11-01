@@ -5,7 +5,7 @@ use std::thread::{self, JoinHandle};
 use pipetrain::command::order::graph::{Analysis, Chain, Edge, analyze};
 use pipetrain::command::order::{names_of, suggest};
 use pipetrain::config::ApiConfig;
-use pipetrain::github::Client;
+use pipetrain::github::{ApiError, Client};
 use pipetrain::publishers::Pairs;
 use serde_json::{Value, json};
 
@@ -160,6 +160,123 @@ fn repo_replies(csproj: &str, text: &str) -> Vec<Canned> {
         ], "truncated": false})),
         canned(json!({"data": {"repository": {"f0": {"text": text}}}})),
     ]
+}
+
+fn failure(status: &'static str, body: Value) -> Canned {
+    Canned {
+        status,
+        body: body.to_string(),
+    }
+}
+
+fn missing_repo() -> Canned {
+    canned(json!({"data": {"repository": null}}))
+}
+
+fn lenient_client(base: &str) -> Client {
+    let cfg = ApiConfig {
+        max_requests: 50,
+        max_per_minute: 1000,
+        min_remaining: 0,
+    };
+    Client::with_base_url(FAKE.to_string(), &cfg, false, base)
+}
+
+fn sdk_replies() -> Vec<Canned> {
+    repo_replies(
+        "src/Acme.Sdk.csproj",
+        r#"<PackageReference Include="Acme.Util" Version="1.0.0" />"#,
+    )
+}
+
+fn util_replies() -> Vec<Canned> {
+    repo_replies(
+        "src/Acme.Util.csproj",
+        "<GeneratePackageOnBuild>true</GeneratePackageOnBuild>",
+    )
+}
+
+#[test]
+fn a_repo_that_answers_not_found_is_skipped_and_the_others_still_report() {
+    let mut replies = vec![missing_repo()];
+    replies.extend(sdk_replies());
+    replies.extend(util_replies());
+    let (base, server) = serve(replies);
+    let mut client = lenient_client(&base);
+    let names = names_of([
+        "acme/missing".to_string(),
+        "acme/sdk".to_string(),
+        "acme/util".to_string(),
+    ]);
+
+    let found = suggest(&mut client, &names).unwrap();
+    server.join().unwrap();
+
+    assert_eq!(
+        found.stdout,
+        "# acme/sdk references acme.util, published by acme/util\n[[order]]\nrepos = [\"acme/util\", \"acme/sdk\"]\n"
+    );
+    assert_eq!(
+        found.stderr,
+        vec![
+            "warning: skipped acme/missing: GitHub answered not found, check the name in the config"
+                .to_string()
+        ]
+    );
+    assert_eq!(found.exit, 0);
+    assert!(!found.stdout.contains("missing"));
+}
+
+#[test]
+fn every_repo_not_found_is_an_error() {
+    let (base, server) = serve(vec![missing_repo(), missing_repo()]);
+    let mut client = lenient_client(&base);
+    let names = names_of(["acme/one".to_string(), "acme/two".to_string()]);
+
+    let error = suggest(&mut client, &names).unwrap_err();
+    server.join().unwrap();
+
+    assert!(error.to_string().contains("no repo could be read"));
+}
+
+#[test]
+fn an_unauthorized_repo_still_aborts() {
+    let (base, server) = serve(vec![failure(
+        "401 Unauthorized",
+        json!({"message": "Bad credentials"}),
+    )]);
+    let mut client = lenient_client(&base);
+    let names = names_of(["acme/one".to_string(), "acme/two".to_string()]);
+
+    let error = suggest(&mut client, &names).unwrap_err();
+    server.join().unwrap();
+
+    assert_eq!(
+        error.downcast_ref::<ApiError>(),
+        Some(&ApiError::Unauthorized)
+    );
+    assert!(!error.to_string().contains("no repo could be read"));
+}
+
+#[test]
+fn a_repo_whose_tree_answers_not_found_is_skipped() {
+    let mut replies = vec![
+        canned(
+            json!({"data": {"repository": {"defaultBranchRef": {"target": {"oid": "abc123"}}}}}),
+        ),
+        failure("404 Not Found", json!({"message": "Not Found"})),
+    ];
+    replies.extend(sdk_replies());
+    let (base, server) = serve(replies);
+    let mut client = lenient_client(&base);
+    let names = names_of(["acme/gone".to_string(), "acme/sdk".to_string()]);
+
+    let found = suggest(&mut client, &names).unwrap();
+    server.join().unwrap();
+
+    assert!(found.stderr[0].contains("skipped acme/gone"));
+    assert!(found.stdout.is_empty());
+    assert_eq!(found.exit, 0);
 }
 
 #[test]
