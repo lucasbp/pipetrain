@@ -1,15 +1,23 @@
+mod term;
+
 use std::io::{IsTerminal, Write};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, MutexGuard, Once, TryLockError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const DEFAULT_DELAY: Duration = Duration::from_millis(300);
 const REDRAW: Duration = Duration::from_millis(80);
+const HIDE_CURSOR: &str = "\x1b[?25l";
+const ERASE_LINE: &str = "\r\x1b[2K";
+const RESTORE: &[u8] = b"\r\x1b[2K\x1b[?25h";
 
 type Active = Option<Painter<Box<dyn Write + Send>>>;
 
 static ACTIVE: Mutex<Active> = Mutex::new(None);
+static CURSOR_HIDDEN: AtomicBool = AtomicBool::new(false);
+static PANIC_HOOK: Once = Once::new();
 
 pub struct Painter<W: Write> {
     writer: W,
@@ -17,7 +25,7 @@ pub struct Painter<W: Write> {
     phase: Option<String>,
     counter: Option<(usize, usize)>,
     frame: usize,
-    drawn_len: usize,
+    hidden: bool,
     enabled: bool,
 }
 
@@ -29,9 +37,13 @@ impl<W: Write> Painter<W> {
             phase: None,
             counter: None,
             frame: 0,
-            drawn_len: 0,
+            hidden: false,
             enabled,
         }
+    }
+
+    pub fn hidden(&self) -> bool {
+        self.hidden
     }
 
     pub fn set_phase(&mut self, text: &str) {
@@ -50,30 +62,38 @@ impl<W: Write> Painter<W> {
         let Some(phase) = &self.phase else {
             return;
         };
-        let mut text = format!("{} {phase}", FRAMES[self.frame % FRAMES.len()]);
+        let hide = if self.hidden { "" } else { HIDE_CURSOR };
+        let mut text = format!(
+            "{hide}{ERASE_LINE}{} {phase}",
+            FRAMES[self.frame % FRAMES.len()]
+        );
         if let Some((done, total)) = self.counter {
             text.push_str(&format!(" {done}/{total}"));
         }
-        let len = text.chars().count();
-        let pad = " ".repeat(self.drawn_len.saturating_sub(len));
-        let _ = write!(self.writer, "\r{text}{pad}");
-        let _ = self.writer.flush();
-        self.drawn_len = len;
+        self.emit(text.as_bytes());
+        self.hidden = true;
         self.frame += 1;
     }
 
-    pub fn clear(&mut self) {
-        if self.drawn_len == 0 {
+    pub fn finish(&mut self) {
+        if !self.hidden {
             return;
         }
-        let _ = write!(self.writer, "\r{}\r", " ".repeat(self.drawn_len));
-        let _ = self.writer.flush();
-        self.drawn_len = 0;
+        self.emit(RESTORE);
+        self.hidden = false;
     }
 
     pub fn line(&mut self, text: &str) {
-        self.clear();
-        let _ = writeln!(self.writer, "{text}");
+        let out = if self.hidden {
+            format!("{ERASE_LINE}{text}\n")
+        } else {
+            format!("{text}\n")
+        };
+        self.emit(out.as_bytes());
+    }
+
+    fn emit(&mut self, bytes: &[u8]) {
+        let _ = self.writer.write_all(bytes);
         let _ = self.writer.flush();
     }
 }
@@ -82,23 +102,64 @@ fn active() -> MutexGuard<'static, Active> {
     ACTIVE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+pub(crate) fn restore_into<W: Write>(writer: &mut W) -> bool {
+    if !CURSOR_HIDDEN.swap(false, Ordering::SeqCst) {
+        return false;
+    }
+    let _ = writer.write_all(RESTORE);
+    let _ = writer.flush();
+    true
+}
+
+pub fn restore_cursor() {
+    restore_into(&mut std::io::stderr());
+}
+
+fn install_panic_hook() {
+    PANIC_HOOK.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let taken = match ACTIVE.try_lock() {
+                Ok(mut guard) => guard.take(),
+                Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner().take(),
+                Err(TryLockError::WouldBlock) => None,
+            };
+            drop(taken);
+            restore_cursor();
+            previous(info);
+        }));
+    });
+}
+
 pub struct Progress {
     handle: Option<JoinHandle<()>>,
 }
 
 impl Progress {
     pub fn start(enabled: bool) -> Progress {
-        if !enabled {
+        if !enabled || !term::prepare() {
             return Progress { handle: None };
         }
-        let writer: Box<dyn Write + Send> = Box::new(std::io::stderr());
-        *active() = Some(Painter::new(writer, true, DEFAULT_DELAY));
+        install_panic_hook();
+        Progress::start_into(Box::new(std::io::stderr()), DEFAULT_DELAY, REDRAW)
+    }
+
+    pub(crate) fn start_into(
+        writer: Box<dyn Write + Send>,
+        delay: Duration,
+        redraw: Duration,
+    ) -> Progress {
+        *active() = Some(Painter::new(writer, true, delay));
         let started = Instant::now();
         let handle = thread::spawn(move || {
             loop {
-                thread::park_timeout(REDRAW);
-                match active().as_mut() {
-                    Some(painter) => painter.tick(started.elapsed()),
+                thread::park_timeout(redraw);
+                let mut guard = active();
+                match guard.as_mut() {
+                    Some(painter) => {
+                        painter.tick(started.elapsed());
+                        CURSOR_HIDDEN.store(painter.hidden(), Ordering::SeqCst);
+                    }
                     None => return,
                 }
             }
@@ -114,8 +175,12 @@ impl Drop for Progress {
         let Some(handle) = self.handle.take() else {
             return;
         };
-        if let Some(mut painter) = active().take() {
-            painter.clear();
+        {
+            let mut guard = active();
+            if let Some(mut painter) = guard.take() {
+                painter.finish();
+            }
+            CURSOR_HIDDEN.store(false, Ordering::SeqCst);
         }
         handle.thread().unpark();
         let _ = handle.join();
@@ -172,12 +237,22 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn serial() -> MutexGuard<'static, ()> {
+        TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[derive(Clone, Default)]
     struct Sink(Arc<Mutex<Vec<u8>>>);
 
     impl Sink {
         fn text(&self) -> String {
             String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+
+        fn len(&self) -> usize {
+            self.0.lock().unwrap().len()
         }
     }
 
@@ -193,6 +268,9 @@ mod tests {
     }
 
     const DELAY: Duration = Duration::from_millis(300);
+    const HIDE: &str = "\x1b[?25l";
+    const ERASE: &str = "\r\x1b[2K";
+    const SHOW_AFTER_ERASE: &str = "\r\x1b[2K\x1b[?25h";
 
     fn painter(enabled: bool) -> (Painter<Sink>, Sink) {
         let sink = Sink::default();
@@ -205,14 +283,16 @@ mod tests {
         p.set_phase("discovering");
         p.tick(Duration::from_millis(299));
         assert_eq!(sink.text(), "");
+        assert!(!p.hidden());
     }
 
     #[test]
-    fn tick_after_the_delay_draws_the_first_frame_and_phase() {
+    fn first_frame_hides_the_cursor_in_the_same_write() {
         let (mut p, sink) = painter(true);
         p.set_phase("discovering");
         p.tick(DELAY);
-        assert_eq!(sink.text(), "\r⠋ discovering");
+        assert_eq!(sink.text(), format!("{HIDE}{ERASE}⠋ discovering"));
+        assert!(p.hidden());
     }
 
     #[test]
@@ -223,12 +303,12 @@ mod tests {
     }
 
     #[test]
-    fn frames_advance_on_each_tick() {
+    fn second_frame_does_not_hide_again() {
         let (mut p, sink) = painter(true);
         p.set_phase("a");
         p.tick(DELAY);
         p.tick(DELAY);
-        assert_eq!(sink.text(), "\r⠋ a\r⠙ a");
+        assert_eq!(sink.text(), format!("{HIDE}{ERASE}⠋ a{ERASE}⠙ a"));
     }
 
     #[test]
@@ -237,7 +317,7 @@ mod tests {
         p.set_phase("reading");
         p.set_count(12, 34);
         p.tick(DELAY);
-        assert_eq!(sink.text(), "\r⠋ reading 12/34");
+        assert_eq!(sink.text(), format!("{HIDE}{ERASE}⠋ reading 12/34"));
     }
 
     #[test]
@@ -251,41 +331,62 @@ mod tests {
     }
 
     #[test]
-    fn clear_after_a_draw_erases_the_drawn_length() {
+    fn shorter_phase_needs_no_padding() {
         let (mut p, sink) = painter(true);
-        p.set_phase("abc");
+        p.set_phase("reading manifests");
         p.tick(DELAY);
-        p.clear();
-        assert_eq!(sink.text(), format!("\r⠋ abc\r{}\r", " ".repeat(5)));
+        p.set_phase("ab");
+        p.tick(DELAY);
+        assert_eq!(
+            sink.text(),
+            format!("{HIDE}{ERASE}⠋ reading manifests{ERASE}⠙ ab")
+        );
     }
 
     #[test]
-    fn clear_without_a_draw_writes_nothing() {
+    fn finish_after_a_draw_erases_and_shows_the_cursor_last() {
         let (mut p, sink) = painter(true);
-        p.clear();
+        p.set_phase("abc");
+        p.tick(DELAY);
+        p.finish();
+        let text = sink.text();
+        assert_eq!(text, format!("{HIDE}{ERASE}⠋ abc{SHOW_AFTER_ERASE}"));
+        assert!(text.ends_with(SHOW_AFTER_ERASE));
+        assert!(!p.hidden());
+    }
+
+    #[test]
+    fn finish_without_a_draw_writes_nothing() {
+        let (mut p, sink) = painter(true);
+        p.set_phase("abc");
+        p.tick(Duration::from_millis(10));
+        p.finish();
         assert_eq!(sink.text(), "");
     }
 
     #[test]
-    fn clear_twice_writes_once() {
+    fn finish_twice_writes_once() {
         let (mut p, sink) = painter(true);
         p.set_phase("abc");
         p.tick(DELAY);
-        p.clear();
-        p.clear();
-        assert_eq!(sink.text(), format!("\r⠋ abc\r{}\r", " ".repeat(5)));
+        p.finish();
+        p.finish();
+        assert_eq!(sink.text(), format!("{HIDE}{ERASE}⠋ abc{SHOW_AFTER_ERASE}"));
     }
 
     #[test]
-    fn line_after_a_draw_clears_first() {
+    fn line_after_a_draw_is_one_erase_and_keeps_the_cursor_hidden() {
         let (mut p, sink) = painter(true);
         p.set_phase("abc");
         p.tick(DELAY);
+        let before = sink.len();
         p.line("request   1  repos");
+        let text = sink.text();
         assert_eq!(
-            sink.text(),
-            format!("\r⠋ abc\r{}\rrequest   1  repos\n", " ".repeat(5))
+            &text[before..],
+            format!("{ERASE}request   1  repos\n").as_str()
         );
+        assert!(p.hidden());
     }
 
     #[test]
@@ -296,27 +397,78 @@ mod tests {
     }
 
     #[test]
+    fn line_before_any_draw_writes_only_the_line() {
+        let (mut p, sink) = painter(true);
+        p.set_phase("abc");
+        p.line("hello");
+        assert_eq!(sink.text(), "hello\n");
+    }
+
+    #[test]
     fn disabled_painter_never_draws() {
         let (mut p, sink) = painter(false);
         p.set_phase("abc");
         p.tick(Duration::from_secs(10));
+        p.finish();
         assert_eq!(sink.text(), "");
     }
 
     #[test]
-    fn shorter_phase_pads_over_the_longer_one() {
-        let (mut p, sink) = painter(true);
-        p.set_phase("reading manifests");
-        p.tick(DELAY);
-        p.set_phase("ab");
-        p.tick(DELAY);
-        let longer = "⠋ reading manifests".chars().count();
-        let shorter = "⠙ ab".chars().count();
-        let expected = format!(
-            "\r⠋ reading manifests\r⠙ ab{}",
-            " ".repeat(longer - shorter)
+    fn restore_into_writes_only_when_the_cursor_was_hidden() {
+        let _serial = serial();
+        CURSOR_HIDDEN.store(false, Ordering::SeqCst);
+        let mut out: Vec<u8> = Vec::new();
+        assert!(!restore_into(&mut out));
+        assert!(out.is_empty());
+        CURSOR_HIDDEN.store(true, Ordering::SeqCst);
+        assert!(restore_into(&mut out));
+        assert_eq!(out, RESTORE);
+        assert!(!restore_into(&mut out));
+        assert_eq!(out, RESTORE);
+    }
+
+    #[test]
+    fn start_into_with_a_long_delay_writes_zero_bytes() {
+        let _serial = serial();
+        let sink = Sink::default();
+        let progress = Progress::start_into(
+            Box::new(sink.clone()),
+            Duration::from_secs(30),
+            Duration::from_millis(5),
         );
-        assert_eq!(sink.text(), expected);
+        phase("reading");
+        count(1, 3);
+        thread::sleep(Duration::from_millis(40));
+        drop(progress);
+        assert_eq!(sink.len(), 0);
+        assert!(!CURSOR_HIDDEN.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn start_into_lifecycle_hides_draws_and_restores_last() {
+        let _serial = serial();
+        let sink = Sink::default();
+        let progress = Progress::start_into(
+            Box::new(sink.clone()),
+            Duration::from_millis(20),
+            Duration::from_millis(5),
+        );
+        phase("reading");
+        count(1, 3);
+        thread::sleep(Duration::from_millis(120));
+        assert!(CURSOR_HIDDEN.load(Ordering::SeqCst));
+        line("x");
+        drop(progress);
+        let text = sink.text();
+        assert!(text.starts_with(&format!("{HIDE}{ERASE}⠋ reading")));
+        assert_eq!(text.matches(HIDE).count(), 1);
+        assert!(text.contains(&format!("{ERASE}x\n")));
+        assert!(!text.replace(&format!("{ERASE}x\n"), "").contains("x\n"));
+        assert!(text.ends_with(SHOW_AFTER_ERASE));
+        assert!(!CURSOR_HIDDEN.load(Ordering::SeqCst));
+        let length = sink.len();
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(sink.len(), length);
     }
 
     fn interactive(
@@ -363,6 +515,7 @@ mod tests {
 
     #[test]
     fn free_functions_without_a_spinner_do_not_panic() {
+        let _serial = serial();
         phase("anything");
         count(1, 2);
     }
