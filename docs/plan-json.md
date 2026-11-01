@@ -67,6 +67,7 @@ One edge "the PR in `id` goes before this item".
 | `reason` | string | Human sentence naming the cause. Free text: do not parse it. |
 | `implied` | boolean | `true` when another predecessor of this item already reaches `id`, so the edge adds no constraint. A viewer can hide it. |
 | `package` | string | Only on `package` and `dependency` edges: the package name that `id` publishes and this item consumes, as the manifests spell it. Omitted on every other edge. Added after schema 1 shipped, and additive only. |
+| `version` | string | Optional. Only on a `package` edge whose version was readable: the version this item bumps the package to, read from the added line of the item's own manifest diff, with a leading `^`, `~`, `>=`, `>`, `=` or `v` and any brackets removed. Omitted when the version is a variable, a wildcard, a range or differs between files, and on every other edge, so plans without a readable version are byte-identical to before. Additive only: schema stays 1. |
 
 ## Bundle
 

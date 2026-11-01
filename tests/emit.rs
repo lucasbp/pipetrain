@@ -494,7 +494,7 @@ fn a_late_gate_waits_for_its_package_predecessor_and_pauses_right_before_it() {
     assert_eq!(lines[at("# gate:") + 1], PAUSE_LINE);
     assert_eq!(
         lines[at("# gate:") + 2],
-        "# wait: package @acme/kit from acme/kit#6 must be published before acme/web#5"
+        "# wait: package @acme/kit 1.1.0 from acme/kit#6 must be published before acme/web#5"
     );
     assert_eq!(lines[at("# gate:") + 3], "merge:acme/web#5");
     assert!(at("merge:acme/kit#6") < at("# gate:"));

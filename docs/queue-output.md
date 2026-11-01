@@ -15,12 +15,12 @@
 | `# pause: confirm DDL/infra before continuing` | Stop here until a human confirms. |
 | `# bundle <org>/<repo>: <N> PRs into <base> could be 1 deploy (saves <N-1>): <PR ids>` | Informative. One per suggested deploy branch. The runner skips it like any `#` line. |
 | `# conflict: <PR id> and <PR id> both change <N file(s)> (<kind>)` | Informative. Two PRs of the same repo change the same files. `<N file(s)>` reads `1 file` or `N files`, and `<kind>` is `lockfile`, `sql`, `generated` or `other`. The runner skips it like any `#` line. |
-| `# wait: package <pkg> from <PR ids> must be published before <org>/<repo>#<n>` | The PRs after `from` publish `<pkg>` and the PR in the `merge:` line right below bumps it to the version they publish. The runner stops there until the package is in the feed. pipetrain does not query the feed. A runner that does not understand the line ignores it like any `#` line. |
+| `# wait: package <pkg> <version> from <PR ids> must be published before <org>/<repo>#<n>` | The PRs after `from` publish `<pkg>` and the PR in the `merge:` line right below bumps it to `<version>`. `<version>` is omitted when it is not readable: `# wait: package <pkg> from <PR ids> must be published before <org>/<repo>#<n>`. The runner stops there until that version of the package is in the feed. pipetrain does not query the feed. A runner that does not understand the line ignores it like any `#` line. |
 | `# ...` | Any line that starts with `#` is a comment. Skip it. |
 
 ## Wait comments
 
-Only a PR that bumps the version of a package that other PRs of the same queue publish waits (edge rule `package`). One `# wait` line is printed immediately before the consumer's `merge:` line for each such package, naming every publisher in the queue, sorted by id. A PR that only references the package (edge rule `dependency`) has an ordering edge and no `# wait` line: it can use the version already in the feed. Gate PRs get the line too. Several lines for one consumer are sorted by package. The line names no version: the planner only knows the package name, and it makes no request to learn the published version. A queue with no such edge has no `# wait` line and is byte-identical to the same queue before this line existed. Every `merge:` and `# pause` line is the same with or without the `# wait` lines, in the same relative order.
+Only a PR that bumps the version of a package that other PRs of the same queue publish waits (edge rule `package`). One `# wait` line is printed immediately before the consumer's `merge:` line for each such package, naming every publisher in the queue, sorted by id. A PR that only references the package (edge rule `dependency`) has an ordering edge and no `# wait` line: it can use the version already in the feed. Gate PRs get the line too. Several lines for one consumer are sorted by package. The line names the version the consumer bumps to, read from the added line of the consumer PR's own manifest diff (`.csproj`, `.props`, `.targets` or `package.json`), with a leading `^`, `~`, `>=`, `>`, `=` or `v` and any brackets removed. When the version cannot be read (a variable such as `$(CmUtilVersion)`, a wildcard or `x` range, a version range with a comma, or two different versions for the package across the consumer's files), the line names no version and keeps the format `# wait: package <pkg> from <PR ids> must be published before <consumer>`. The planner makes no request to the package feed: it never checks that the version exists or is published. Publishers that share a package and a version collapse into one line; the same package with different versions for one consumer is not possible, since a conflicting version is dropped. A queue with no such edge has no `# wait` line and is byte-identical to the same queue before this line existed. Every `merge:` and `# pause` line is the same with or without the `# wait` lines, in the same relative order.
 
 ## Bundle comments
 
@@ -46,7 +46,7 @@ The rule "gate PRs first" has one exception. A gate PR that must come after anot
 ```
 # gate: <org>/<repo>#<n> waits for <PR ids> (<rule>: <detail>)
 # pause: confirm DDL/infra before continuing
-# wait: package <pkg> from <PR ids> must be published before <org>/<repo>#<n>
+# wait: package <pkg> <version> from <PR ids> must be published before <org>/<repo>#<n>
 merge:<org>/<repo>#<n>
 ```
 
@@ -57,7 +57,7 @@ merge:acme/kit#6
 merge:acme/other#7
 # gate: acme/web#5 waits for acme/kit#6 (package: @acme/kit)
 # pause: confirm DDL/infra before continuing
-# wait: package @acme/kit from acme/kit#6 must be published before acme/web#5
+# wait: package @acme/kit 1.1.0 from acme/kit#6 must be published before acme/web#5
 merge:acme/web#5
 ```
 

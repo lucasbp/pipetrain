@@ -29,6 +29,7 @@ pipetrain plans the merge order of pull requests across repos. This file says wh
 - A progress spinner on stderr for `plan` and `order suggest`, drawn only on a terminal after 300 ms, off with `--no-progress`, `--json`, `CI=true` or a redirected `--emit queue`. stdout is never touched.
 - A DDL or infra PR that must follow another PR by a package, dependency or target edge is a late gate: it runs after its predecessors with the pause right before it, instead of a question. `--json` marks it with `gate_late`.
 - The summaries show how long the run took: a `time` line in `plan`, `... in 3.2 s` on the `order suggest` request line, a `time` line in `doctor` and `stats.elapsed_ms` in `--json`.
+- The `# wait` comment names the version the consumer bumps to, read from the consumer PR's manifest diff, and `--json` carries it as `after[].version`. Checking the package feed stays under Later.
 - A read-only conflict report: PRs of the same repo that change the same files, with the kind of file (lockfile, sql, generated, other), in the text output, `--json` (`conflicts`) and as `# conflict:` lines in the queue. The reason of a PR skipped for failing checks names the failing checks.
 
 ## Next

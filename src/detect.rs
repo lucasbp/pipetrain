@@ -120,8 +120,8 @@ fn npm_versions(patch: &str, prefix: char) -> BTreeMap<String, String> {
     found
 }
 
-pub fn bumped_packages(files: &[ChangedFile]) -> BTreeSet<String> {
-    let mut bumped = BTreeSet::new();
+fn bumped_entries(files: &[ChangedFile]) -> Vec<(String, String)> {
+    let mut bumped = Vec::new();
     for file in files {
         let Some(patch) = file.patch.as_deref() else {
             continue;
@@ -135,11 +135,62 @@ pub fn bumped_packages(files: &[ChangedFile]) -> BTreeSet<String> {
         };
         for (name, version) in added {
             if removed.get(&name) != Some(&version) {
-                bumped.insert(name);
+                bumped.push((name, version));
             }
         }
     }
     bumped
+}
+
+pub fn bumped_packages(files: &[ChangedFile]) -> BTreeSet<String> {
+    bumped_entries(files)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect()
+}
+
+fn normalise_version(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let unbracketed = trimmed
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(trimmed);
+    let version = ["^", "~", ">=", ">", "=", "v"]
+        .iter()
+        .find_map(|prefix| unbracketed.strip_prefix(prefix))
+        .unwrap_or(unbracketed);
+    if !version.starts_with(|c: char| c.is_ascii_digit())
+        || version.contains("$(")
+        || version.contains('*')
+        || version.contains(',')
+        || version.contains(char::is_whitespace)
+    {
+        return None;
+    }
+    let core = version.split(['-', '+']).next().unwrap_or(version);
+    if core.split('.').any(|part| part.eq_ignore_ascii_case("x")) {
+        return None;
+    }
+    Some(version.to_string())
+}
+
+pub fn bumped_versions(files: &[ChangedFile]) -> BTreeMap<String, String> {
+    let mut seen: BTreeMap<String, Option<String>> = BTreeMap::new();
+    for (name, raw) in bumped_entries(files) {
+        let version = normalise_version(&raw);
+        match seen.get(&name) {
+            Some(existing) if *existing != version => {
+                seen.insert(name, None);
+            }
+            Some(_) => {}
+            None => {
+                seen.insert(name, version);
+            }
+        }
+    }
+    seen.into_iter()
+        .filter_map(|(name, version)| version.map(|v| (name, v)))
+        .collect()
 }
 
 pub fn published_package(path: &str, text: &str) -> Option<String> {
@@ -229,6 +280,62 @@ mod tests {
             bumped.into_iter().collect::<Vec<_>>(),
             vec!["@acme/ui-kit".to_string()]
         );
+    }
+
+    #[test]
+    fn dotnet_bumped_version_is_read() {
+        let patch = "-    <PackageReference Include=\"CmUtil\" Version=\"1.2610.3022.39\" />\n+    <PackageReference Include=\"CmUtil\" Version=\"1.2610.3022.40\" />";
+        let versions = bumped_versions(&[file("src/App/App.csproj", patch)]);
+        assert_eq!(
+            versions.get("cmutil").map(String::as_str),
+            Some("1.2610.3022.40")
+        );
+    }
+
+    #[test]
+    fn npm_range_prefix_is_stripped() {
+        let patch = "-    \"@acme/ui-kit\": \"^1.4.0\",\n+    \"@acme/ui-kit\": \"^1.5.0\",";
+        let versions = bumped_versions(&[file("web/package.json", patch)]);
+        assert_eq!(
+            versions.get("@acme/ui-kit").map(String::as_str),
+            Some("1.5.0")
+        );
+    }
+
+    #[test]
+    fn nuget_brackets_are_stripped() {
+        let patch = "-    <PackageVersion Include=\"A\" Version=\"[1.0.0]\" />\n+    <PackageVersion Include=\"A\" Version=\"[1.2.3]\" />";
+        let versions = bumped_versions(&[file("Directory.Packages.props", patch)]);
+        assert_eq!(versions.get("a").map(String::as_str), Some("1.2.3"));
+    }
+
+    #[test]
+    fn variable_and_wildcard_versions_are_dropped() {
+        let patch = "-    <PackageReference Include=\"CmUtil\" Version=\"1.0.0\" />\n+    <PackageReference Include=\"CmUtil\" Version=\"$(CmUtilVersion)\" />";
+        assert!(bumped_versions(&[file("a.csproj", patch)]).is_empty());
+        let wildcard = "+    <PackageReference Include=\"B\" Version=\"1.*\" />\n+    <PackageReference Include=\"C\" Version=\"1.x\" />\n+    <PackageReference Include=\"D\" Version=\"[1.0,2.0)\" />";
+        assert!(bumped_versions(&[file("a.csproj", wildcard)]).is_empty());
+    }
+
+    #[test]
+    fn same_version_in_two_files_is_kept() {
+        let patch = "-    <PackageReference Include=\"A\" Version=\"1.0.0\" />\n+    <PackageReference Include=\"A\" Version=\"1.1.0\" />";
+        let versions = bumped_versions(&[file("a/a.csproj", patch), file("b/b.csproj", patch)]);
+        assert_eq!(versions.get("a").map(String::as_str), Some("1.1.0"));
+    }
+
+    #[test]
+    fn two_different_versions_are_dropped() {
+        let first = "-    <PackageReference Include=\"A\" Version=\"1.0.0\" />\n+    <PackageReference Include=\"A\" Version=\"1.1.0\" />";
+        let second = "-    <PackageReference Include=\"A\" Version=\"1.0.0\" />\n+    <PackageReference Include=\"A\" Version=\"1.2.0\" />";
+        let versions = bumped_versions(&[file("a/a.csproj", first), file("b/b.csproj", second)]);
+        assert!(versions.is_empty());
+    }
+
+    #[test]
+    fn unchanged_version_has_no_entry() {
+        let patch = "-    <PackageReference Include=\"A\" Version=\"1.0.0\"/>\n+    <PackageReference Include=\"A\" Version=\"1.0.0\" PrivateAssets=\"all\"/>";
+        assert!(bumped_versions(&[file("a.csproj", patch)]).is_empty());
     }
 
     #[test]

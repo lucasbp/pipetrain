@@ -54,6 +54,8 @@ pub struct Dependency {
     pub implied: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub package: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -104,6 +106,7 @@ struct Edge {
     rule: Rule,
     reason: String,
     package: Option<String>,
+    version: Option<String>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -156,6 +159,7 @@ impl Graph {
             rule,
             reason,
             package: None,
+            version: None,
         });
         self.succs[from].push(to);
         Added::Yes
@@ -261,13 +265,22 @@ impl<'a> Builder<'a> {
         }
     }
 
-    fn link_package(&mut self, from: usize, to: usize, rule: Rule, reason: String, package: &str) {
+    fn link_package(
+        &mut self,
+        from: usize,
+        to: usize,
+        rule: Rule,
+        reason: String,
+        package: &str,
+        version: Option<&str>,
+    ) {
         self.link(from, to, rule, reason, true);
         let tagged = self.graph.preds[to]
             .iter_mut()
             .find(|e| e.from == from && e.rule == rule && e.package.is_none());
         if let Some(edge) = tagged {
             edge.package = Some(package.to_string());
+            edge.version = version.map(str::to_string);
         }
     }
 
@@ -357,6 +370,7 @@ impl<'a> Builder<'a> {
         }
         for i in 0..self.prs.len() {
             let own = self.prs[i].key.slug().to_lowercase();
+            let versions = detect::bumped_versions(&self.prs[i].files);
             for package in detect::bumped_packages(&self.prs[i].files) {
                 let Some(repos) = publishers.get(&package) else {
                     continue;
@@ -379,7 +393,8 @@ impl<'a> Builder<'a> {
                     for j in targets {
                         let reason =
                             format!("{} bumps {package}, published by {repo}", self.ids[i]);
-                        self.link_package(j, i, Rule::Package, reason, &package);
+                        let version = versions.get(&package).map(String::as_str);
+                        self.link_package(j, i, Rule::Package, reason, &package, version);
                     }
                 }
             }
@@ -612,6 +627,7 @@ pub fn plan(input: PlanInput<'_>) -> Planned {
                         reason: e.reason.clone(),
                         implied,
                         package: e.package.clone(),
+                        version: e.version.clone(),
                     }
                 })
                 .collect();

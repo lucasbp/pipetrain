@@ -48,11 +48,23 @@ fn manifest(slug: &str, path: &str, text: &str) -> Manifest {
 }
 
 fn queue(extra: &str, prs: Vec<Pr>, manifests: &[Manifest]) -> Vec<String> {
+    emit::queue_lines(&planned(extra, prs, manifests))
+}
+
+fn bump_patch(mut consumer: Pr, path: &str, patch: &str) -> Pr {
+    consumer.files = vec![ChangedFile {
+        path: path.to_string(),
+        patch: Some(patch.to_string()),
+    }];
+    consumer
+}
+
+fn planned(extra: &str, prs: Vec<Pr>, manifests: &[Manifest]) -> plan::Plan {
     let cfg = Config::parse(&format!("orgs = [\"acme\"]\n{extra}\n")).unwrap();
     let rules = Rules::new(&cfg).unwrap();
     let publishers: Publishers = publishers::collect(manifests);
     let references: References = publishers::collect_references(manifests);
-    let built = plan::build(
+    plan::build(
         &rules,
         Gathered {
             generated_at: "2026-10-30T09:00:00-03:00".to_string(),
@@ -73,8 +85,7 @@ fn queue(extra: &str, prs: Vec<Pr>, manifests: &[Manifest]) -> Vec<String> {
             requests: 0,
             rate_remaining: None,
         },
-    );
-    emit::queue_lines(&built)
+    )
 }
 
 fn without_waits(lines: &[String]) -> Vec<String> {
@@ -122,7 +133,7 @@ fn a_package_edge_puts_a_wait_right_before_the_consumer_merge() {
     let at = position(&lines, "acme/web#5");
     assert_eq!(
         lines[at - 1],
-        "# wait: package @acme/kit from acme/kit#6 must be published before acme/web#5"
+        "# wait: package @acme/kit 1.1.0 from acme/kit#6 must be published before acme/web#5"
     );
     assert!(position(&lines, "acme/kit#6") < at);
     assert_eq!(
@@ -152,7 +163,7 @@ fn two_publishers_of_one_package_collapse_into_one_wait() {
     assert_eq!(waits(&lines).len(), 1);
     assert_eq!(
         lines[at - 1],
-        "# wait: package @acme/kit from acme/kit#6 acme/kit#8 must be published before acme/web#5"
+        "# wait: package @acme/kit 1.1.0 from acme/kit#6 acme/kit#8 must be published before acme/web#5"
     );
     let merges: Vec<&String> = lines.iter().filter(|l| l.starts_with("merge:")).collect();
     assert_eq!(
@@ -186,12 +197,67 @@ fn two_packages_for_one_consumer_come_out_in_a_stable_order() {
     let at = position(&lines, "acme/web#5");
     assert_eq!(
         lines[at - 2],
-        "# wait: package @acme/alpha from acme/alpha#7 must be published before acme/web#5"
+        "# wait: package @acme/alpha 1.1.0 from acme/alpha#7 must be published before acme/web#5"
     );
     assert_eq!(
         lines[at - 1],
-        "# wait: package @acme/zeta from acme/zeta#6 must be published before acme/web#5"
+        "# wait: package @acme/zeta 1.1.0 from acme/zeta#6 must be published before acme/web#5"
     );
     assert_eq!(waits(&lines).len(), 2);
     assert_eq!(lines, queue(extra, prs(), &[]));
+}
+
+const CMUTIL_EXTRA: &str = "[packages]\n\"cmutil\" = \"acme/cmutil\"\n";
+
+fn cmutil_prs(version: &str) -> Vec<Pr> {
+    let patch = format!(
+        "-    <PackageReference Include=\"CmUtil\" Version=\"1.2610.3022.39\" />\n+    <PackageReference Include=\"CmUtil\" Version=\"{version}\" />"
+    );
+    vec![
+        bump_patch(pr("acme/api", 5, "feat/a"), "src/Api/Api.csproj", &patch),
+        pr("acme/cmutil", 6, "feat/b"),
+    ]
+}
+
+fn consumer_after(built: &plan::Plan) -> serde_json::Value {
+    let items = serde_json::to_value(&built.items).unwrap();
+    let consumer = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == "acme/api#5")
+        .unwrap();
+    consumer["after"][0].clone()
+}
+
+#[test]
+fn the_wait_names_the_version_the_consumer_bumps_to() {
+    let lines = queue(CMUTIL_EXTRA, cmutil_prs("1.2610.3022.40"), &[]);
+    let at = position(&lines, "acme/api#5");
+    assert_eq!(
+        lines[at - 1],
+        "# wait: package cmutil 1.2610.3022.40 from acme/cmutil#6 must be published before acme/api#5"
+    );
+}
+
+#[test]
+fn an_unreadable_version_keeps_the_old_wait_format() {
+    let lines = queue(CMUTIL_EXTRA, cmutil_prs("$(CmUtilVersion)"), &[]);
+    let at = position(&lines, "acme/api#5");
+    assert_eq!(
+        lines[at - 1],
+        "# wait: package cmutil from acme/cmutil#6 must be published before acme/api#5"
+    );
+}
+
+#[test]
+fn json_after_carries_the_version_only_when_known() {
+    let known = planned(CMUTIL_EXTRA, cmutil_prs("1.2610.3022.40"), &[]);
+    let entry = consumer_after(&known);
+    assert_eq!(entry["package"], "cmutil");
+    assert_eq!(entry["version"], "1.2610.3022.40");
+    let unknown = planned(CMUTIL_EXTRA, cmutil_prs("$(CmUtilVersion)"), &[]);
+    let entry = consumer_after(&unknown);
+    assert_eq!(entry["package"], "cmutil");
+    assert!(entry.get("version").is_none());
 }

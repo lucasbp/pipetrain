@@ -17,21 +17,28 @@ pub enum Emit {
 }
 
 fn wait_lines(plan: &Plan, item: &Item) -> Vec<String> {
-    let mut waits: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    let mut waits: BTreeMap<(&str, Option<&str>), BTreeSet<&str>> = BTreeMap::new();
     for dep in item.after.iter().filter(|d| d.rule == Rule::Package) {
         let Some(package) = dep.package.as_deref() else {
             continue;
         };
         if plan.items.iter().any(|i| i.id == dep.id) {
-            waits.entry(package).or_default().insert(dep.id.as_str());
+            waits
+                .entry((package, dep.version.as_deref()))
+                .or_default()
+                .insert(dep.id.as_str());
         }
     }
     waits
         .into_iter()
-        .map(|(package, publishers)| {
+        .map(|((package, version), publishers)| {
             let from: Vec<&str> = publishers.into_iter().collect();
+            let named = match version {
+                Some(version) => format!("{package} {version}"),
+                None => package.to_string(),
+            };
             format!(
-                "# wait: package {package} from {} must be published before {}",
+                "# wait: package {named} from {} must be published before {}",
                 from.join(" "),
                 item.id
             )
