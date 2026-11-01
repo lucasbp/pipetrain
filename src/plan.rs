@@ -31,6 +31,8 @@ pub struct Stats {
     pub deploys_saved: usize,
     pub deploys_now: usize,
     pub deploys_after: usize,
+    pub cache_hits: u32,
+    pub cache_misses: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -144,6 +146,8 @@ pub fn build(rules: &Rules, gathered: Gathered) -> Plan {
             deploys_saved,
             deploys_now,
             deploys_after: deploys_now - deploys_saved,
+            cache_hits: 0,
+            cache_misses: 0,
         },
     }
 }

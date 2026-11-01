@@ -6,6 +6,8 @@ use crate::discovery::{Scope, Skipped};
 use crate::github::Client;
 use crate::model::Pr;
 
+mod slots;
+
 pub const MAX_LOOKUPS: usize = 50;
 pub const MAX_FILES: usize = 100;
 
@@ -111,13 +113,13 @@ pub fn verdicts(checks: &[Check], readings: &[Reading]) -> Vec<bool> {
 
 pub fn check(client: &mut Client, checks: &[Check]) -> Result<Vec<bool>> {
     let lookups = probes(checks);
-    let mut readings = Vec::with_capacity(lookups.len());
-    for chunk in lookups.chunks(MAX_LOOKUPS) {
-        let (query, variables) = build_query(chunk);
-        let response =
-            client.graphql("compare PR file content with the base", &query, variables)?;
-        readings.extend(parse(&response, chunk.len()));
-    }
+    let slots = slots::fixed(checks);
+    let mut maps = slots::load(client, &slots);
+    let mut readings = slots::prefill(lookups.len(), &slots, &maps);
+    let unknown = slots::unknown(&slots, &readings);
+    slots::ask(client, &lookups, &mut readings)?;
+    let changed = slots::learn(&mut maps, &unknown, &readings);
+    slots::save(client, &maps, &changed);
     Ok(verdicts(checks, &readings))
 }
 

@@ -114,6 +114,8 @@ Consumers should switch on `code`, never on `message` or `hint`.
 | `deploys_now` | integer | Items in the plan whose base is not a train branch: the deploys if nothing is bundled. |
 | `deploys_saved` | integer | Sum of `saved` over `bundles`. `0` when there are no bundles. |
 | `deploys_after` | integer | `deploys_now - deploys_saved`: the deploys if every suggestion is applied. |
+| `cache_hits` | integer | Lookups answered by the local cache. `0` with `--no-cache` or `--refresh`. |
+| `cache_misses` | integer | Lookups the cache could not answer, so they went to GitHub. `0` with `--no-cache`. |
 
 ## Example
 
@@ -159,7 +161,9 @@ Consumers should switch on `code`, never on `message` or `hint`.
     "max_parallel": 4,
     "deploys_saved": 0,
     "deploys_now": 1,
-    "deploys_after": 1
+    "deploys_after": 1,
+    "cache_hits": 0,
+    "cache_misses": 0
   }
 }
 ```

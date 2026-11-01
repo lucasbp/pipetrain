@@ -145,6 +145,8 @@ pipetrain plan [OPTIONS] [PRS]...
 | `--org <org>` | Org to look at. Repeatable. Overrides `orgs` of the selected profile. |
 | `--date <date>` | Train date, instead of today. Accepts the date format of `train_date_format` (default `dd-mm-yyyy`, for example `--date 29-10-2026`) or ISO `yyyy-mm-dd` (`--date 2026-10-29`). |
 | `--verbose` | Log every API request to stderr. |
+| `--no-cache` | Neither read nor write the [local cache](#local-cache). Cannot be combined with `--refresh`. |
+| `--refresh` | Ignore what the cache has, fetch it again and rewrite it. Cannot be combined with `--no-cache`. |
 | `--emit queue` | Replaces the plan with a queue for a runner: one `merge:org/repo#N` line per ready PR on stdout, questions on stderr, exit 3 when questions are open. See [Feeding a queue runner](#feeding-a-queue-runner). Not combinable with `--json`. |
 | `--color auto\|always\|never` | Colors in the text output. `auto` (the default) colors only on a terminal and honors `NO_COLOR`. `always` colors even when piped, `never` never does. `--json` is never colored. |
 
@@ -380,6 +382,25 @@ GitHub counts the REST API (`core`) and GraphQL separately, and the guard follow
 Redirects are not followed. GitHub answers a renamed or moved repo with a redirect, and pipetrain stops with an error saying the repo was renamed or moved, instead of silently planning against a different one. Use the new name.
 
 `--verbose` prints each request, and each wait, to stderr. The `api` line of the output shows how many requests the run used and how many GitHub says remain.
+
+## Local cache
+
+`plan` and `order suggest` keep a small cache on disk of data that can never change for a given key, so a second run right after the first asks GitHub for much less. On a real queue of 12 PRs across 7 repos, the second run in a row went from 38 requests to 11, with the same output.
+
+What is cached, and the key of each entry:
+
+| Data | Key |
+|---|---|
+| The paths a PR changes | repo, PR number, the live tip of the base branch and the head sha. The base tip is in the key because the changed files of a PR move when the base branch moves. |
+| The file tree of a repo | repo and commit sha. |
+| The text of package manifests | repo and commit sha. |
+| The blob id of a file at a PR head | repo and head sha. |
+
+What is never cached: anything that can change without a new sha, such as the list of open PRs, reviews, checks, merge state, the tip of a branch, and the "already merged" comparisons. Those are fetched on every run. The token, request headers and diffs are never written either: a PR that changes a package manifest, whose diff the planner reads, is always fetched again.
+
+Where it lives: the `pipetrain` folder inside your user cache directory (`%LOCALAPPDATA%` on Windows, `~/.cache` on Linux, `~/Library/Caches` on macOS). Set `PIPETRAIN_CACHE_DIR` to use another folder. Entries are small JSON files written atomically. Entries older than 14 days are deleted, and the oldest go first when the folder passes 32 MiB. Deleting the folder is always safe; the next run rebuilds it.
+
+`--no-cache` skips the cache completely and `--refresh` ignores what is there and writes it again. The plan is the same with or without the cache. `stats.cache_hits` and `stats.cache_misses` in `--json` count the lookups answered from disk and those that went to GitHub; the `api` line of the text output adds `N from cache` when there were hits, and `order suggest` does the same on its request line. `stats.requests` counts only real requests.
 
 ## Exit code
 

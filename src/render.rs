@@ -2,9 +2,24 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
 
 use crate::config::GateKind;
-use crate::plan::Plan;
+use crate::plan::{Plan, Stats};
 use crate::planner::{Item, Rule};
 use crate::style::{bold, dim, green, paint, red, yellow};
+
+fn api_summary(stats: &Stats) -> String {
+    let left = stats
+        .rate_remaining
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "?".to_string());
+    if stats.cache_hits > 0 {
+        format!(
+            "{} requests, {} from cache, {left} left",
+            stats.requests, stats.cache_hits
+        )
+    } else {
+        format!("{} requests, {left} left", stats.requests)
+    }
+}
 
 fn heading(color: &str, title: &str, note: &str) -> String {
     format!("{}  {}", paint(&format!("1;{color}"), title), dim(note))
@@ -353,14 +368,7 @@ pub fn text(plan: &Plan) -> String {
         out,
         "  {} {}",
         dim("api      "),
-        dim(&format!(
-            "{} requests, {} left",
-            plan.stats.requests,
-            plan.stats
-                .rate_remaining
-                .map(|n| n.to_string())
-                .unwrap_or_else(|| "?".to_string())
-        ))
+        dim(&api_summary(&plan.stats))
     );
 
     if plan.items.is_empty() {

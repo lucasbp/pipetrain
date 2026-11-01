@@ -90,6 +90,7 @@ pub struct Pr {
     pub head_ref: String,
     pub base_ref: String,
     pub head_sha: String,
+    pub base_sha: String,
     pub is_draft: bool,
     pub review: Review,
     pub checks: Checks,

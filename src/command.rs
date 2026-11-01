@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use anyhow::{Result, bail};
 use chrono::{Local, NaiveDate, SecondsFormat};
 
+use crate::cache::{Cache, CacheMode};
 use crate::config::{Config, Rules, render_date};
 use crate::contained;
 use crate::content;
@@ -35,6 +36,7 @@ pub struct PlanOptions {
     pub orgs: Vec<String>,
     pub date: Option<String>,
     pub verbose: bool,
+    pub cache: CacheMode,
 }
 
 struct Collected {
@@ -100,7 +102,7 @@ fn discover(
 
 fn load_files(client: &mut Client, ready: &mut [(Pr, Scope)]) -> Result<()> {
     for (pr, _) in ready.iter_mut() {
-        let (files, complete) = client.files(&pr.key)?;
+        let (files, complete) = client.files(&pr.key, &pr.head_sha, &pr.base_sha)?;
         pr.files = files;
         pr.files_complete = complete;
     }
@@ -315,7 +317,8 @@ pub fn plan(opts: PlanOptions) -> Result<i32> {
     let explicit = explicit_targets(&opts.prs, &cfg)?;
     let train = train_label(&explicit, opts.all, &deploy_branch);
 
-    let mut client = Client::new(github::token()?, &cfg.api, opts.verbose);
+    let mut client = Client::new(github::token()?, &cfg.api, opts.verbose)
+        .with_cache(Cache::at_default(opts.cache));
     let Discovered {
         ready,
         mut skipped,
@@ -344,5 +347,7 @@ pub fn plan(opts: PlanOptions) -> Result<i32> {
     let gathered = into_gathered(&cfg, &explicit, train, deploy_branch, &client, collected);
     let mut built = plan::build(&rules, gathered);
     built.profile = Some(profile);
+    built.stats.cache_hits = client.cache_hits();
+    built.stats.cache_misses = client.cache_misses();
     deliver(&built, opts.json, opts.emit)
 }

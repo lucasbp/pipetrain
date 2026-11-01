@@ -25,14 +25,15 @@ pipetrain plans the merge order of pull requests across repos. This file says wh
 - Queue output carries a `# wait` comment before a PR that bumps a package published earlier in the queue. Checking the feed stays with the runner.
 - `pipetrain order suggest` prints the discovered chain as an `[[order]]` block, read-only.
 
+- A local cache for data that never changes for a key (the paths of a PR keyed by base tip and head sha, trees and manifests by commit sha, blob ids by head sha), with `--no-cache` and `--refresh` on `plan` and `order suggest`. Mutable data such as reviews, checks and branch tips is never cached, and neither is a token or a diff. The second run of a real queue went from 38 to 11 requests with the same output.
+
 ## Next
 
 Small, well understood, in this order:
 
-1. A safe cache for data that never changes for a given sha (PR files, trees, manifests), with `--no-cache` and `--refresh`. Mutable data such as reviews and checks is never cached.
-2. More ways to find the train: a label in addition to the branch name.
-3. Package detection for `Cargo.toml` and `pyproject.toml`, next to npm and NuGet.
-4. A read-only conflict report: which PRs of a train will conflict and what kind of conflict it is.
+1. More ways to find the train: a label in addition to the branch name.
+2. Package detection for `Cargo.toml` and `pyproject.toml`, next to npm and NuGet.
+3. A read-only conflict report: which PRs of a train will conflict and what kind of conflict it is.
 
 ## Later
 

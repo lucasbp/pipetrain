@@ -453,6 +453,7 @@ fn pr(number: u64, slug: &str) -> Pr {
         head_ref: "feat/x".to_string(),
         base_ref: "master".to_string(),
         head_sha: format!("{number:040x}"),
+        base_sha: String::new(),
         is_draft: false,
         review: Review::Approved,
         checks: Checks::Success,

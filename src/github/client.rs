@@ -8,6 +8,7 @@ use ureq::{Agent, Body};
 use super::error::ApiError;
 use super::guard::Guard;
 use super::reply::{Rate, Reply};
+use crate::cache::Cache;
 use crate::config::ApiConfig;
 
 const API: &str = "https://api.github.com";
@@ -17,6 +18,7 @@ pub struct Client {
     token: String,
     base: String,
     guard: Guard,
+    pub(super) cache: Cache,
 }
 
 fn transport(error: ureq::Error, label: &str) -> ApiError {
@@ -49,7 +51,21 @@ impl Client {
             token,
             base: base.trim_end_matches('/').to_string(),
             guard: Guard::new(cfg, verbose),
+            cache: Cache::disabled(),
         }
+    }
+
+    pub fn with_cache(mut self, cache: Cache) -> Self {
+        self.cache = cache;
+        self
+    }
+
+    pub fn cache_hits(&self) -> u32 {
+        self.cache.hits()
+    }
+
+    pub fn cache_misses(&self) -> u32 {
+        self.cache.misses()
     }
 
     pub fn requests(&self) -> u32 {

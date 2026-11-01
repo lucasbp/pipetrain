@@ -1,4 +1,5 @@
 pub mod bundle;
+pub mod cache;
 pub mod command;
 pub mod config;
 pub mod contained;

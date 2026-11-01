@@ -1,6 +1,9 @@
+use std::collections::BTreeMap;
+
 use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
 
+use super::cached;
 use super::client::Client;
 use super::error::ApiError;
 use super::parse::{parse_files, parse_pr, parse_search};
@@ -9,7 +12,7 @@ use crate::planner::DepState;
 
 const FILE_PAGES: u32 = 3;
 
-const PR_FIELDS: &str = "number title url body headRefName baseRefName headRefOid isDraft state reviewDecision mergeable repository { name owner { login } } latestOpinionatedReviews(first: 20, writersOnly: true) { nodes { state } } commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }";
+const PR_FIELDS: &str = "number title url body headRefName baseRefName baseRef { target { oid } } headRefOid isDraft state reviewDecision mergeable repository { name owner { login } } latestOpinionatedReviews(first: 20, writersOnly: true) { nodes { state } } commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }";
 
 impl Client {
     pub fn open_prs(&mut self, org: &str) -> Result<Vec<Pr>> {
@@ -67,7 +70,33 @@ impl Client {
         })
     }
 
-    pub fn files(&mut self, key: &PrKey) -> Result<(Vec<ChangedFile>, bool)> {
+    pub fn files(
+        &mut self,
+        key: &PrKey,
+        head_sha: &str,
+        base_sha: &str,
+    ) -> Result<(Vec<ChangedFile>, bool)> {
+        let slug = key.slug();
+        let number = key.number.to_string();
+        let parts = [number.as_str(), base_sha, head_sha];
+        let usable = !head_sha.is_empty() && !base_sha.is_empty();
+        if usable
+            && let Some(found) = self
+                .cache
+                .get(&slug, "files", &parts)
+                .and_then(|value| cached::files_from(&value))
+        {
+            return Ok(found);
+        }
+        let (files, complete) = self.fetch_files(key)?;
+        if usable && cached::storable(&files) {
+            let value = cached::files_value(&files, complete);
+            self.cache.put(&slug, "files", &parts, &value);
+        }
+        Ok((files, complete))
+    }
+
+    fn fetch_files(&mut self, key: &PrKey) -> Result<(Vec<ChangedFile>, bool)> {
         let mut files = Vec::new();
         let mut complete = true;
         for page in 1..=FILE_PAGES {
@@ -111,6 +140,20 @@ impl Client {
     }
 
     pub fn tree(&mut self, slug: &str, sha: &str) -> Result<(Vec<String>, bool)> {
+        if let Some(found) = self
+            .cache
+            .get(slug, "tree", &[sha])
+            .and_then(|value| cached::tree_from(&value))
+        {
+            return Ok(found);
+        }
+        let (paths, truncated) = self.fetch_tree(slug, sha)?;
+        let value = cached::tree_value(&paths, truncated);
+        self.cache.put(slug, "tree", &[sha], &value);
+        Ok((paths, truncated))
+    }
+
+    fn fetch_tree(&mut self, slug: &str, sha: &str) -> Result<(Vec<String>, bool)> {
         let value = self.rest(&format!("/repos/{slug}/git/trees/{sha}?recursive=1"))?;
         let paths = value
             .get("tree")
@@ -139,6 +182,38 @@ impl Client {
         if paths.is_empty() {
             return Ok(Vec::new());
         }
+        let mut known = cached::blob_map(self.cache.get(slug, "blobs", &[sha]));
+        let missing = cached::missing(&known, paths);
+        if !missing.is_empty() {
+            let found = self.fetch_blobs(slug, sha, &missing)?;
+            cached::merge(&mut known, &missing, found);
+            self.cache
+                .put(slug, "blobs", &[sha], &cached::blobs_value(&known));
+        }
+        Ok(cached::answer(&known, paths))
+    }
+
+    pub fn oids(&mut self, slug: &str, sha: &str) -> BTreeMap<String, Option<String>> {
+        if sha.is_empty() {
+            return BTreeMap::new();
+        }
+        cached::oid_map(self.cache.get(slug, "oids", &[sha]))
+    }
+
+    pub fn store_oids(&mut self, slug: &str, sha: &str, oids: &BTreeMap<String, Option<String>>) {
+        if sha.is_empty() {
+            return;
+        }
+        self.cache
+            .put(slug, "oids", &[sha], &cached::oids_value(oids));
+    }
+
+    fn fetch_blobs(
+        &mut self,
+        slug: &str,
+        sha: &str,
+        paths: &[String],
+    ) -> Result<Vec<(String, String)>> {
         let (owner, name) = slug
             .split_once('/')
             .ok_or_else(|| anyhow!("bad repo slug {slug}"))?;

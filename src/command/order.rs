@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use anyhow::{Result, bail};
 
 use super::resolve;
+use crate::cache::{Cache, CacheMode};
 use crate::config::Config;
 use crate::emit::{EXIT_QUESTIONS, REPO_LEVEL};
 use crate::github::{self, Client};
@@ -20,6 +21,7 @@ pub struct OrderOptions {
     pub config: Option<PathBuf>,
     pub profile: Option<String>,
     pub verbose: bool,
+    pub cache: CacheMode,
 }
 
 #[derive(Debug, Default)]
@@ -140,12 +142,25 @@ pub fn run(opts: OrderOptions) -> Result<i32> {
     if from_config && !globs.is_empty() {
         eprintln!("warning: ignored names with a glob: {}", globs.join(", "));
     }
-    let mut client = Client::new(github::token()?, &cfg.api, opts.verbose);
+    let mut client = Client::new(github::token()?, &cfg.api, opts.verbose)
+        .with_cache(Cache::at_default(opts.cache));
     let suggestion = suggest(&mut client, &names)?;
     print!("{}", suggestion.stdout);
     for line in &suggestion.stderr {
         eprintln!("{line}");
     }
-    eprintln!("{} requests", client.requests());
+    eprintln!("{}", requests_line(&client));
     Ok(suggestion.exit)
+}
+
+fn requests_line(client: &Client) -> String {
+    if client.cache_hits() > 0 {
+        format!(
+            "{} requests, {} from cache",
+            client.requests(),
+            client.cache_hits()
+        )
+    } else {
+        format!("{} requests", client.requests())
+    }
 }

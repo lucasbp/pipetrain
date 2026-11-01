@@ -4,6 +4,7 @@ use std::process::ExitCode;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+use pipetrain::cache::CacheMode;
 use pipetrain::command::init::{self, InitOptions};
 use pipetrain::command::order::{self, OrderOptions};
 use pipetrain::command::orgs::{self, OrgsOptions};
@@ -105,6 +106,19 @@ struct SuggestArgs {
 
     #[arg(long, help = "Log every API request to stderr")]
     verbose: bool,
+
+    #[arg(
+        long,
+        conflicts_with = "refresh",
+        help = "Do not read or write the local cache of data that never changes for a sha"
+    )]
+    no_cache: bool,
+
+    #[arg(
+        long,
+        help = "Ignore cached data and fetch it again, then rewrite the cache"
+    )]
+    refresh: bool,
 }
 
 #[derive(clap::Args)]
@@ -180,6 +194,19 @@ struct PlanArgs {
 
     #[arg(
         long,
+        conflicts_with = "refresh",
+        help = "Do not read or write the local cache of data that never changes for a sha"
+    )]
+    no_cache: bool,
+
+    #[arg(
+        long,
+        help = "Ignore cached data and fetch it again, then rewrite the cache"
+    )]
+    refresh: bool,
+
+    #[arg(
+        long,
         value_enum,
         default_value = "auto",
         help = "Colors: auto (only on a terminal, honors NO_COLOR), always, never"
@@ -250,6 +277,7 @@ fn run_plan(args: PlanArgs) -> Result<i32> {
         orgs: args.orgs,
         date: args.date,
         verbose: args.verbose,
+        cache: CacheMode::from_flags(args.no_cache, args.refresh),
     })
 }
 
@@ -280,6 +308,7 @@ fn run_order(args: OrderArgs) -> Result<i32> {
             config: args.config,
             profile: args.profile,
             verbose: args.verbose,
+            cache: CacheMode::from_flags(args.no_cache, args.refresh),
         }),
     }
 }

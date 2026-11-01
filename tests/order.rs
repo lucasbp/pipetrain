@@ -18,6 +18,7 @@ fn pr(slug: &str, number: u64, head: &str, base: &str) -> Pr {
         head_ref: head.to_string(),
         base_ref: base.to_string(),
         head_sha: format!("{number:040x}"),
+        base_sha: String::new(),
         is_draft: false,
         review: Review::Approved,
         checks: Checks::Success,

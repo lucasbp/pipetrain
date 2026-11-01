@@ -1,3 +1,4 @@
+mod cached;
 mod client;
 mod endpoints;
 mod error;

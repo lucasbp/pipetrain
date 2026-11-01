@@ -76,6 +76,11 @@ pub fn parse_pr(node: &Value) -> Option<Pr> {
         head_ref: text_field(node, "headRefName"),
         base_ref: text_field(node, "baseRefName"),
         head_sha: text_field(node, "headRefOid"),
+        base_sha: node
+            .pointer("/baseRef/target/oid")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
         is_draft: node
             .get("isDraft")
             .and_then(|v| v.as_bool())
