@@ -73,6 +73,8 @@ One edge "the PR in `id` goes before this item".
 | `implied` | boolean | `true` when another predecessor of this item already reaches `id`, so the edge adds no constraint. A viewer can hide it. |
 | `package` | string | Only on `package` and `dependency` edges: the package name that `id` publishes and this item consumes, as the manifests spell it. Omitted on every other edge. Added after schema 1 shipped, and additive only. |
 | `version` | string | Optional. Only on a `package` edge whose version was readable: the version this item bumps the package to, read from the added line of the item's own manifest diff, with a leading `^`, `~`, `>=`, `>`, `=` or `v` and any brackets removed. Omitted when the version is a variable, a wildcard, a range or differs between files, and on every other edge, so plans without a readable version are byte-identical to before. Additive only: schema stays 1. |
+| `published` | boolean | Optional. Only with `plan --check-feeds`, on a `package` edge that has a `version`, when the feed answered: `true` when the version is published, `false` when it is not yet. Omitted without the flag and when the check failed. Informational: it never changes `items`, `gate` or `lanes`. Additive only: schema stays 1. |
+| `feed_error` | string | Optional. Only with `plan --check-feeds`, on the same edges, when the feed could not answer (refused with 401 or 403, package not found, unreachable). One line of free text: do not parse it. For a refusal it says `needs read:packages`. Omitted without the flag and when the feed answered. Additive only: schema stays 1. |
 
 ## Bundle
 
@@ -140,6 +142,7 @@ Consumers should switch on `code`, never on `message` or `hint`.
 | `cache_hits` | integer | Lookups answered by the local cache. `0` with `--no-cache` or `--refresh`. |
 | `cache_misses` | integer | Lookups the cache could not answer, so they went to GitHub. `0` with `--no-cache`. |
 | `elapsed_ms` | integer | Milliseconds of wall clock from the start of the command until the data was gathered, before rendering. |
+| `feed_checks` | integer (optional) | Distinct package and version pairs looked up in a feed by `plan --check-feeds`. Omitted when `0`, so a plan without the flag is byte-identical to before. |
 | `hidden_by_author` | integer (optional) | How many PRs (items and skipped) are hidden by the author filter. Omitted when `0`. |
 
 ## Example

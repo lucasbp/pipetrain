@@ -16,29 +16,50 @@ pub enum Emit {
     Queue,
 }
 
+pub fn feed_suffix(published: Option<bool>, error: Option<&str>) -> String {
+    match (published, error) {
+        (Some(true), _) => " (published)".to_string(),
+        (Some(false), _) => " (not yet)".to_string(),
+        (None, Some(reason)) => format!(" (feed check failed: {reason})"),
+        (None, None) => String::new(),
+    }
+}
+
+#[derive(Default)]
+struct Wait<'a> {
+    from: BTreeSet<&'a str>,
+    published: Option<bool>,
+    error: Option<&'a str>,
+}
+
 fn wait_lines(plan: &Plan, item: &Item) -> Vec<String> {
-    let mut waits: BTreeMap<(&str, Option<&str>), BTreeSet<&str>> = BTreeMap::new();
+    let mut waits: BTreeMap<(&str, Option<&str>), Wait> = BTreeMap::new();
     for dep in item.after.iter().filter(|d| d.rule == Rule::Package) {
         let Some(package) = dep.package.as_deref() else {
             continue;
         };
         if plan.items.iter().any(|i| i.id == dep.id) {
-            waits
-                .entry((package, dep.version.as_deref()))
-                .or_default()
-                .insert(dep.id.as_str());
+            let wait = waits.entry((package, dep.version.as_deref())).or_default();
+            wait.from.insert(dep.id.as_str());
+            if wait.published.is_none() && wait.error.is_none() {
+                wait.published = dep.published;
+                wait.error = dep.feed_error.as_deref();
+            }
         }
     }
     waits
         .into_iter()
-        .map(|((package, version), publishers)| {
-            let from: Vec<&str> = publishers.into_iter().collect();
-            let named = match version {
-                Some(version) => format!("{package} {version}"),
-                None => package.to_string(),
+        .map(|((package, version), wait)| {
+            let from: Vec<&str> = wait.from.into_iter().collect();
+            let (named, suffix) = match version {
+                Some(version) => (
+                    format!("{package} {version}"),
+                    feed_suffix(wait.published, wait.error),
+                ),
+                None => (package.to_string(), String::new()),
             };
             format!(
-                "# wait: package {named} from {} must be published before {}",
+                "# wait: package {named} from {} must be published before {}{suffix}",
                 from.join(" "),
                 item.id
             )

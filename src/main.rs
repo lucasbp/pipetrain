@@ -369,6 +369,12 @@ struct PlanArgs {
         help = "Colors: auto (only on a terminal, honors NO_COLOR), always, never"
     )]
     color: clap::ColorChoice,
+
+    #[arg(
+        long,
+        help = "Ask the package feeds whether the version each wait line names is published, and say so on the line"
+    )]
+    check_feeds: bool,
 }
 
 #[derive(clap::Args)]
@@ -536,6 +542,7 @@ fn run_plan(args: PlanArgs) -> Result<i32> {
         verbose: args.verbose,
         cache: CacheMode::from_flags(args.no_cache, args.refresh),
         progress,
+        check_feeds: args.check_feeds,
     })
 }
 
@@ -556,6 +563,7 @@ fn run_bundle(args: BundleArgs) -> Result<i32> {
             verbose: args.verbose,
             cache: CacheMode::from_flags(args.no_cache, args.refresh),
             progress,
+            check_feeds: false,
         },
         apply: args.apply,
         yes: args.yes,

@@ -48,6 +48,7 @@ pub struct PlanOptions {
     pub verbose: bool,
     pub cache: CacheMode,
     pub progress: bool,
+    pub check_feeds: bool,
 }
 
 struct Collected {
@@ -375,6 +376,9 @@ pub(crate) fn build_plan(opts: &PlanOptions) -> Result<(Plan, Client)> {
     let logins = author_filter::resolve(&opts.authors.effective(&cfg), &mut client)?;
     if !logins.is_empty() {
         plan::hide_other_authors(&mut built, &logins);
+    }
+    if opts.check_feeds {
+        built.stats.feed_checks = feed::annotate(&mut built, &mut feed::Checker::new());
     }
     built.stats.cache_hits = client.cache_hits();
     built.stats.cache_misses = client.cache_misses();

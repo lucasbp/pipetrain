@@ -154,6 +154,7 @@ pipetrain plan [OPTIONS] [PRS]...
 | `--verbose` | Log every API request to stderr. |
 | `--no-cache` | Neither read nor write the [local cache](#local-cache). Cannot be combined with `--refresh`. |
 | `--refresh` | Ignore what the cache has, fetch it again and rewrite it. Cannot be combined with `--no-cache`. |
+| `--check-feeds` | Only on `plan`. Asks the package feeds whether the version each `# wait` line names is already published, and says so on the line: `(published)`, `(not yet)` or `(feed check failed: ...)`. Off by default, so without it there are no extra requests and the output is unchanged. Informational only: order, gates, pauses and the exit code never change. Needs a token that can read packages (`read:packages`) for GitHub Packages feeds. See [Checking a package feed](#checking-a-package-feed). |
 | `--no-progress` | Do not draw the progress indicator. It is drawn on stderr only when stderr is a terminal and never with `--json`, `--emit queue` redirected, or `CI=true`. |
 | `--emit queue` | Replaces the plan with a queue for a runner: one `merge:org/repo#N` line per ready PR on stdout, questions on stderr, exit 3 when questions are open. See [Feeding a queue runner](#feeding-a-queue-runner). Not combinable with `--json`. |
 | `--apply` | Only on `bundle`. Writes to GitHub: creates the deploy branches and retargets the PRs. Without it `bundle` is a dry run. |
@@ -519,6 +520,15 @@ Token: GitHub Packages needs one, even for public packages. pipetrain uses the s
 | 0 | The version is published, or no `--version` was asked. |
 | 1 | The version is not published, the package is not in the feed (`package not found in <feed>`), or an error such as a network failure (`error: ...` on stderr). |
 | 2 | The feed answered 401 or 403: the token is missing or lacks `read:packages`. |
+
+### In the plan: `plan --check-feeds`
+
+```
+pipetrain plan --emit queue --check-feeds
+# wait: package @acme/kit 1.1.0 from acme/kit#6 must be published before acme/web#5 (not yet)
+```
+
+With `--check-feeds`, `plan` runs this same lookup once for each distinct package and version named by a `# wait` line and appends the answer to the line. The ecosystem and feed follow the table above: the org is the first publisher PR's org for NuGet, and for a scoped npm package GitHub Packages is used when a publisher PR's org matches the scope, otherwise npmjs. A failed lookup never aborts the plan or changes its exit code. See [Wait comments](docs/queue-output.md#wait-comments) and the [JSON contract](docs/plan-json.md).
 
 ## Bumping a package (dry run)
 

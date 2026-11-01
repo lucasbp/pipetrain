@@ -56,6 +56,10 @@ pub struct Dependency {
     pub package: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub published: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub feed_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -632,6 +636,8 @@ pub fn plan(input: PlanInput<'_>) -> Planned {
                         implied,
                         package: e.package.clone(),
                         version: e.version.clone(),
+                        published: None,
+                        feed_error: None,
                     }
                 })
                 .collect();

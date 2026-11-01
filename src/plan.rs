@@ -45,6 +45,8 @@ pub struct Stats {
     pub elapsed_ms: u64,
     #[serde(skip_serializing_if = "is_zero")]
     pub hidden_by_author: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub feed_checks: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -193,6 +195,7 @@ pub fn build(rules: &Rules, gathered: Gathered) -> Plan {
             cache_misses: 0,
             elapsed_ms: 0,
             hidden_by_author: 0,
+            feed_checks: 0,
         },
     }
 }
