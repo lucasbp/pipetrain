@@ -1,11 +1,11 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write;
 use std::time::Duration;
 
 use crate::config::GateKind;
 use crate::elapsed;
 use crate::plan::{Plan, Stats};
-use crate::planner::{Item, Rule};
+use crate::planner::{Item, Rule, is_late_rule};
 use crate::style::{bold, dim, green, paint, red, yellow};
 
 fn api_summary(stats: &Stats) -> String {
@@ -252,30 +252,29 @@ fn order_section(out: &mut String, plan: &Plan, names: &Names, by_id: &HashMap<&
         )
     );
     let sep = dim(" · ");
-    if !plan.gate.is_empty() {
-        let cells: Vec<String> = plan
-            .gate
-            .iter()
-            .filter_map(|id| by_id.get(id.as_str()))
-            .map(|item| {
-                let kind = match item.gate {
-                    Some(GateKind::Ddl) => "DDL",
-                    Some(GateKind::Infra) => "infra",
-                    None => "",
-                };
-                format!("{} {}", bold(&names.short(&item.id)), yellow(kind))
-            })
-            .collect();
+    let kind_of = |item: &Item| match item.gate {
+        Some(GateKind::Ddl) => "DDL",
+        Some(GateKind::Infra) => "infra",
+        None => "",
+    };
+    let early: Vec<String> = plan
+        .gate
+        .iter()
+        .filter_map(|id| by_id.get(id.as_str()))
+        .filter(|item| !item.gate_late)
+        .map(|item| format!("{} {}", bold(&names.short(&item.id)), yellow(kind_of(item))))
+        .collect();
+    if !early.is_empty() {
         let _ = writeln!(
             out,
             "  {} {}  {}",
             red("pause"),
-            cells.join(&sep),
+            early.join(&sep),
             dim("(you confirm first)")
         );
     }
     let mut stages: BTreeMap<usize, Vec<&Item>> = BTreeMap::new();
-    for item in plan.items.iter().filter(|i| !i.manual_pause) {
+    for item in plan.items.iter().filter(|i| !i.manual_pause || i.gate_late) {
         stages.entry(item.stage).or_default().push(item);
     }
     for (stage, items) in stages {
@@ -283,6 +282,9 @@ fn order_section(out: &mut String, plan: &Plan, names: &Names, by_id: &HashMap<&
             .iter()
             .map(|i| {
                 let id = names.short(&i.id);
+                if i.gate_late {
+                    return format!("{} {} {}", bold(&id), yellow(kind_of(i)), red("(pause)"));
+                }
                 match i.layer.as_deref() {
                     Some(l) => layer_paint(l, &id),
                     None => id,
@@ -396,11 +398,17 @@ pub fn text(plan: &Plan) -> String {
     order_section(&mut out, plan, &names, &by_id);
 
     if !plan.gate.is_empty() {
-        let _ = writeln!(
-            out,
-            "\n{}",
-            heading("31", "GATE", "runs first, pauses for your confirmation")
-        );
+        let all_late = plan
+            .gate
+            .iter()
+            .filter_map(|id| by_id.get(id.as_str()))
+            .all(|item| item.gate_late);
+        let note = if all_late {
+            "runs after the PRs it waits for, pauses for your confirmation first"
+        } else {
+            "runs first, pauses for your confirmation"
+        };
+        let _ = writeln!(out, "\n{}", heading("31", "GATE", note));
         for id in &plan.gate {
             if let Some(item) = by_id.get(id.as_str()) {
                 item_line(
@@ -417,12 +425,27 @@ pub fn text(plan: &Plan) -> String {
                     None => "",
                 };
                 let reason = item.gate_reason.as_deref().unwrap_or("");
+                let note = if item.gate_late {
+                    let waits: BTreeSet<&str> = item
+                        .after
+                        .iter()
+                        .filter(|d| is_late_rule(d.rule))
+                        .map(|d| d.id.as_str())
+                        .collect();
+                    let shown: Vec<String> = waits.into_iter().map(|id| names.short(id)).collect();
+                    format!(
+                        "runs after {}, pauses for your confirmation first",
+                        shown.join(", ")
+                    )
+                } else {
+                    "every lane below waits for this".to_string()
+                };
                 let _ = writeln!(
                     out,
                     "        {} {}  {}",
                     yellow(kind),
                     dim(&format!("({reason})")),
-                    dim("every lane below waits for this")
+                    dim(&note)
                 );
                 after_lines(&mut out, item, &names, "        ");
             }

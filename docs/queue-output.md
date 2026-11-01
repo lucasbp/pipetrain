@@ -28,11 +28,33 @@ When the plan suggests a deploy branch for a repo, the queue starts with one `# 
 ## Order
 
 1. Bundle comments, when the plan suggests any. They are not items.
-2. Gate PRs (database or infrastructure), in the order of the rule below.
-3. The pause line, only when at least one PR follows the gate. A gate with nothing after it prints no pause.
-4. Every other ready PR, in the order of the rule below.
+2. Gate PRs (database or infrastructure) that have no predecessor, in the order of the rule below.
+3. The pause line, only when at least one PR follows those gates. A gate with nothing after it prints no pause.
+4. Every other ready PR, in the order of the rule below, with the late gates among them.
 
 The rule: by stage first, then, inside one stage, by layer, then PR number, then repo slug (`org/repo`). The layer order is the order of the `[[layer]]` entries in the config, the first entry goes first (for example lib, client, api, bff, front). A PR whose repo is in no layer comes after every layered PR of its stage. The tiebreak only reorders PRs of the same stage: stages and `after` edges are never changed.
+
+## Late gates
+
+The rule "gate PRs first" has one exception. A gate PR that must come after another PR by a `package`, `dependency` or `target` edge is a late gate: it is placed by the same rule as every other PR and printed as
+
+```
+# gate: <org>/<repo>#<n> waits for <PR ids> (<rule>: <detail>)
+# pause: confirm DDL/infra before continuing
+# wait: package <pkg> from <PR ids> must be published before <org>/<repo>#<n>
+merge:<org>/<repo>#<n>
+```
+
+The `# wait` line is optional: it appears only when the gate bumps a package that another PR of the queue publishes. The ids after `waits for` are the predecessors by those three rules, sorted and without repeats. The detail lists each distinct `rule: text` pair joined by `; `, where `text` is the package name when the edge has one, else the reason of the edge. The pause line is never printed twice in a row: when the queue has early gates and the first PR after them is a late gate, the late gate's own pause serves. Every other `merge:` line keeps its place relative to the other non-gate PRs. Example:
+
+```
+merge:acme/kit#6
+merge:acme/other#7
+# gate: acme/web#5 waits for acme/kit#6 (package: @acme/kit)
+# pause: confirm DDL/infra before continuing
+# wait: package @acme/kit from acme/kit#6 must be published before acme/web#5
+merge:acme/web#5
+```
 
 Lanes are flattened into one list. The plan lets lanes run side by side, a serial runner cannot, so the queue is correct but slower than the lanes. Every `after` edge of the plan is respected.
 

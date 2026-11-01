@@ -139,7 +139,13 @@ A gate PR is one that needs a human to stop and confirm before anything else pro
 
 The reason shown is the first matching path, or `repo is listed in deploy.infra_repos`.
 
-Every gate PR is ordered before every PR that is not a gate. Gate PRs have no edge among themselves: the planner does not choose which migration goes first. They are reported in `gate`, are marked `manual_pause`, and are kept out of the lanes.
+Every gate PR that has no predecessor is ordered before every PR that is not a gate. Gate PRs have no edge among themselves: the planner does not choose which migration goes first. They are reported in `gate`, are marked `manual_pause`, and are kept out of the lanes. A gate that must follow another PR by a `package`, `dependency` or `target` edge is a late gate, described below.
+
+#### Late gates
+
+A DDL or infra PR that must come after another PR by a `package`, `dependency` or `target` edge is a late gate. It is not run first: it runs after its predecessors, with the pause right before it, because the package version has to exist before the bump can merge. The gate stays in `gate` and keeps `manual_pause`, `--json` marks it with `gate_late` (the key is absent for every other PR), and no other PR waits for it.
+
+A gate is late only when every one of its non-gate predecessor edges is `package`, `dependency` or `target`, and it has at least one. A gate with a predecessor from any other rule keeps the `gate-has-predecessor` question and still runs first.
 
 Why gates are applied before layers: a migration must land before the code that reads it, whatever layer that code lives in. Letting the layer rule decide first could put the migration after its consumer.
 
@@ -186,7 +192,7 @@ A question is something the planner could not decide or that you should know bef
 | `depends-on-closed` | planner | Waits for a PR closed without merging. | Fix or remove the `Depends-On`. |
 | `depends-on-missing` | planner | The referenced PR could not be found, or the token cannot read its repo. | Check the reference and the token's access. |
 | `depends-on-not-checked` | planner | The plan lists more than 20 outside references, so this one was not looked up. | Check that PR by hand, or plan fewer PRs at once. |
-| `gate-has-predecessor` | planner | A DDL or infra PR must come after a non-gate PR by an earlier rule (for example a stacked PR into the train branch), so it cannot run first. | Confirm the DDL can run after that PR, or split it out. |
+| `gate-has-predecessor` | planner | A DDL or infra PR must come after a non-gate PR because that PR is stacked into its branch, named in a `Depends-On`, pinned by an explicit order or placed by a layer (not by a package, dependency or target edge, which makes it a late gate), so it cannot run first. | Confirm the DDL can run after that PR, or split it out. |
 | `manifests-truncated` | scan | A repo has more than 40 package manifests and only the shallowest were read. `pr` is `null`. | Pin the package under `[packages]`. |
 | `edge-conflict` | planner | A rule wanted X before Y, but an earlier rule already puts X after Y. The earlier rule won. | If the order is wrong, add a `Depends-On` to the PR that should go first. |
 | `dependency-cycle` | planner | Two repos reference each other's packages, so the `dependency` rule added no edge between them. `pr` is `null`. | Pin the order under `[[order]]` in the config. |

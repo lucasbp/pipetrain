@@ -27,6 +27,7 @@ pipetrain plans the merge order of pull requests across repos. This file says wh
 
 - A local cache for data that never changes for a key (the paths of a PR keyed by base tip and head sha, trees and manifests by commit sha, blob ids by head sha), with `--no-cache` and `--refresh` on `plan` and `order suggest`. Mutable data such as reviews, checks and branch tips is never cached, and neither is a token or a diff. The second run of a real queue went from 38 to 11 requests with the same output.
 - A progress spinner on stderr for `plan` and `order suggest`, drawn only on a terminal after 300 ms, off with `--no-progress`, `--json`, `CI=true` or a redirected `--emit queue`. stdout is never touched.
+- A DDL or infra PR that must follow another PR by a package, dependency or target edge is a late gate: it runs after its predecessors with the pause right before it, instead of a question. `--json` marks it with `gate_late`.
 - The summaries show how long the run took: a `time` line in `plan`, `... in 3.2 s` on the `order suggest` request line, a `time` line in `doctor` and `stats.elapsed_ms` in `--json`.
 
 ## Next

@@ -6,7 +6,7 @@ use pipetrain::config::{Config, Rules};
 use pipetrain::discovery::{self, Discovered};
 use pipetrain::emit::{self, PAUSE_LINE};
 use pipetrain::github;
-use pipetrain::model::Question;
+use pipetrain::model::{ChangedFile, Checks, Pr, PrKey, PrState, Question, Review};
 use pipetrain::plan::{self, Gathered, Plan};
 use pipetrain::publishers;
 use regex::Regex;
@@ -390,4 +390,152 @@ fn every_item_matches_the_format() {
             .iter()
             .all(|l| l.starts_with("merge:") || l.starts_with('#'))
     );
+}
+
+fn late_pr(slug: &str, number: u64, head: &str) -> Pr {
+    let (org, repo) = slug.split_once('/').unwrap();
+    Pr {
+        key: PrKey::new(org, repo, number),
+        state: PrState::Open,
+        title: format!("change {number}"),
+        url: format!("https://github.com/{slug}/pull/{number}"),
+        body: String::new(),
+        head_ref: head.to_string(),
+        base_ref: "master".to_string(),
+        head_sha: format!("{number:040x}"),
+        base_sha: String::new(),
+        is_draft: false,
+        review: Review::Approved,
+        checks: Checks::Success,
+        conflicting: false,
+        mergeable_unknown: false,
+        files: Vec::new(),
+        files_complete: true,
+    }
+}
+
+fn late_gate_pr(number: u64) -> Pr {
+    let mut gate = late_pr("acme/web", number, "feat/gate");
+    gate.files = vec![
+        ChangedFile {
+            path: "db/migrations/001_add.sql".to_string(),
+            patch: None,
+        },
+        ChangedFile {
+            path: "package.json".to_string(),
+            patch: Some(
+                "-    \"@acme/kit\": \"^1.0.0\",\n+    \"@acme/kit\": \"^1.1.0\",".to_string(),
+            ),
+        },
+    ];
+    gate
+}
+
+fn early_gate_pr(number: u64) -> Pr {
+    let mut gate = late_pr("acme/db", number, "feat/db");
+    gate.files = vec![ChangedFile {
+        path: "db/migrations/002_add.sql".to_string(),
+        patch: None,
+    }];
+    gate
+}
+
+fn late_plan(prs: Vec<Pr>) -> Plan {
+    let cfg =
+        Config::parse("orgs = [\"acme\"]\n[packages]\n\"@acme/kit\" = \"acme/kit\"\n").unwrap();
+    let rules = Rules::new(&cfg).unwrap();
+    plan::build(
+        &rules,
+        Gathered {
+            generated_at: "2026-10-30T09:00:00-03:00".to_string(),
+            train: "deploy/30-10-2026".to_string(),
+            deploy_branch: "deploy/30-10-2026".to_string(),
+            train_prefix: "deploy/".to_string(),
+            orgs: vec!["acme".to_string()],
+            ready: prs
+                .into_iter()
+                .map(|p| (p, "explicit".to_string()))
+                .collect(),
+            skipped: Vec::new(),
+            questions: Vec::new(),
+            external: BTreeMap::new(),
+            publishers: publishers::Publishers::new(),
+            references: Default::default(),
+            max_parallel: 4,
+            requests: 0,
+            rate_remaining: None,
+        },
+    )
+}
+
+fn merges_without(lines: &[String], skip: &str) -> Vec<String> {
+    lines
+        .iter()
+        .filter(|l| l.starts_with("merge:") && **l != format!("merge:{skip}"))
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn a_late_gate_waits_for_its_package_predecessor_and_pauses_right_before_it() {
+    let built = late_plan(vec![
+        late_pr("acme/kit", 6, "feat/kit"),
+        late_gate_pr(5),
+        late_pr("acme/other", 7, "feat/other"),
+    ]);
+    assert!(built.questions.is_empty(), "{:?}", built.questions);
+    let lines = emit::queue_lines(&built);
+    let at = |needle: &str| lines.iter().position(|l| l.starts_with(needle)).unwrap();
+    assert_eq!(
+        lines[at("# gate:")],
+        "# gate: acme/web#5 waits for acme/kit#6 (package: @acme/kit)"
+    );
+    assert_eq!(lines[at("# gate:") + 1], PAUSE_LINE);
+    assert_eq!(
+        lines[at("# gate:") + 2],
+        "# wait: package @acme/kit from acme/kit#6 must be published before acme/web#5"
+    );
+    assert_eq!(lines[at("# gate:") + 3], "merge:acme/web#5");
+    assert!(at("merge:acme/kit#6") < at("# gate:"));
+    assert!(at("merge:acme/other#7") < at("# gate:"));
+    assert_eq!(lines.iter().filter(|l| *l == PAUSE_LINE).count(), 1);
+}
+
+#[test]
+fn the_other_prs_keep_their_queue_order_with_and_without_the_late_gate() {
+    let with_gate = late_plan(vec![
+        late_pr("acme/kit", 6, "feat/kit"),
+        late_gate_pr(5),
+        late_pr("acme/other", 7, "feat/other"),
+    ]);
+    let without_gate = late_plan(vec![
+        late_pr("acme/kit", 6, "feat/kit"),
+        late_pr("acme/other", 7, "feat/other"),
+    ]);
+    assert_eq!(
+        merges_without(&emit::queue_lines(&with_gate), "acme/web#5"),
+        merges_without(&emit::queue_lines(&without_gate), "acme/web#5")
+    );
+}
+
+#[test]
+fn an_early_gate_and_a_late_gate_never_print_two_pauses_in_a_row() {
+    let built = late_plan(vec![
+        early_gate_pr(1),
+        late_pr("acme/kit", 6, "feat/kit"),
+        late_gate_pr(5),
+    ]);
+    assert!(built.questions.is_empty(), "{:?}", built.questions);
+    let lines = emit::queue_lines(&built);
+    assert_eq!(lines[0], "merge:acme/db#1");
+    assert_eq!(lines[1], PAUSE_LINE);
+    for pair in lines.windows(2) {
+        assert!(
+            !(pair[0] == PAUSE_LINE && pair[1] == PAUSE_LINE),
+            "{lines:?}"
+        );
+    }
+    let gate = lines.iter().position(|l| l.starts_with("# gate:")).unwrap();
+    assert_eq!(lines[gate + 1], PAUSE_LINE);
+    assert!(lines.iter().position(|l| l == "merge:acme/kit#6").unwrap() < gate);
 }

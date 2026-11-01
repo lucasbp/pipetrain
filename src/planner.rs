@@ -74,6 +74,8 @@ pub struct Item {
     pub gate: Option<GateKind>,
     pub gate_reason: Option<String>,
     pub manual_pause: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub gate_late: bool,
     pub stage: usize,
     pub lane: Option<usize>,
     pub after: Vec<Dependency>,
@@ -194,6 +196,7 @@ struct Builder<'a> {
     lookup: HashMap<String, usize>,
     by_repo: HashMap<String, Vec<usize>>,
     gates: Vec<Option<GateKind>>,
+    late: Vec<bool>,
     graph: Graph,
     questions: Vec<Question>,
     notes: Vec<String>,
@@ -219,6 +222,7 @@ impl<'a> Builder<'a> {
                 .push(i);
         }
         let graph = Graph::new(prs.len());
+        let late = vec![false; prs.len()];
         Self {
             rules,
             prs,
@@ -226,6 +230,7 @@ impl<'a> Builder<'a> {
             lookup,
             by_repo,
             gates,
+            late,
             graph,
             questions: Vec::new(),
             notes: Vec::new(),
@@ -505,6 +510,15 @@ impl<'a> Builder<'a> {
                 GateKind::Ddl => "DDL",
                 GateKind::Infra => "infra",
             };
+            let blockers: Vec<Rule> = self.graph.preds[g]
+                .iter()
+                .filter(|e| self.gates[e.from].is_none())
+                .map(|e| e.rule)
+                .collect();
+            if !blockers.is_empty() && blockers.iter().all(|r| is_late_rule(*r)) {
+                self.late[g] = true;
+                continue;
+            }
             for p in 0..self.prs.len() {
                 if self.gates[p].is_some() {
                     continue;
@@ -519,6 +533,10 @@ impl<'a> Builder<'a> {
             }
         }
     }
+}
+
+pub fn is_late_rule(rule: Rule) -> bool {
+    matches!(rule, Rule::Package | Rule::Dependency | Rule::Target)
 }
 
 pub fn plan(input: PlanInput<'_>) -> Planned {
@@ -614,6 +632,7 @@ pub fn plan(input: PlanInput<'_>) -> Planned {
                 gate: gates[i],
                 gate_reason: gate_info[i].as_ref().map(|(_, reason)| reason.clone()),
                 manual_pause: gates[i].is_some(),
+                gate_late: b.late[i],
                 stage: stages[i],
                 lane: lane_of[i].map(|l| l + 1),
                 after,
@@ -630,7 +649,7 @@ pub fn plan(input: PlanInput<'_>) -> Planned {
     for &g in &gate_order {
         let blocker = b.graph.preds[g]
             .iter()
-            .find(|e| gates[e.from].is_none())
+            .find(|e| gates[e.from].is_none() && !is_late_rule(e.rule))
             .map(|e| (e.from, e.rule));
         if let Some((from, rule)) = blocker {
             let message = format!(

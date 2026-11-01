@@ -112,6 +112,91 @@ fn the_time_line_switches_to_minutes_after_a_minute() {
     assert!(plain.contains("time      1m 05s"), "{plain}");
 }
 
+fn late_gate_text() -> String {
+    let cfg =
+        Config::parse("orgs = [\"acme\"]\n[packages]\n\"@acme/kit\" = \"acme/kit\"\n").unwrap();
+    let rules = Rules::new(&cfg).unwrap();
+    let publisher = pr("acme/kit", 6, "feat/kit", "master");
+    let mut gate = pr("acme/web", 5, "feat/gate", "master");
+    gate.files = vec![
+        ChangedFile {
+            path: "db/migrations/001.sql".to_string(),
+            patch: None,
+        },
+        ChangedFile {
+            path: "package.json".to_string(),
+            patch: Some(
+                "-    \"@acme/kit\": \"^1.0.0\",\n+    \"@acme/kit\": \"^1.1.0\",".to_string(),
+            ),
+        },
+    ];
+    let built = plan::build(
+        &rules,
+        Gathered {
+            generated_at: "2026-10-30T09:00:00-03:00".to_string(),
+            train: "deploy/30-10-2026".to_string(),
+            deploy_branch: "deploy/30-10-2026".to_string(),
+            train_prefix: "deploy/".to_string(),
+            orgs: vec!["acme".to_string()],
+            ready: vec![
+                (publisher, "explicit".to_string()),
+                (gate, "explicit".to_string()),
+            ],
+            skipped: Vec::new(),
+            questions: Vec::new(),
+            external: BTreeMap::new(),
+            publishers: Publishers::new(),
+            references: Default::default(),
+            max_parallel: 4,
+            requests: 0,
+            rate_remaining: None,
+        },
+    );
+    anstream::adapter::strip_str(&render::text(&built)).to_string()
+}
+
+#[test]
+fn a_late_gate_section_says_it_runs_after_its_predecessors() {
+    let plain = late_gate_text();
+    let gate_at = plain.find("GATE").unwrap();
+    assert!(plain[gate_at..].contains("runs after"), "{plain}");
+    assert!(plain[gate_at..].contains("kit#6"), "{plain}");
+    assert!(!plain.contains("runs first, pauses"), "{plain}");
+}
+
+#[test]
+fn a_late_gate_sits_in_a_step_of_the_order_map_and_leaves_no_top_pause_line() {
+    let plain = late_gate_text();
+    let order = plain.find("ORDER").unwrap();
+    let section: Vec<&str> = plain[order..].lines().collect();
+    assert!(
+        !section
+            .iter()
+            .any(|line| line.trim_start().starts_with("pause ")),
+        "{plain}"
+    );
+    let step = section
+        .iter()
+        .find(|line| line.contains("step") && line.contains("web#5"))
+        .unwrap_or_else(|| panic!("no step with the gate in:\n{plain}"));
+    assert!(step.contains("(pause)"), "{step}");
+    assert!(step.contains("DDL"), "{step}");
+}
+
+#[test]
+fn an_early_gate_keeps_its_pause_line_in_the_order_map() {
+    let plain = anstream::adapter::strip_str(&sample()).to_string();
+    let order = plain.find("ORDER").unwrap();
+    let section: Vec<&str> = plain[order..].lines().collect();
+    assert!(
+        section
+            .iter()
+            .any(|line| line.trim_start().starts_with("pause ")),
+        "{plain}"
+    );
+    assert!(!plain[order..].contains("(pause)"), "{plain}");
+}
+
 #[test]
 fn order_map_lists_the_pause_before_the_steps() {
     let plain = anstream::adapter::strip_str(&sample()).to_string();

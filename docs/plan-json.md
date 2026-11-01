@@ -50,6 +50,7 @@ One ready PR.
 | `gate` | string or null | `"ddl"`, `"infra"` or `null`. |
 | `gate_reason` | string or null | For a gate PR, the first changed path that matched (`ddl_globs` or `infra_globs`), or `repo is listed in deploy.infra_repos`. `null` when `gate` is `null`. |
 | `manual_pause` | boolean | `true` when the PR is a gate: whoever runs the train must stop and confirm before continuing. |
+| `gate_late` | boolean | Present, and `true`, only for a late gate: a gate PR that runs after the PRs it waits for through a `package`, `dependency` or `target` edge, with the pause right before it. Absent for every other PR, so plans without a late gate are unchanged. |
 | `stage` | integer | Position in time, starting at 1. PRs in the same stage can merge at the same time. Gate edges are ignored when computing it, so a gate PR is usually stage 1 and the stage of everything else does not count the wait for the gate. |
 | `lane` | integer or null | 1-based index into `lanes`. `null` for a gate PR. |
 | `after` | Dependency[] | PRs that must merge before this one. Every gate PR that goes first appears here with `rule` `gate`. |

@@ -4,7 +4,7 @@ use clap::ValueEnum;
 
 use crate::bundle::Bundle;
 use crate::plan::Plan;
-use crate::planner::{Item, Rule};
+use crate::planner::{Item, Rule, is_late_rule};
 
 pub const PAUSE_LINE: &str = "# pause: confirm DDL/infra before continuing";
 pub const EXIT_QUESTIONS: i32 = 3;
@@ -44,6 +44,32 @@ fn item_lines(plan: &Plan, item: &Item) -> Vec<String> {
     lines
 }
 
+fn late_gate_lines(plan: &Plan, item: &Item) -> Vec<String> {
+    let mut predecessors: BTreeSet<&str> = BTreeSet::new();
+    let mut details: BTreeSet<(&str, &str)> = BTreeSet::new();
+    for dep in item.after.iter().filter(|d| is_late_rule(d.rule)) {
+        predecessors.insert(dep.id.as_str());
+        let text = dep.package.as_deref().unwrap_or(dep.reason.as_str());
+        details.insert((dep.rule.as_str(), text));
+    }
+    let predecessors: Vec<&str> = predecessors.into_iter().collect();
+    let details: Vec<String> = details
+        .into_iter()
+        .map(|(rule, text)| format!("{rule}: {text}"))
+        .collect();
+    let mut lines = vec![
+        format!(
+            "# gate: {} waits for {} ({})",
+            item.id,
+            predecessors.join(" "),
+            details.join("; ")
+        ),
+        PAUSE_LINE.to_string(),
+    ];
+    lines.extend(item_lines(plan, item));
+    lines
+}
+
 fn order_key(item: &Item) -> (usize, usize, u64, &str, &str) {
     (
         item.stage,
@@ -55,7 +81,11 @@ fn order_key(item: &Item) -> (usize, usize, u64, &str, &str) {
 }
 
 fn flattened(plan: &Plan) -> Vec<&Item> {
-    let mut rest: Vec<&Item> = plan.items.iter().filter(|i| !i.manual_pause).collect();
+    let mut rest: Vec<&Item> = plan
+        .items
+        .iter()
+        .filter(|i| !i.manual_pause || i.gate_late)
+        .collect();
     rest.sort_by_key(|i| order_key(i));
     rest
 }
@@ -65,6 +95,7 @@ fn gated(plan: &Plan) -> Vec<&Item> {
         .gate
         .iter()
         .filter_map(|id| plan.items.iter().find(|i| i.id == *id))
+        .filter(|i| !i.gate_late)
         .collect();
     gate.sort_by_key(|i| order_key(i));
     gate
@@ -93,10 +124,17 @@ pub fn queue_lines(plan: &Plan) -> Vec<String> {
         .flat_map(|i| item_lines(plan, i))
         .collect();
     let rest = flattened(plan);
-    if !lines.is_empty() && !rest.is_empty() {
+    let rest_opens_with_late_gate = rest.first().is_some_and(|i| i.gate_late);
+    if !lines.is_empty() && !rest.is_empty() && !rest_opens_with_late_gate {
         lines.push(PAUSE_LINE.to_string());
     }
-    lines.extend(rest.into_iter().flat_map(|i| item_lines(plan, i)));
+    lines.extend(rest.into_iter().flat_map(|i| {
+        if i.gate_late {
+            late_gate_lines(plan, i)
+        } else {
+            item_lines(plan, i)
+        }
+    }));
     if lines.is_empty() {
         return lines;
     }
