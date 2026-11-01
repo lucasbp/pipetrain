@@ -12,6 +12,7 @@ pub mod elapsed;
 pub mod emit;
 pub mod github;
 pub mod hint;
+pub mod live;
 pub mod manifest;
 pub mod model;
 pub mod plan;

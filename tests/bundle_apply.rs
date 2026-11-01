@@ -6,7 +6,7 @@ use std::thread;
 use std::time::Duration;
 
 use pipetrain::command::apply::{
-    Gate, Kind, Outcome, Status, apply_plan, gate, render, render_with,
+    Gate, Kind, Outcome, Running, Status, apply_plan, gate, render, render_with,
 };
 use pipetrain::config::{ApiConfig, Config, Rules};
 use pipetrain::github::Client;
@@ -201,7 +201,14 @@ fn client(server: &Server) -> Client {
 
 fn run(server: &Server, plan: &Plan, apply: bool, answer: bool) -> Outcome {
     let mut client = client(server);
-    apply_plan(plan, &mut client, apply, &mut |_: &str| answer).unwrap()
+    apply_plan(
+        plan,
+        &mut client,
+        apply,
+        &mut |_: &str| answer,
+        &mut |_, _| {},
+    )
+    .unwrap()
 }
 
 fn actions(outcome: &Outcome) -> Vec<(Kind, &str, Status, &str)> {
@@ -318,6 +325,72 @@ fn a_403_on_a_retarget_stops_the_rest() {
     assert_stops_at_first_patch(403, "Resource not accessible by integration");
 }
 
+type Seen = Vec<(Running, Vec<Status>)>;
+
+fn observed(server: &Server, apply: bool) -> (Outcome, Seen) {
+    let mut client = client(server);
+    let mut seen: Seen = Vec::new();
+    let outcome = apply_plan(
+        &two_prs(),
+        &mut client,
+        apply,
+        &mut |_: &str| true,
+        &mut |report, running| {
+            let statuses = report.bundles[0].actions.iter().map(|a| a.status).collect();
+            seen.push((running, statuses));
+        },
+    )
+    .unwrap();
+    (outcome, seen)
+}
+
+#[test]
+fn the_observer_sees_every_step_before_and_after_it_runs() {
+    use Status::{Done, Planned};
+    let server = serve(happy);
+    let (_, seen) = observed(&server, true);
+
+    assert_eq!(
+        seen,
+        vec![
+            (None, vec![Planned, Planned, Planned]),
+            (Some((0, 0)), vec![Planned, Planned, Planned]),
+            (None, vec![Done, Planned, Planned]),
+            (Some((0, 1)), vec![Done, Planned, Planned]),
+            (None, vec![Done, Done, Planned]),
+            (Some((0, 2)), vec![Done, Done, Planned]),
+            (None, vec![Done, Done, Done]),
+        ]
+    );
+}
+
+#[test]
+fn the_observer_sees_the_rest_skipped_after_a_failure() {
+    use Status::{Done, Failed, Planned, Skipped};
+    let server = serve(fail_on(FIRST, 422, "Validation Failed"));
+    let (outcome, seen) = observed(&server, true);
+
+    assert!(outcome.failed);
+    assert_eq!(
+        seen,
+        vec![
+            (None, vec![Planned, Planned, Planned]),
+            (Some((0, 0)), vec![Planned, Planned, Planned]),
+            (None, vec![Done, Planned, Planned]),
+            (Some((0, 1)), vec![Done, Planned, Planned]),
+            (None, vec![Done, Failed, Skipped]),
+        ]
+    );
+}
+
+#[test]
+fn the_observer_is_not_called_with_a_step_on_a_dry_run() {
+    let server = serve(happy);
+    let (_, seen) = observed(&server, false);
+
+    assert!(seen.iter().all(|(running, _)| running.is_none()));
+}
+
 #[test]
 fn a_pr_already_on_the_branch_is_skipped_without_a_request() {
     let mut plan = two_prs();
@@ -366,7 +439,14 @@ fn assert_refused(branch: &str) {
     plan.bundles[0].branch = branch.to_string();
     let server = serve(happy);
     let mut client = client(&server);
-    let error = apply_plan(&plan, &mut client, true, &mut |_: &str| true).unwrap_err();
+    let error = apply_plan(
+        &plan,
+        &mut client,
+        true,
+        &mut |_: &str| true,
+        &mut |_, _| {},
+    )
+    .unwrap_err();
 
     assert!(error.to_string().contains("refusing to bundle"));
     assert!(server.writes().is_empty());

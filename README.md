@@ -217,6 +217,10 @@ It stops at the first failed write and never retries. The actions after the fail
 
 The text report is colored like the plan: `--color auto` (the default) colors only on a terminal and honors `NO_COLOR`, `always` colors when piped, `never` never does. After `--apply` it ends with a summary line such as `2 done, 1 skipped, 0 failed in 1.4 s`, counted by status and timed from the moment the writes start (after the confirmation). A dry run has no summary. `--json` is never colored and cannot be combined with `--color` (exit 2).
 
+On a terminal, `--apply` shows a live checklist on stderr: one block per repo (`<repo>  base <base>  branch <branch>`) and one row per write, redrawn in place. A row is `·` while it waits, a spinner while it runs, `✓` with its duration when done, a dash with the reason when skipped and `✗` when it failed. When a write fails, the row turns red with GitHub's message and the rows after it show `stopped after an earlier failure`; the exit code is still 1. When the list was shown and stdout is also a terminal, stdout gets only the summary line.
+
+The checklist is drawn only when stderr is a terminal. With `--json`, `--no-progress`, `CI=true` or a redirected stderr there is no live list, and stdout carries the full text report (or the JSON) exactly as before. Colors follow `NO_COLOR` and `--color`.
+
 Token permissions: Contents: write to create the branch and Pull requests: write to change a base. A read-only token fails on the first write with a message that says so, and nothing after it runs.
 
 | Code | Meaning |

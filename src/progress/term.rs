@@ -1,4 +1,4 @@
-pub use imp::prepare;
+pub use imp::{prepare, width};
 
 #[cfg(windows)]
 mod imp {
@@ -22,6 +22,26 @@ mod imp {
         fn GetStdHandle(n: u32) -> *mut c_void;
         fn GetConsoleMode(handle: *mut c_void, mode: *mut u32) -> i32;
         fn SetConsoleMode(handle: *mut c_void, mode: u32) -> i32;
+        fn GetConsoleScreenBufferInfo(
+            handle: *mut c_void,
+            info: *mut ConsoleScreenBufferInfo,
+        ) -> i32;
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct ConsoleScreenBufferInfo {
+        size_x: i16,
+        size_y: i16,
+        cursor_x: i16,
+        cursor_y: i16,
+        attributes: u16,
+        left: i16,
+        top: i16,
+        right: i16,
+        bottom: i16,
+        max_x: i16,
+        max_y: i16,
     }
 
     extern "system" fn on_ctrl(event: u32) -> i32 {
@@ -52,11 +72,21 @@ mod imp {
         });
         true
     }
+
+    pub fn width() -> Option<usize> {
+        let handle = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
+        let mut info = ConsoleScreenBufferInfo::default();
+        if unsafe { GetConsoleScreenBufferInfo(handle, &mut info) } == 0 {
+            return None;
+        }
+        let columns = i32::from(info.right) - i32::from(info.left) + 1;
+        usize::try_from(columns).ok().filter(|columns| *columns > 0)
+    }
 }
 
 #[cfg(unix)]
 mod imp {
-    use std::ffi::c_void;
+    use std::ffi::{c_ulong, c_void};
     use std::sync::Once;
     use std::sync::atomic::Ordering;
 
@@ -64,12 +94,29 @@ mod imp {
     const SIGTERM: i32 = 15;
     const STDERR_FD: i32 = 2;
 
+    #[cfg(target_os = "linux")]
+    const TIOCGWINSZ: Option<c_ulong> = Some(0x5413);
+    #[cfg(target_os = "macos")]
+    const TIOCGWINSZ: Option<c_ulong> = Some(0x4008_7468);
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    const TIOCGWINSZ: Option<c_ulong> = None;
+
     static INSTALL: Once = Once::new();
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct Winsize {
+        rows: u16,
+        cols: u16,
+        xpixel: u16,
+        ypixel: u16,
+    }
 
     unsafe extern "C" {
         fn signal(sig: i32, handler: usize) -> usize;
         fn write(fd: i32, buf: *const c_void, n: usize) -> isize;
         fn _exit(code: i32) -> !;
+        fn ioctl(fd: i32, request: c_ulong, ...) -> i32;
     }
 
     fn terminate(code: i32) -> ! {
@@ -95,11 +142,24 @@ mod imp {
         });
         true
     }
+
+    pub fn width() -> Option<usize> {
+        let request = TIOCGWINSZ?;
+        let mut size = Winsize::default();
+        if unsafe { ioctl(STDERR_FD, request, &mut size as *mut Winsize) } != 0 {
+            return None;
+        }
+        Some(usize::from(size.cols)).filter(|cols| *cols > 0)
+    }
 }
 
 #[cfg(not(any(windows, unix)))]
 mod imp {
     pub fn prepare() -> bool {
         true
+    }
+
+    pub fn width() -> Option<usize> {
+        None
     }
 }

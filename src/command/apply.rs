@@ -5,10 +5,12 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, anyhow, bail};
 use serde::Serialize;
 
+use super::checklist::Checklist;
 use super::order::requests_line;
 use super::{PlanOptions, build_plan};
 use crate::bundle::Bundle;
 use crate::github::{BranchWrite, Client};
+use crate::live::{Row, State};
 use crate::plan::Plan;
 use crate::planner::Item;
 use crate::style::{bold, dim, green, paint, red, yellow};
@@ -331,25 +333,45 @@ fn run_step(action: &mut Action, client: &mut Client) {
     }
 }
 
-fn execute(report: &mut Report, client: &mut Client) -> bool {
-    let mut failed = false;
+pub type Running = Option<(usize, usize)>;
+
+fn skip_the_rest(report: &mut Report) {
     for action in report
         .bundles
         .iter_mut()
         .flat_map(|bundle| bundle.actions.iter_mut())
+        .filter(|action| action.status == Status::Planned)
     {
-        if action.status != Status::Planned {
-            continue;
-        }
-        if failed {
-            action.status = Status::Skipped;
-            action.detail = STOPPED.to_string();
-            continue;
-        }
-        run_step(action, client);
-        failed = action.status == Status::Failed;
+        action.status = Status::Skipped;
+        action.detail = STOPPED.to_string();
     }
-    failed
+}
+
+fn execute(
+    report: &mut Report,
+    client: &mut Client,
+    observe: &mut dyn FnMut(&Report, Running),
+) -> bool {
+    observe(report, None);
+    for bundle in 0..report.bundles.len() {
+        for index in 0..report.bundles[bundle].actions.len() {
+            if report.bundles[bundle].actions[index].status != Status::Planned {
+                continue;
+            }
+            observe(report, Some((bundle, index)));
+            let action = &mut report.bundles[bundle].actions[index];
+            run_step(action, client);
+            let failed = action.status == Status::Failed;
+            if failed {
+                skip_the_rest(report);
+            }
+            observe(report, None);
+            if failed {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 pub fn apply_plan(
@@ -357,6 +379,7 @@ pub fn apply_plan(
     client: &mut Client,
     apply: bool,
     confirm: &mut dyn FnMut(&str) -> bool,
+    observe: &mut dyn FnMut(&Report, Running),
 ) -> Result<Outcome> {
     let mut report = prepare(plan, client)?;
     if !apply {
@@ -374,7 +397,7 @@ pub fn apply_plan(
         });
     }
     report.applied = true;
-    let failed = execute(&mut report, client);
+    let failed = execute(&mut report, client, observe);
     Ok(Outcome {
         report,
         failed,
@@ -402,6 +425,77 @@ fn render_actions(report: &Report, color: bool) -> String {
         }
     }
     out
+}
+
+fn live_state(action: &Action, running: bool, took: Option<Duration>) -> State {
+    match action.status {
+        Status::Planned if running => State::Running,
+        Status::Planned => State::Pending,
+        Status::Done => State::Done(took.unwrap_or_default()),
+        Status::Skipped => State::Skipped(action.detail.clone()),
+        Status::Failed => State::Failed(action.detail.clone()),
+    }
+}
+
+pub(super) fn live_rows(report: &Report, running: Running, took: &[Option<Duration>]) -> Vec<Row> {
+    let mut rows = Vec::new();
+    let mut flat = 0;
+    for (bundle_index, bundle) in report.bundles.iter().enumerate() {
+        rows.push(Row {
+            text: format!(
+                "{}  base {}  branch {}",
+                bundle.repo, bundle.base, bundle.branch
+            ),
+            state: State::Pending,
+            header: true,
+        });
+        for (action_index, action) in bundle.actions.iter().enumerate() {
+            let is_running = running == Some((bundle_index, action_index));
+            rows.push(Row {
+                text: action.line(false),
+                state: live_state(action, is_running, took.get(flat).copied().flatten()),
+                header: false,
+            });
+            flat += 1;
+        }
+    }
+    rows
+}
+
+pub(super) fn flat_index(report: &Report, running: (usize, usize)) -> usize {
+    let before: usize = report
+        .bundles
+        .iter()
+        .take(running.0)
+        .map(|bundle| bundle.actions.len())
+        .sum();
+    before + running.1
+}
+
+pub(super) fn action_count(report: &Report) -> usize {
+    report
+        .bundles
+        .iter()
+        .map(|bundle| bundle.actions.len())
+        .sum()
+}
+
+pub(super) fn statuses(report: &Report) -> Vec<Status> {
+    report
+        .bundles
+        .iter()
+        .flat_map(|bundle| bundle.actions.iter().map(|action| action.status))
+        .collect()
+}
+
+pub fn use_live(
+    apply: bool,
+    json: bool,
+    no_progress: bool,
+    stderr_is_terminal: bool,
+    ci: Option<&str>,
+) -> bool {
+    apply && crate::progress::enabled(no_progress, json, false, true, stderr_is_terminal, ci)
 }
 
 fn summary_line(report: &Report, color: bool, elapsed: Option<Duration>) -> String {
@@ -481,6 +575,23 @@ fn ask(actions: &str) -> String {
     line
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Output {
+    Json,
+    Summary,
+    Full,
+}
+
+fn output_form(json: bool, live_shown: bool, stdout_is_terminal: bool) -> Output {
+    if json {
+        Output::Json
+    } else if live_shown && stdout_is_terminal {
+        Output::Summary
+    } else {
+        Output::Full
+    }
+}
+
 pub fn run(opts: ApplyOptions) -> Result<i32> {
     let interactive = std::io::stdin().is_terminal();
     if gate(opts.apply, opts.yes, interactive, None) == Gate::Refuse {
@@ -496,16 +607,43 @@ pub fn run(opts: ApplyOptions) -> Result<i32> {
         apply_started.set(Instant::now());
         gate(apply, yes, interactive, answer.as_deref()) == Gate::Proceed
     };
-    let outcome = apply_plan(&built, &mut client, opts.apply, &mut confirm)?;
+    let live = use_live(
+        opts.apply,
+        json,
+        !opts.plan.progress,
+        std::io::stderr().is_terminal(),
+        std::env::var("CI").ok().as_deref(),
+    );
+    let mut checklist: Option<Checklist> = None;
+    let mut tried = false;
+    let mut observe = |report: &Report, running: Running| {
+        if !live {
+            return;
+        }
+        if let Some(shown) = checklist.as_mut() {
+            shown.update(report, running);
+        } else if !tried {
+            tried = true;
+            if report.has_planned() {
+                checklist = Checklist::start(report);
+            }
+        }
+    };
+    let outcome = apply_plan(&built, &mut client, opts.apply, &mut confirm, &mut observe)?;
     let applying = apply_started.get().elapsed();
+    let shown = checklist.take().map(Checklist::finish).is_some();
     if outcome.aborted {
         eprintln!("aborted, nothing was written");
         return Ok(1);
     }
-    if json {
-        println!("{}", serde_json::to_string_pretty(&outcome.report)?);
-    } else {
-        anstream::print!("{}", render_with(&outcome.report, true, Some(applying)));
+    match output_form(json, shown, std::io::stdout().is_terminal()) {
+        Output::Json => println!("{}", serde_json::to_string_pretty(&outcome.report)?),
+        Output::Summary => {
+            anstream::print!("{}", summary_line(&outcome.report, true, Some(applying)));
+        }
+        Output::Full => {
+            anstream::print!("{}", render_with(&outcome.report, true, Some(applying)));
+        }
     }
     if opts.apply {
         eprintln!(
@@ -517,4 +655,213 @@ pub fn run(opts: ApplyOptions) -> Result<i32> {
         }
     }
     Ok(i32::from(outcome.failed))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create() -> Action {
+        Action {
+            kind: Kind::CreateBranch,
+            target: "deploy/30-10-2026".to_string(),
+            status: Status::Planned,
+            detail: String::new(),
+            step: Step::Create {
+                slug: "acme/api-core".to_string(),
+                base: "master".to_string(),
+                branch: "deploy/30-10-2026".to_string(),
+                sha: "0123456789abcdef".to_string(),
+            },
+        }
+    }
+
+    fn retarget(number: u64) -> Action {
+        Action {
+            kind: Kind::Retarget,
+            target: format!("acme/api-core#{number}"),
+            status: Status::Planned,
+            detail: String::new(),
+            step: Step::Retarget {
+                slug: "acme/api-core".to_string(),
+                number,
+                branch: "deploy/30-10-2026".to_string(),
+                current: "master".to_string(),
+            },
+        }
+    }
+
+    fn report(actions: Vec<Action>) -> Report {
+        Report {
+            schema: 1,
+            applied: true,
+            bundles: vec![BundleReport {
+                repo: "acme/api-core".to_string(),
+                base: "master".to_string(),
+                branch: "deploy/30-10-2026".to_string(),
+                actions,
+                note: Some("left alone: acme/api-core#9".to_string()),
+            }],
+        }
+    }
+
+    fn three() -> Report {
+        report(vec![create(), retarget(1), retarget(2)])
+    }
+
+    fn states(rows: &[Row]) -> Vec<State> {
+        rows.iter().map(|row| row.state.clone()).collect()
+    }
+
+    const SECOND: Duration = Duration::from_millis(1500);
+
+    #[test]
+    fn planned_rows_are_pending_under_a_header() {
+        let rows = live_rows(&three(), None, &[]);
+
+        assert_eq!(rows.len(), 4);
+        assert!(rows[0].header);
+        assert_eq!(
+            rows[0].text,
+            "acme/api-core  base master  branch deploy/30-10-2026"
+        );
+        assert!(rows[1..].iter().all(|row| !row.header));
+        assert_eq!(states(&rows[1..]), vec![State::Pending; 3]);
+    }
+
+    #[test]
+    fn the_action_text_has_no_status_prefix_and_the_note_is_skipped() {
+        let rows = live_rows(&three(), None, &[]);
+
+        assert_eq!(
+            rows[1].text,
+            "create branch deploy/30-10-2026 from master (0123456)"
+        );
+        assert_eq!(
+            rows[2].text,
+            "retarget acme/api-core#1: master -> deploy/30-10-2026"
+        );
+        assert!(rows.iter().all(|row| !row.text.contains("left alone")));
+    }
+
+    #[test]
+    fn the_running_action_is_the_only_one_marked_running() {
+        let mut found = three();
+        found.bundles[0].actions[0].status = Status::Done;
+        let rows = live_rows(&found, Some((0, 1)), &[Some(SECOND), None, None]);
+
+        assert_eq!(
+            states(&rows[1..]),
+            vec![State::Done(SECOND), State::Running, State::Pending]
+        );
+    }
+
+    #[test]
+    fn a_done_action_carries_its_duration() {
+        let mut found = three();
+        found.bundles[0].actions[0].status = Status::Done;
+        found.bundles[0].actions[1].status = Status::Done;
+        let rows = live_rows(&found, None, &[Some(SECOND), Some(Duration::ZERO)]);
+
+        assert_eq!(
+            states(&rows[1..]),
+            vec![
+                State::Done(SECOND),
+                State::Done(Duration::ZERO),
+                State::Pending
+            ]
+        );
+    }
+
+    #[test]
+    fn a_done_action_without_a_measured_time_shows_zero() {
+        let mut found = three();
+        found.bundles[0].actions[0].status = Status::Done;
+        let rows = live_rows(&found, None, &[]);
+
+        assert_eq!(rows[1].state, State::Done(Duration::ZERO));
+    }
+
+    #[test]
+    fn a_skipped_action_carries_its_reason() {
+        let mut found = three();
+        found.bundles[0].actions[0].status = Status::Skipped;
+        found.bundles[0].actions[0].detail = "branch already exists".to_string();
+        let rows = live_rows(&found, None, &[]);
+
+        assert_eq!(
+            rows[1].state,
+            State::Skipped("branch already exists".to_string())
+        );
+    }
+
+    #[test]
+    fn a_failure_shows_the_message_and_the_rest_is_stopped() {
+        let mut found = three();
+        found.bundles[0].actions[0].status = Status::Done;
+        found.bundles[0].actions[1].status = Status::Failed;
+        found.bundles[0].actions[1].detail = "Validation Failed".to_string();
+        skip_the_rest(&mut found);
+        let rows = live_rows(&found, None, &[Some(SECOND)]);
+
+        assert_eq!(
+            states(&rows[1..]),
+            vec![
+                State::Done(SECOND),
+                State::Failed("Validation Failed".to_string()),
+                State::Skipped(STOPPED.to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn every_bundle_gets_its_own_header_and_a_running_position_is_per_bundle() {
+        let mut found = three();
+        let mut other = report(vec![retarget(7)]);
+        other.bundles[0].repo = "acme/web".to_string();
+        found.bundles.push(other.bundles.remove(0));
+        let rows = live_rows(&found, Some((1, 0)), &[]);
+
+        assert_eq!(rows.len(), 6);
+        assert!(rows[4].header);
+        assert!(rows[4].text.starts_with("acme/web"));
+        assert_eq!(rows[5].state, State::Running);
+        assert_eq!(rows[3].state, State::Pending);
+        assert_eq!(flat_index(&found, (1, 0)), 3);
+        assert_eq!(flat_index(&found, (0, 2)), 2);
+        assert_eq!(action_count(&found), 4);
+        assert_eq!(statuses(&found), vec![Status::Planned; 4]);
+    }
+
+    #[test]
+    fn stdout_gets_only_the_summary_when_the_live_list_and_both_terminals_are_there() {
+        assert_eq!(output_form(false, true, true), Output::Summary);
+        assert_eq!(output_form(false, true, false), Output::Full);
+        assert_eq!(output_form(false, false, true), Output::Full);
+        assert_eq!(output_form(false, false, false), Output::Full);
+        assert_eq!(output_form(true, true, true), Output::Json);
+        assert_eq!(output_form(true, false, false), Output::Json);
+    }
+
+    #[test]
+    fn the_live_list_needs_apply_a_terminal_and_no_opt_out() {
+        let cases = [
+            (true, false, false, true, None, true),
+            (false, false, false, true, None, false),
+            (true, true, false, true, None, false),
+            (true, false, true, true, None, false),
+            (true, false, false, false, None, false),
+            (true, false, false, true, Some("true"), false),
+            (true, false, false, true, Some("1"), false),
+            (true, false, false, true, Some("false"), true),
+            (true, false, false, true, Some(""), true),
+        ];
+        for (apply, json, no_progress, stderr_tty, ci, want) in cases {
+            assert_eq!(
+                use_live(apply, json, no_progress, stderr_tty, ci),
+                want,
+                "apply={apply} json={json} no_progress={no_progress} stderr_tty={stderr_tty} ci={ci:?}"
+            );
+        }
+    }
 }

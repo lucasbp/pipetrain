@@ -410,7 +410,14 @@ fn client(server: &Server) -> Client {
 
 fn run(server: &Server, plan: &Plan, apply: bool) -> Outcome {
     let mut client = client(server);
-    apply_plan(plan, &mut client, apply, &mut |_: &str| true).unwrap()
+    apply_plan(
+        plan,
+        &mut client,
+        apply,
+        &mut |_: &str| true,
+        &mut |_, _| {},
+    )
+    .unwrap()
 }
 
 #[test]

@@ -6,15 +6,15 @@ use std::sync::{Mutex, MutexGuard, Once, TryLockError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-const FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+pub(crate) const FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const DEFAULT_DELAY: Duration = Duration::from_millis(300);
 const REDRAW: Duration = Duration::from_millis(80);
-const HIDE_CURSOR: &str = "\x1b[?25l";
-const ERASE_LINE: &str = "\r\x1b[2K";
+pub(crate) const HIDE_CURSOR: &str = "\x1b[?25l";
+pub(crate) const ERASE_LINE: &str = "\r\x1b[2K";
 const RESTORE: &[u8] = b"\r\x1b[2K\x1b[?25h";
-const CYAN: &str = "\x1b[36m";
-const DIM: &str = "\x1b[2m";
-const RESET: &str = "\x1b[0m";
+pub(crate) const CYAN: &str = "\x1b[36m";
+pub(crate) const DIM: &str = "\x1b[2m";
+pub(crate) const RESET: &str = "\x1b[0m";
 
 type Active = Option<Painter<Box<dyn Write + Send>>>;
 
@@ -125,6 +125,22 @@ pub(crate) fn restore_into<W: Write>(writer: &mut W) -> bool {
     }
     let _ = writer.write_all(RESTORE);
     let _ = writer.flush();
+    true
+}
+
+pub fn terminal_width() -> Option<usize> {
+    term::width()
+}
+
+pub(crate) fn mark_cursor_hidden(hidden: bool) {
+    CURSOR_HIDDEN.store(hidden, Ordering::SeqCst);
+}
+
+pub(crate) fn prepare_terminal() -> bool {
+    if !term::prepare() {
+        return false;
+    }
+    install_panic_hook();
     true
 }
 
