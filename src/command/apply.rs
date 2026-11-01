@@ -139,7 +139,7 @@ impl Action {
     }
 }
 
-fn tint(color: bool, style: fn(&str) -> String, text: &str) -> String {
+pub(crate) fn tint(color: bool, style: fn(&str) -> String, text: &str) -> String {
     if color { style(text) } else { text.to_string() }
 }
 

@@ -145,32 +145,51 @@ fn fetch_nuget(session: &Session, opts: &FeedOptions) -> Result<Fetched> {
     })
 }
 
-pub fn run(opts: FeedOptions) -> Result<i32> {
+fn lookup(opts: &FeedOptions) -> Result<Result<Report, i32>> {
     let ecosystem = opts
         .ecosystem
         .unwrap_or_else(|| Ecosystem::default_for(&opts.package));
     let session = Session::new();
     let fetched = match ecosystem {
-        Ecosystem::Npm => fetch_npm(&session, &opts)?,
-        Ecosystem::Nuget => fetch_nuget(&session, &opts)?,
+        Ecosystem::Npm => fetch_npm(&session, opts)?,
+        Ecosystem::Nuget => fetch_nuget(&session, opts)?,
     };
     match fetched {
         Fetched::Refused { had_token } => {
             eprintln!("{}", feed::refused_message(had_token));
-            Ok(feed::EXIT_REFUSED)
+            Ok(Err(feed::EXIT_REFUSED))
         }
         Fetched::NotFound { feed } => {
             eprintln!("{}", feed::not_found_message(&feed));
-            Ok(feed::EXIT_NOT_PUBLISHED)
+            Ok(Err(feed::EXIT_NOT_PUBLISHED))
         }
-        Fetched::Found { feed, versions } => {
-            let report = Report::build(
-                &opts.package,
-                ecosystem,
-                &feed,
-                opts.version.as_deref(),
-                &versions,
-            );
+        Fetched::Found { feed, versions } => Ok(Ok(Report::build(
+            &opts.package,
+            ecosystem,
+            &feed,
+            opts.version.as_deref(),
+            &versions,
+        ))),
+    }
+}
+
+pub fn latest(opts: &FeedOptions) -> Result<Result<String, i32>> {
+    Ok(match lookup(opts)? {
+        Ok(report) => match report.latest {
+            Some(latest) => Ok(latest),
+            None => {
+                eprintln!("{}", feed::not_found_message(&report.feed));
+                Err(feed::EXIT_NOT_PUBLISHED)
+            }
+        },
+        Err(code) => Err(code),
+    })
+}
+
+pub fn run(opts: FeedOptions) -> Result<i32> {
+    match lookup(&opts)? {
+        Err(code) => Ok(code),
+        Ok(report) => {
             if opts.json {
                 println!(
                     "{}",

@@ -43,7 +43,7 @@ pub fn names_of(repos: impl IntoIterator<Item = String>) -> Names {
     names
 }
 
-fn configured(cfg: &Config) -> (Vec<String>, Vec<String>) {
+pub(crate) fn configured(cfg: &Config) -> (Vec<String>, Vec<String>) {
     let layered = cfg.layer.iter().flat_map(|layer| &layer.repos);
     let ordered = cfg.order.iter().flat_map(|order| &order.repos);
     let (mut globs, exact): (Vec<String>, Vec<String>) = layered
@@ -119,7 +119,7 @@ fn report(analysis: &Analysis, names: &Names, questions: &[Question]) -> Suggest
 
 type Manifests = Vec<(String, String, String)>;
 
-fn read_repo(
+pub(crate) fn read_repo(
     client: &mut Client,
     repo: &str,
     questions: &mut Vec<Question>,
@@ -134,7 +134,7 @@ fn read_repo(
     }
 }
 
-fn is_not_found(error: &anyhow::Error) -> bool {
+pub(crate) fn is_not_found(error: &anyhow::Error) -> bool {
     matches!(
         error.downcast_ref::<ApiError>(),
         Some(ApiError::NotFound { .. })

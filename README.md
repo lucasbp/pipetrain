@@ -137,6 +137,7 @@ pipetrain plan [OPTIONS] [PRS]...
 | `pipetrain bundle` | Dry run of the bundle suggestion: shows the branch it would create and the PRs it would retarget. Writes nothing. Takes the same PR arguments and options as `plan`. |
 | `pipetrain bundle --apply` | Creates the deploy branch and retargets the bundled PRs. Asks for confirmation unless `--yes` is given. See [Applying the bundle suggestion](#applying-the-bundle-suggestion). |
 | `pipetrain feed <PACKAGE> [--version <V>]` | Read-only: tells whether a package version is published in its NuGet or npm feed. See [Checking a package feed](#checking-a-package-feed). |
+| `pipetrain bump <PACKAGE> [--to <V>]` | Dry run only: shows which manifests of the scanned repos would move to a version of a package. Writes nothing and has no `--apply`. See [Bumping a package](#bumping-a-package-dry-run). |
 | `pipetrain profiles` | Read-only: lists the profiles, their orgs and folders, and which one applies from the current folder. |
 | `pipetrain orgs` | Read-only: lists the GitHub orgs your token can see and which profile lists each one. |
 | `pipetrain init` | Prints a proposed config with one profile per visible org. Writes nothing unless `--write [PATH]` is given; an existing file is kept unless `--force` is added. |
@@ -518,6 +519,50 @@ Token: GitHub Packages needs one, even for public packages. pipetrain uses the s
 | 0 | The version is published, or no `--version` was asked. |
 | 1 | The version is not published, the package is not in the feed (`package not found in <feed>`), or an error such as a network failure (`error: ...` on stderr). |
 | 2 | The feed answered 401 or 403: the token is missing or lacks `read:packages`. |
+
+## Bumping a package (dry run)
+
+```
+pipetrain bump <PACKAGE> [--to <VERSION>] [--ecosystem nuget|npm] [--org <ORG>] [--registry <URL>] [--repo <ORG/REPO>]... [--profile <NAME>] [--json]
+```
+
+`bump` shows which manifests would move to a version of a package. It is a dry run and only a dry run: there is no `--apply`, and clap rejects it as an unknown option.
+
+What it reads:
+
+- The target version: `--to`, or the latest version in the feed, looked up exactly like `pipetrain feed` (same ecosystem rules, same `--org` and `--registry`, same token handling).
+- The repos to scan: every `--repo`, or, when none is given, the exact repo names in the active profile (`[[layer]]` and `[[order]]`).
+- In each repo, the manifests of the default branch for the ecosystem (`.csproj`, `.fsproj` and `.props` for NuGet, `package.json` for npm), through the same cache-aware GitHub client as `plan`. Only `GET` requests and read-only GraphQL queries.
+
+What it never does: write a file, create a branch, commit, push, open a pull request or touch a repo. It prints what it found and stops.
+
+Output:
+
+```
+bump Acme.Util to 2.0.0
+acme/api
+  src/Api/Api.csproj  Acme.Util 1.2.0 -> 2.0.0
+  src/Worker/Worker.csproj  Acme.Util up to date
+1 would change, 1 up to date, 0 left alone in 1 repo in 1.4 s
+dry run: nothing was written
+```
+
+| Status | Meaning |
+|---|---|
+| `change` | The manifest references an older version than the target. It would move. |
+| `up_to_date` | The manifest already has the target version. |
+| `ahead` | The manifest references a newer version than the target (`ahead of target (left alone)`). |
+| `range` | The manifest uses a floating range such as `1.*` or `^1.2.0`. The raw spec is shown and it is left alone. |
+
+Repos that do not reference the package are not listed. A scanned repo name that GitHub does not know is skipped with a warning on stderr, and the scan fails only when no repo could be read. The colors follow `bundle` (`--color auto|always|never`, not allowed with `--json`), and a spinner on stderr covers the scan like it does for `plan` (`--no-progress`, `--no-cache` and `--refresh` work as there).
+
+`--json` prints `{"schema": 1, "package", "ecosystem", "target", "repos": [{"repo", "files": [{"path", "current", "status"}]}], "dry_run": true}` with `status` one of `change`, `up_to_date`, `ahead` or `range`.
+
+| Code | Meaning |
+|---|---|
+| 0 | The scan ran, whether or not anything would change. |
+| 1 | The package is referenced nowhere (`PACKAGE is not referenced in any scanned manifest`), the feed does not know the package or the version, no repo was given or could be read, or another error (`error: ...` on stderr). |
+| 2 | The feed answered 401 or 403: the token is missing or lacks `read:packages` (the message and code of `feed`). |
 
 ## Exit code
 

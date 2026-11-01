@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand};
 use pipetrain::cache::CacheMode;
 use pipetrain::command::apply::{self, ApplyOptions};
 use pipetrain::command::authors::AuthorFilter;
+use pipetrain::command::bump::{self, BumpOptions};
 use pipetrain::command::feed::{self, FeedOptions};
 use pipetrain::command::init::{self, InitOptions};
 use pipetrain::command::order::{self, OrderOptions};
@@ -63,6 +64,91 @@ enum Command {
         about = "Read-only: tells whether a package version is published in its NuGet or npm feed"
     )]
     Feed(FeedArgs),
+
+    #[command(
+        about = "Read-only: shows which manifests would move to which version of a package; writes nothing"
+    )]
+    Bump(BumpArgs),
+}
+
+#[derive(clap::Args)]
+struct BumpArgs {
+    #[arg(help = "Package id, e.g. Acme.Util or @acme/ui")]
+    package: String,
+
+    #[arg(
+        long,
+        help = "Target version; without it the latest published version is used"
+    )]
+    to: Option<String>,
+
+    #[arg(
+        long,
+        value_enum,
+        help = "nuget or npm (default: npm when the package starts with @, else nuget)"
+    )]
+    ecosystem: Option<Ecosystem>,
+
+    #[arg(
+        long,
+        help = "GitHub org that owns the feed; required for nuget unless --registry is given"
+    )]
+    org: Option<String>,
+
+    #[arg(
+        long,
+        help = "Feed to ask instead of the default: the base URL for npm, the service index URL for nuget"
+    )]
+    registry: Option<String>,
+
+    #[arg(
+        long = "repo",
+        help = "Repo to scan as org/repo; repeatable, without it the exact names in the profile's [[layer]] and [[order]]"
+    )]
+    repos: Vec<String>,
+
+    #[arg(
+        long,
+        help = "Config file (default: ./pipetrain.toml, then the user config dir)"
+    )]
+    config: Option<PathBuf>,
+
+    #[arg(
+        long,
+        help = "Profile to use; without it the folder, the default or the only profile decides"
+    )]
+    profile: Option<String>,
+
+    #[arg(long, help = "Log every API request to stderr")]
+    verbose: bool,
+
+    #[arg(
+        long,
+        conflicts_with = "refresh",
+        help = "Do not read or write the local cache of data that never changes for a sha"
+    )]
+    no_cache: bool,
+
+    #[arg(
+        long,
+        help = "Ignore cached data and fetch it again, then rewrite the cache"
+    )]
+    refresh: bool,
+
+    #[arg(long, help = "Do not draw the progress indicator on stderr")]
+    no_progress: bool,
+
+    #[arg(long, help = "Print the report as JSON")]
+    json: bool,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value = "auto",
+        conflicts_with = "json",
+        help = "Colors: auto (only on a terminal, honors NO_COLOR), always, never"
+    )]
+    color: clap::ColorChoice,
 }
 
 #[derive(clap::Args)]
@@ -476,8 +562,28 @@ fn run_bundle(args: BundleArgs) -> Result<i32> {
     })
 }
 
+fn run_bump(args: BumpArgs) -> Result<i32> {
+    apply_color(args.color);
+    let progress = pipetrain::progress::detect(args.no_progress, args.json, false);
+    bump::run(BumpOptions {
+        package: args.package,
+        to: args.to,
+        ecosystem: args.ecosystem,
+        org: args.org,
+        registry: args.registry,
+        repos: args.repos,
+        config: args.config,
+        profile: args.profile,
+        verbose: args.verbose,
+        cache: CacheMode::from_flags(args.no_cache, args.refresh),
+        progress,
+        json: args.json,
+    })
+}
+
 fn run_command(command: Command) -> Result<i32> {
     match command {
+        Command::Bump(args) => run_bump(args),
         Command::Doctor(args) => run_doctor(args),
         Command::Plan(args) => run_plan(args),
         Command::Bundle(args) => run_bundle(args),
