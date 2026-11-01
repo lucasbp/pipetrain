@@ -59,7 +59,7 @@ impl Guard {
             if let Some(oldest) = self.stamps.front() {
                 let wait = window.saturating_sub(oldest.elapsed());
                 if self.verbose {
-                    eprintln!("pacing: waiting {}s", wait.as_secs() + 1);
+                    crate::progress::line(&format!("pacing: waiting {}s", wait.as_secs() + 1));
                 }
                 sleep(wait + Duration::from_millis(250));
             }
@@ -73,7 +73,7 @@ impl Guard {
         self.pace();
         self.total += 1;
         if self.verbose {
-            eprintln!("request {:>3}  {label}", self.total);
+            crate::progress::line(&format!("request {:>3}  {label}", self.total));
         }
         Ok(())
     }

@@ -9,6 +9,7 @@ use crate::config::Config;
 use crate::emit::{EXIT_QUESTIONS, REPO_LEVEL};
 use crate::github::{self, ApiError, Client};
 use crate::model::Question;
+use crate::progress::{self, Progress};
 use crate::publishers;
 use graph::{Analysis, Chain};
 
@@ -22,6 +23,7 @@ pub struct OrderOptions {
     pub profile: Option<String>,
     pub verbose: bool,
     pub cache: CacheMode,
+    pub progress: bool,
 }
 
 #[derive(Debug, Default)]
@@ -142,7 +144,8 @@ pub fn suggest(client: &mut Client, names: &Names) -> Result<Suggestion> {
     let mut manifests = Vec::new();
     let mut warnings = Vec::new();
     let mut readable = Names::new();
-    for (slug, repo) in names {
+    progress::phase("reading manifests");
+    for (index, (slug, repo)) in names.iter().enumerate() {
         match read_repo(client, repo, &mut questions)? {
             Some(found) => {
                 manifests.extend(found);
@@ -152,6 +155,7 @@ pub fn suggest(client: &mut Client, names: &Names) -> Result<Suggestion> {
                 "warning: skipped {repo}: GitHub answered not found, check the name in the config"
             )),
         }
+        progress::count(index + 1, names.len());
     }
     if readable.is_empty() {
         bail!("no repo could be read: every name was not found, check the names in the config");
@@ -182,7 +186,9 @@ pub fn run(opts: OrderOptions) -> Result<i32> {
     }
     let mut client = Client::new(github::token()?, &cfg.api, opts.verbose)
         .with_cache(Cache::at_default(opts.cache));
+    let progress = Progress::start(opts.progress);
     let suggestion = suggest(&mut client, &names)?;
+    drop(progress);
     print!("{}", suggestion.stdout);
     for line in &suggestion.stderr {
         eprintln!("{line}");

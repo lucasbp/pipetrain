@@ -15,6 +15,7 @@ pub mod model;
 pub mod plan;
 pub mod planner;
 pub mod profile;
+pub mod progress;
 pub mod publishers;
 pub mod render;
 pub mod style;

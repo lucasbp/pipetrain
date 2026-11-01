@@ -119,6 +119,9 @@ struct SuggestArgs {
         help = "Ignore cached data and fetch it again, then rewrite the cache"
     )]
     refresh: bool,
+
+    #[arg(long, help = "Do not draw the progress indicator on stderr")]
+    no_progress: bool,
 }
 
 #[derive(clap::Args)]
@@ -205,6 +208,9 @@ struct PlanArgs {
     )]
     refresh: bool,
 
+    #[arg(long, help = "Do not draw the progress indicator on stderr")]
+    no_progress: bool,
+
     #[arg(
         long,
         value_enum,
@@ -267,6 +273,7 @@ fn run_doctor(args: DoctorArgs) -> Result<i32> {
 
 fn run_plan(args: PlanArgs) -> Result<i32> {
     apply_color(args.color);
+    let progress = pipetrain::progress::detect(args.no_progress, args.json, args.emit.is_some());
     plan(PlanOptions {
         prs: args.prs,
         all: args.all,
@@ -278,6 +285,7 @@ fn run_plan(args: PlanArgs) -> Result<i32> {
         date: args.date,
         verbose: args.verbose,
         cache: CacheMode::from_flags(args.no_cache, args.refresh),
+        progress,
     })
 }
 
@@ -303,13 +311,17 @@ fn run_command(command: Command) -> Result<i32> {
 
 fn run_order(args: OrderArgs) -> Result<i32> {
     match args.action {
-        OrderAction::Suggest(args) => order::run(OrderOptions {
-            repos: args.repos,
-            config: args.config,
-            profile: args.profile,
-            verbose: args.verbose,
-            cache: CacheMode::from_flags(args.no_cache, args.refresh),
-        }),
+        OrderAction::Suggest(args) => {
+            let progress = pipetrain::progress::detect(args.no_progress, false, false);
+            order::run(OrderOptions {
+                repos: args.repos,
+                config: args.config,
+                profile: args.profile,
+                verbose: args.verbose,
+                cache: CacheMode::from_flags(args.no_cache, args.refresh),
+                progress,
+            })
+        }
     }
 }
 

@@ -15,6 +15,7 @@ use crate::github::{self, ApiError, Client};
 use crate::model::{Pr, PrKey, Question};
 use crate::plan::{self, Gathered, Plan};
 use crate::planner::{self, DepState};
+use crate::progress::{self, Progress};
 use crate::publishers::{self, Publishers, References};
 use crate::render;
 
@@ -37,6 +38,7 @@ pub struct PlanOptions {
     pub date: Option<String>,
     pub verbose: bool,
     pub cache: CacheMode,
+    pub progress: bool,
 }
 
 struct Collected {
@@ -101,10 +103,12 @@ fn discover(
 }
 
 fn load_files(client: &mut Client, ready: &mut [(Pr, Scope)]) -> Result<()> {
-    for (pr, _) in ready.iter_mut() {
+    let total = ready.len();
+    for (index, (pr, _)) in ready.iter_mut().enumerate() {
         let (files, complete) = client.files(&pr.key, &pr.head_sha, &pr.base_sha)?;
         pr.files = files;
         pr.files_complete = complete;
+        progress::count(index + 1, total);
     }
     Ok(())
 }
@@ -186,9 +190,11 @@ fn scan_publishers(
     if repos.len() < 2 && wanted_packages(rules, ready).is_empty() {
         return Ok((Publishers::new(), References::new()));
     }
+    progress::phase("reading manifests");
     let mut manifests = Vec::new();
-    for (slug, sha) in repos.values() {
+    for (index, (slug, sha)) in repos.values().enumerate() {
         manifests.extend(scan_repo(client, slug, sha, questions)?);
+        progress::count(index + 1, repos.len());
     }
     Ok((
         publishers::collect(&manifests),
@@ -319,17 +325,21 @@ pub fn plan(opts: PlanOptions) -> Result<i32> {
 
     let mut client = Client::new(github::token()?, &cfg.api, opts.verbose)
         .with_cache(Cache::at_default(opts.cache));
+    let progress = Progress::start(opts.progress);
+    progress::phase("discovering pull requests");
     let Discovered {
         ready,
         mut skipped,
         mut questions,
     } = discover(&mut client, &cfg, &explicit, &deploy_branch, opts.all)?;
 
+    progress::phase(&format!("reading {} pull requests", ready.len()));
     let (mut ready, merged) = contained::filter(&mut client, ready, &deploy_branch)?;
     skipped.extend(merged);
 
     load_files(&mut client, &mut ready)?;
 
+    progress::phase("checking contents");
     let (ready, same) = content::filter(&mut client, ready, &deploy_branch)?;
     skipped.extend(same);
 
@@ -349,5 +359,6 @@ pub fn plan(opts: PlanOptions) -> Result<i32> {
     built.profile = Some(profile);
     built.stats.cache_hits = client.cache_hits();
     built.stats.cache_misses = client.cache_misses();
+    drop(progress);
     deliver(&built, opts.json, opts.emit)
 }

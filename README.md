@@ -147,6 +147,7 @@ pipetrain plan [OPTIONS] [PRS]...
 | `--verbose` | Log every API request to stderr. |
 | `--no-cache` | Neither read nor write the [local cache](#local-cache). Cannot be combined with `--refresh`. |
 | `--refresh` | Ignore what the cache has, fetch it again and rewrite it. Cannot be combined with `--no-cache`. |
+| `--no-progress` | Do not draw the progress indicator. It is drawn on stderr only when stderr is a terminal and never with `--json`, `--emit queue` redirected, or `CI=true`. |
 | `--emit queue` | Replaces the plan with a queue for a runner: one `merge:org/repo#N` line per ready PR on stdout, questions on stderr, exit 3 when questions are open. See [Feeding a queue runner](#feeding-a-queue-runner). Not combinable with `--json`. |
 | `--color auto\|always\|never` | Colors in the text output. `auto` (the default) colors only on a terminal and honors `NO_COLOR`. `always` colors even when piped, `never` never does. `--json` is never colored. |
 
@@ -381,7 +382,7 @@ GitHub counts the REST API (`core`) and GraphQL separately, and the guard follow
 
 Redirects are not followed. GitHub answers a renamed or moved repo with a redirect, and pipetrain stops with an error saying the repo was renamed or moved, instead of silently planning against a different one. Use the new name.
 
-`--verbose` prints each request, and each wait, to stderr. The `api` line of the output shows how many requests the run used and how many GitHub says remain.
+`--verbose` prints each request, and each wait, to stderr. The `api` line of the output shows how many requests the run used and how many GitHub says remain. On a terminal, a small spinner on stderr shows the phase and a counter while pipetrain talks to GitHub; it never touches stdout.
 
 ## Local cache
 

@@ -26,6 +26,7 @@ pipetrain plans the merge order of pull requests across repos. This file says wh
 - `pipetrain order suggest` prints the discovered chain as an `[[order]]` block, read-only.
 
 - A local cache for data that never changes for a key (the paths of a PR keyed by base tip and head sha, trees and manifests by commit sha, blob ids by head sha), with `--no-cache` and `--refresh` on `plan` and `order suggest`. Mutable data such as reviews, checks and branch tips is never cached, and neither is a token or a diff. The second run of a real queue went from 38 to 11 requests with the same output.
+- A progress spinner on stderr for `plan` and `order suggest`, drawn only on a terminal after 300 ms, off with `--no-progress`, `--json`, `CI=true` or a redirected `--emit queue`. stdout is never touched.
 
 ## Next
 
