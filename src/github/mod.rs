@@ -8,6 +8,7 @@ mod reply;
 mod token;
 
 pub use client::Client;
+pub use endpoints::BranchWrite;
 pub use error::{ApiError, describe_reset};
 pub use parse::{parse_files, parse_pr, parse_search};
 pub use reply::{Rate, Reply};

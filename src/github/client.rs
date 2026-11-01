@@ -101,6 +101,46 @@ impl Client {
         }
     }
 
+    pub(super) fn redact(&self, error: ApiError) -> ApiError {
+        error.redacted(&self.token)
+    }
+
+    fn finish(
+        &mut self,
+        result: Result<Response<Body>, ureq::Error>,
+        method: &str,
+        path: &str,
+    ) -> Result<Reply, ApiError> {
+        match result {
+            Ok(response) => Ok(self.read(response)),
+            Err(error) => Err(transport(error, &format!("{method} {path}")).redacted(&self.token)),
+        }
+    }
+
+    pub fn post_json(&mut self, path: &str, body: &Value) -> Result<Reply, ApiError> {
+        self.guard.before("core", &format!("POST {path}"))?;
+        let result = self
+            .agent
+            .post(format!("{}{path}", self.base))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send_json(body);
+        self.finish(result, "POST", path)
+    }
+
+    pub fn patch_json(&mut self, path: &str, body: &Value) -> Result<Reply, ApiError> {
+        self.guard.before("core", &format!("PATCH {path}"))?;
+        let result = self
+            .agent
+            .patch(format!("{}{path}", self.base))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send_json(body);
+        self.finish(result, "PATCH", path)
+    }
+
     pub fn query(&mut self, label: &str, query: &str, variables: Value) -> Result<Reply, ApiError> {
         self.guard.before("graphql", &format!("GRAPHQL {label}"))?;
         let result = self

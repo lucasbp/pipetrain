@@ -2,7 +2,7 @@
 
 pipetrain is a command-line tool that plans the order in which pull requests should merge across several repositories. It reads GitHub, builds a dependency graph from what it finds, and prints the order: what can merge at the same time, what has to wait for what, and why.
 
-It is read-only. It never merges, pushes, comments or changes anything on GitHub, and it stores nothing. A `go` command that would execute a plan does not exist yet.
+It is read-only by default. It never merges, pushes or comments, and it stores nothing. The only command that writes to GitHub is `pipetrain bundle --apply`, which creates a deploy branch and changes the base of the PRs bundled into it. A `go` command that would execute a whole plan does not exist yet.
 
 ## Requirements
 
@@ -30,7 +30,7 @@ cargo install --path .
 
 pipetrain asks the GitHub CLI for a token (`gh auth token`) and uses it if the command succeeds. Otherwise it falls back to the `GH_TOKEN` environment variable. With neither, it stops with an error that says how to get one for your system.
 
-You do not need `gh`. Without it, create a fine-grained token with read-only access (Pull requests: read, Contents: read, Metadata: read) at <https://github.com/settings/personal-access-tokens/new> and set it for the session:
+You do not need `gh`. Without it, create a fine-grained token with read-only access (Pull requests: read, Contents: read, Metadata: read; [`pipetrain bundle --apply`](#applying-the-bundle-suggestion) needs write on Contents and Pull requests) at <https://github.com/settings/personal-access-tokens/new> and set it for the session:
 
 ```powershell
 $env:GH_TOKEN = "<your-token>"
@@ -134,6 +134,8 @@ pipetrain plan [OPTIONS] [PRS]...
 | `pipetrain plan --all` | Plans every approved open PR in the configured orgs, whatever its branch. For any day, not only the train day. Cannot be combined with explicit PRs. |
 | `pipetrain plan --json` | Prints the plan as JSON instead of text (contract in `docs/plan-json.md`). |
 | `pipetrain plan --emit queue` | Prints only a queue of `merge:org/repo#N` lines for a runner (contract in `docs/queue-output.md`). Cannot be combined with `--json`. |
+| `pipetrain bundle` | Dry run of the bundle suggestion: shows the branch it would create and the PRs it would retarget. Writes nothing. Takes the same PR arguments and options as `plan`. |
+| `pipetrain bundle --apply` | Creates the deploy branch and retargets the bundled PRs. Asks for confirmation unless `--yes` is given. See [Applying the bundle suggestion](#applying-the-bundle-suggestion). |
 | `pipetrain profiles` | Read-only: lists the profiles, their orgs and folders, and which one applies from the current folder. |
 | `pipetrain orgs` | Read-only: lists the GitHub orgs your token can see and which profile lists each one. |
 | `pipetrain init` | Prints a proposed config with one profile per visible org. Writes nothing unless `--write [PATH]` is given; an existing file is kept unless `--force` is added. |
@@ -149,6 +151,8 @@ pipetrain plan [OPTIONS] [PRS]...
 | `--refresh` | Ignore what the cache has, fetch it again and rewrite it. Cannot be combined with `--no-cache`. |
 | `--no-progress` | Do not draw the progress indicator. It is drawn on stderr only when stderr is a terminal and never with `--json`, `--emit queue` redirected, or `CI=true`. |
 | `--emit queue` | Replaces the plan with a queue for a runner: one `merge:org/repo#N` line per ready PR on stdout, questions on stderr, exit 3 when questions are open. See [Feeding a queue runner](#feeding-a-queue-runner). Not combinable with `--json`. |
+| `--apply` | Only on `bundle`. Writes to GitHub: creates the deploy branches and retargets the PRs. Without it `bundle` is a dry run. |
+| `--yes` | Only on `bundle`, and only together with `--apply`. Skips the confirmation prompt. Required when stdin is not a terminal. |
 | `--color auto\|always\|never` | Colors in the text output. `auto` (the default) colors only on a terminal and honors `NO_COLOR`. `always` colors even when piped, `never` never does. `--json` is never colored. |
 
 PR references are written as `org/repo#123`. A PR that cannot be found stops the run.
@@ -187,7 +191,55 @@ The `train` line of the output reads `all released PRs`. When a plain `pipetrain
 
 **Bundling deploys.** When 2 or more ready PRs of the same repo target the same base (for example `main`), each one is a deploy of that repo. The plan then adds a `BUNDLES` section suggesting one train branch instead: create it from the base, retarget those PRs to it, merge them there, and open a single PR from it to the base. N deploys become 1, and the `deploys` line shows both numbers. Bases that are themselves train branches are not bundled.
 
-Both are read-only. The bundle is a suggestion: pipetrain does not create the branch and does not retarget anything. Why, the arithmetic and how to apply it by hand: [docs/saving-pipelines.md](docs/saving-pipelines.md).
+Both checks are read-only, and so is `plan`. The bundle is a suggestion: `plan` does not create the branch and does not retarget anything. `pipetrain bundle --apply` does the first two steps for you ([below](#applying-the-bundle-suggestion)). Why, the arithmetic and how to apply it by hand: [docs/saving-pipelines.md](docs/saving-pipelines.md).
+
+## Applying the bundle suggestion
+
+```
+pipetrain bundle [OPTIONS] [PRS]...
+pipetrain bundle --apply [--yes] [OPTIONS] [PRS]...
+```
+
+`bundle` takes the `BUNDLES` section of the plan and, when you ask, carries out its first two steps. By default it is a dry run: it reads the tip of each base branch, prints what it would do and writes nothing. `--apply` writes. `--yes` skips the confirmation prompt, and it is required when stdin is not a terminal (without it `--apply` refuses to run before it reads a token or calls GitHub).
+
+What it does, per bundle:
+
+1. Creates the deploy branch (`deploy/<date>`, built from `train_prefix` and `train_date_format`) from the current tip of the base.
+2. Changes the base of each bundled PR to that branch.
+
+What it does not do: it never merges, never opens the deploy PR, never deletes a branch and never force-pushes. Steps 3 and 4 of [docs/saving-pipelines.md](docs/saving-pipelines.md) stay with you.
+
+It stops at the first failed write and never retries. The actions after the failure are reported as `skipped`. Running it again is safe: a branch that already exists is skipped, and so is a PR already based on it, so the second run picks up where the first stopped. When the deploy branch is already the head of an open PR, no branch is created and only the retargets run.
+
+Token permissions: Contents: write to create the branch and Pull requests: write to change a base. A read-only token fails on the first write with a message that says so, and nothing after it runs.
+
+| Code | Meaning |
+|---|---|
+| 0 | Dry run done, or every action applied or skipped. |
+| 1 | Aborted at the prompt, or an error, or a failed write. |
+
+With `--json` the report goes to stdout. `applied` is `false` on a dry run, and `status` is `planned` for what a dry run would do and `done`, `skipped` or `failed` after `--apply`:
+
+```json
+{
+  "schema": 1,
+  "applied": true,
+  "bundles": [
+    {
+      "repo": "acme/api-core",
+      "base": "master",
+      "branch": "deploy/30-10-2026",
+      "actions": [
+        { "kind": "create-branch", "target": "deploy/30-10-2026", "status": "done", "detail": "" },
+        { "kind": "retarget", "target": "acme/api-core#1", "status": "done", "detail": "" },
+        { "kind": "retarget", "target": "acme/api-core#2", "status": "skipped", "detail": "already based on deploy/30-10-2026" }
+      ]
+    }
+  ]
+}
+```
+
+After applying, run `pipetrain plan` again: the retargeted PRs now sit on the deploy branch.
 
 ## Example output
 
@@ -415,14 +467,14 @@ Where it lives: the `pipetrain` folder inside your user cache directory (`%LOCAL
 | Code | Meaning |
 |---|---|
 | 0 | A plan was generated. Skipped PRs and `?` questions do not change this. |
-| 1 | An error: no token, bad config, bad `--date`, a PR not found, budget reached, GitHub failure. The message goes to stderr as `error: ...`. |
+| 1 | An error: no token, bad config, bad `--date`, a PR not found, budget reached, GitHub failure. The message goes to stderr as `error: ...`. For `bundle` it also means the prompt was declined or a write failed. |
 | 3 | Only with `--emit queue`: the queue was printed, but at least one question is open. Without `--emit queue` this code is never used. |
 
 A command-line usage mistake (an unknown option, for example) exits with clap's own code, 2. `pipetrain doctor` has its own two codes, listed in [Check your setup](#check-your-setup-doctor).
 
 ## Out of scope
 
-pipetrain does not merge, push, approve, comment, label, re-run checks or write anything to GitHub, and nothing in it is a deploy tool. It decides order, not safety: it does not know whether a migration is backward compatible, only that it has to go first.
+pipetrain does not merge, push, approve, comment, label or re-run checks, and nothing in it is a deploy tool. The only thing it writes to GitHub is what `pipetrain bundle --apply` does: create a deploy branch and change the base of the PRs bundled into it. It decides order, not safety: it does not know whether a migration is backward compatible, only that it has to go first.
 
 ## Documentation
 

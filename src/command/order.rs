@@ -203,7 +203,7 @@ pub fn run(opts: OrderOptions) -> Result<i32> {
     Ok(suggestion.exit)
 }
 
-fn requests_line(requests: u32, cache_hits: u32, elapsed: Duration) -> String {
+pub(crate) fn requests_line(requests: u32, cache_hits: u32, elapsed: Duration) -> String {
     let took = elapsed::format(elapsed);
     if cache_hits > 0 {
         format!("{requests} requests in {took}, {cache_hits} from cache")

@@ -36,7 +36,7 @@ When a PR of the group already has the train branch as its head (`existing_train
 
 ## How to apply it by hand
 
-pipetrain only plans. A command that executes a plan does not exist yet, so the team does these steps itself, for each entry under `BUNDLES`:
+`plan` only plans. Steps 1 and 2 below can be done with `pipetrain bundle --apply` (a dry run without `--apply`; see [Applying the bundle suggestion](../README.md#applying-the-bundle-suggestion)). Steps 3 and 4 stay manual: no command merges or opens the deploy PR. For each entry under `BUNDLES`:
 
 1. Create the branch named in the suggestion (`deploy/<date>`) from the base.
 2. Change the base of each PR listed under `retarget` to that branch.
@@ -53,5 +53,7 @@ Run `pipetrain plan` again afterwards. Retargeted PRs now have a train branch as
 - It never changes the base of a PR.
 - It never merges, comments or writes anything to GitHub.
 - It does not check that the bundle is safe. It only counts deploys. Whether the PRs can ship together is a decision for whoever runs the train.
+
+`plan` never writes. `pipetrain bundle` writes only with `--apply`, and then it only creates the branch and changes the base of the bundled PRs. It never merges, never opens the deploy PR, never deletes and never force-pushes.
 
 The JSON fields are in [plan-json.md](plan-json.md) (`bundles`, `deploy_branch`, `stats`). The rules that order the PRs are in [planner.md](planner.md).

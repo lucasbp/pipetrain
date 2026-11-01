@@ -12,6 +12,25 @@ use crate::planner::DepState;
 
 const FILE_PAGES: u32 = 3;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchWrite {
+    Created,
+    AlreadyExists,
+}
+
+fn encode_path(text: &str) -> String {
+    let mut out = String::new();
+    for byte in text.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                out.push(char::from(byte));
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
 const PR_FIELDS: &str = "number title url body headRefName baseRefName baseRef { target { oid } } headRefOid isDraft state reviewDecision mergeable repository { name owner { login } } latestOpinionatedReviews(first: 20, writersOnly: true) { nodes { state } } commits(last: 1) { nodes { commit { statusCheckRollup { state contexts(first: 100) { nodes { __typename ... on CheckRun { name conclusion } ... on StatusContext { context state } } } } } } }";
 
 impl Client {
@@ -137,6 +156,52 @@ impl Client {
             }
             .into()),
         }
+    }
+
+    pub fn branch_sha(&mut self, slug: &str, branch: &str) -> Result<String> {
+        let value = self.rest(&format!(
+            "/repos/{slug}/git/ref/heads/{}",
+            encode_path(branch)
+        ))?;
+        match value.pointer("/object/sha").and_then(|sha| sha.as_str()) {
+            Some(sha) => Ok(sha.to_string()),
+            None => Err(ApiError::NotFound {
+                what: format!("branch {branch} of {slug}"),
+            }
+            .into()),
+        }
+    }
+
+    pub fn create_branch(
+        &mut self,
+        slug: &str,
+        branch: &str,
+        sha: &str,
+    ) -> Result<BranchWrite, ApiError> {
+        let path = format!("/repos/{slug}/git/refs");
+        let body = json!({ "ref": format!("refs/heads/{branch}"), "sha": sha });
+        let reply = self.post_json(&path, &body)?;
+        if reply.status == 422
+            && reply
+                .message()
+                .to_lowercase()
+                .contains("reference already exists")
+        {
+            return Ok(BranchWrite::AlreadyExists);
+        }
+        reply
+            .into_write(&format!("POST {path}"))
+            .map_err(|error| self.redact(error))?;
+        Ok(BranchWrite::Created)
+    }
+
+    pub fn retarget_pr(&mut self, slug: &str, number: u64, branch: &str) -> Result<(), ApiError> {
+        let path = format!("/repos/{slug}/pulls/{number}");
+        let reply = self.patch_json(&path, &json!({ "base": branch }))?;
+        reply
+            .into_write(&format!("PATCH {path}"))
+            .map_err(|error| self.redact(error))?;
+        Ok(())
     }
 
     pub fn tree(&mut self, slug: &str, sha: &str) -> Result<(Vec<String>, bool)> {

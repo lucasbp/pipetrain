@@ -60,6 +60,14 @@ impl Reply {
         }
     }
 
+    pub fn message(&self) -> String {
+        message_of(&self.body)
+    }
+
+    pub fn into_write(self, label: &str) -> Result<Value, ApiError> {
+        self.into_body(label).map_err(ApiError::for_write)
+    }
+
     pub fn into_graphql(self, label: &str) -> Result<Value, ApiError> {
         let reset = self.rate.reset;
         let body = self.into_body(label)?;

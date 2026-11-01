@@ -16,6 +16,9 @@ pub enum ApiError {
     Other { message: String },
 }
 
+const WRITE_ACCESS_HINT: &str =
+    "The token needs read and write access to Contents and Pull requests on these repos";
+
 fn plural(count: i64, unit: &str) -> String {
     if count == 1 {
         format!("{count} {unit}")
@@ -82,6 +85,20 @@ impl ApiError {
             Self::Network => format!("cannot reach api.github.com. {}", hint::connectivity_fix()),
             Self::Graphql { label, message } => graphql(label, message),
             Self::Stopped { message } | Self::Other { message } => message.clone(),
+        }
+    }
+
+    pub fn for_write(self) -> Self {
+        match self {
+            Self::Forbidden { message } => Self::Other {
+                message: format!(
+                    "GitHub refused the write (403): \"{message}\". {WRITE_ACCESS_HINT}."
+                ),
+            },
+            Self::NotFound { what } => Self::Other {
+                message: format!("not found: {what} (404). {WRITE_ACCESS_HINT}."),
+            },
+            other => other,
         }
     }
 

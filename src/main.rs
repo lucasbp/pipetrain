@@ -5,6 +5,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use pipetrain::cache::CacheMode;
+use pipetrain::command::apply::{self, ApplyOptions};
 use pipetrain::command::init::{self, InitOptions};
 use pipetrain::command::order::{self, OrderOptions};
 use pipetrain::command::orgs::{self, OrgsOptions};
@@ -28,6 +29,11 @@ struct Cli {
 enum Command {
     #[command(about = "Read-only: shows which PRs go in which order, and why")]
     Plan(PlanArgs),
+
+    #[command(
+        about = "Writes to GitHub only with --apply: creates the deploy branch of each bundle and retargets its PRs"
+    )]
+    Bundle(BundleArgs),
 
     #[command(
         about = "Read-only: checks the token, the API, the rate limit, the config and the orgs"
@@ -221,6 +227,78 @@ struct PlanArgs {
 }
 
 #[derive(clap::Args)]
+struct BundleArgs {
+    #[arg(help = "PRs to bundle as org/repo#123; without any, today's train is discovered")]
+    prs: Vec<String>,
+
+    #[arg(
+        long,
+        conflicts_with = "prs",
+        help = "Look at every approved open PR in the orgs, whatever its branch"
+    )]
+    all: bool,
+
+    #[arg(
+        long,
+        help = "Create the deploy branches and retarget the PRs; without it nothing is written"
+    )]
+    apply: bool,
+
+    #[arg(
+        long,
+        requires = "apply",
+        help = "Do not ask for confirmation before writing"
+    )]
+    yes: bool,
+
+    #[arg(long, help = "Print the report as JSON")]
+    json: bool,
+
+    #[arg(
+        long,
+        help = "Config file (default: ./pipetrain.toml, then the user config dir)"
+    )]
+    config: Option<PathBuf>,
+
+    #[arg(
+        long,
+        help = "Profile to use; without it the folder, the default or the only profile decides"
+    )]
+    profile: Option<String>,
+
+    #[arg(
+        long = "org",
+        help = "Org to look at, overrides the profile's orgs; repeatable"
+    )]
+    orgs: Vec<String>,
+
+    #[arg(
+        long,
+        help = "Train date instead of today: the config's train_date_format (default dd-mm-yyyy) or ISO yyyy-mm-dd"
+    )]
+    date: Option<String>,
+
+    #[arg(long, help = "Log every API request to stderr")]
+    verbose: bool,
+
+    #[arg(
+        long,
+        conflicts_with = "refresh",
+        help = "Do not read or write the local cache of data that never changes for a sha"
+    )]
+    no_cache: bool,
+
+    #[arg(
+        long,
+        help = "Ignore cached data and fetch it again, then rewrite the cache"
+    )]
+    refresh: bool,
+
+    #[arg(long, help = "Do not draw the progress indicator on stderr")]
+    no_progress: bool,
+}
+
+#[derive(clap::Args)]
 struct DoctorArgs {
     #[arg(
         long,
@@ -289,10 +367,32 @@ fn run_plan(args: PlanArgs) -> Result<i32> {
     })
 }
 
+fn run_bundle(args: BundleArgs) -> Result<i32> {
+    let progress = pipetrain::progress::detect(args.no_progress, args.json, false);
+    apply::run(ApplyOptions {
+        plan: PlanOptions {
+            prs: args.prs,
+            all: args.all,
+            json: args.json,
+            emit: None,
+            config: args.config,
+            profile: args.profile,
+            orgs: args.orgs,
+            date: args.date,
+            verbose: args.verbose,
+            cache: CacheMode::from_flags(args.no_cache, args.refresh),
+            progress,
+        },
+        apply: args.apply,
+        yes: args.yes,
+    })
+}
+
 fn run_command(command: Command) -> Result<i32> {
     match command {
         Command::Doctor(args) => run_doctor(args),
         Command::Plan(args) => run_plan(args),
+        Command::Bundle(args) => run_bundle(args),
         Command::Profiles(args) => profiles::run(ProfilesOptions {
             config: args.config,
         }),

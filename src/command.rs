@@ -21,6 +21,7 @@ use crate::progress::{self, Progress};
 use crate::publishers::{self, Publishers, References};
 use crate::render;
 
+pub mod apply;
 pub mod init;
 pub mod order;
 pub mod orgs;
@@ -314,6 +315,11 @@ fn deliver(built: &Plan, json: bool, mode: Option<Emit>) -> Result<i32> {
 }
 
 pub fn plan(opts: PlanOptions) -> Result<i32> {
+    let (built, _) = build_plan(&opts)?;
+    deliver(&built, opts.json, opts.emit)
+}
+
+pub(crate) fn build_plan(opts: &PlanOptions) -> Result<(Plan, Client)> {
     let started = Instant::now();
     let (cfg, profile) = resolve::load(
         opts.config.as_deref(),
@@ -364,5 +370,5 @@ pub fn plan(opts: PlanOptions) -> Result<i32> {
     built.stats.cache_misses = client.cache_misses();
     built.stats.elapsed_ms = elapsed::millis(started.elapsed());
     drop(progress);
-    deliver(&built, opts.json, opts.emit)
+    Ok((built, client))
 }

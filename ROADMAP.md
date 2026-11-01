@@ -31,6 +31,7 @@ pipetrain plans the merge order of pull requests across repos. This file says wh
 - The summaries show how long the run took: a `time` line in `plan`, `... in 3.2 s` on the `order suggest` request line, a `time` line in `doctor` and `stats.elapsed_ms` in `--json`.
 - The `# wait` comment names the version the consumer bumps to, read from the consumer PR's manifest diff, and `--json` carries it as `after[].version`. Checking the package feed stays under Later.
 - A read-only conflict report: PRs of the same repo that change the same files, with the kind of file (lockfile, sql, generated, other), in the text output, `--json` (`conflicts`) and as `# conflict:` lines in the queue. The reason of a PR skipped for failing checks names the failing checks.
+- `pipetrain bundle`: dry run by default, `--apply` creates the deploy branch and retargets the bundled PRs, one write at a time, stops at the first failure. It never merges or opens the deploy PR.
 
 ## Next
 
@@ -50,7 +51,6 @@ Bigger or riskier, no order yet:
 - An execution mode that performs the merges. Opt-in, resumable, with a report. Never the default.
 - A GitHub Action and an MCP server on top of `--json`, so automation and AI agents can ask what is safe to merge and in what order.
 - Bump consumers automatically after a package release: wait for the new version to reach the feed, update the reference in the dependent repos, then release them. This writes to repos, so it ships as an opt-in mode.
-- A write mode that creates the day's deploy branch and retargets the PRs. Opt-in, explicit, never the default.
 - Check the package feed (GitHub Packages for NuGet, the npm registry) and block until the version appears.
 - Package detection for Go, Maven and Gradle.
 - Other forges.
