@@ -99,6 +99,11 @@ pub fn parse_pr(node: &Value) -> Option<Pr> {
         state: parse_state(node),
         title: text_field(node, "title"),
         url: text_field(node, "url"),
+        author: node
+            .pointer("/author/login")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
         body: text_field(node, "body"),
         head_ref: text_field(node, "headRefName"),
         base_ref: text_field(node, "baseRefName"),

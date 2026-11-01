@@ -65,6 +65,17 @@ Lanes are flattened into one list. The plan lets lanes run side by side, a seria
 
 Only ready PRs are items. Skipped PRs never appear.
 
+## Author filter
+
+With `--mine`, `--author` or `authors` in the config, the queue lists only the PRs of the chosen authors. The plan is still computed with every PR, so the order is the one the full plan gives. The filter only hides:
+
+- A hidden PR gets no `merge:` line and no `? ...` question line.
+- The `# wait:` lines of a visible PR still name a hidden PR it waits for.
+- A question about a hidden PR does not make the exit code `3`.
+- When nothing visible is left, stderr says `no PRs ready` and the exit code is `0`.
+
+Conflict comments are printed unless both PRs are hidden.
+
 ## Questions
 
 Each open question is one stderr line, printed before any exit:

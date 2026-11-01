@@ -3,8 +3,10 @@ use std::fmt::Write;
 use std::time::Duration;
 
 use crate::config::GateKind;
+use crate::conflicts::Conflict;
 use crate::elapsed;
-use crate::plan::{Plan, Stats};
+use crate::model::Question;
+use crate::plan::{Plan, SkippedOut, Stats};
 use crate::planner::{Item, Rule, is_late_rule};
 use crate::style::{bold, dim, green, paint, red, yellow};
 
@@ -118,6 +120,35 @@ fn criterion(scope: &str, deploy_branch: &str) -> String {
     }
 }
 
+fn handle(author: &str) -> String {
+    if author.is_empty() {
+        String::new()
+    } else {
+        dim(&format!(" @{author}"))
+    }
+}
+
+fn handle_width(author: &str) -> usize {
+    if author.is_empty() {
+        0
+    } else {
+        author.chars().count() + 2
+    }
+}
+
+fn id_cell(id: &str, author: &str, width: usize) -> String {
+    if author.is_empty() {
+        return bold(&pad(id, width));
+    }
+    let used = id.chars().count() + handle_width(author);
+    format!(
+        "{}{}{}",
+        bold(id),
+        handle(author),
+        " ".repeat(width.saturating_sub(used))
+    )
+}
+
 struct Widths {
     id: usize,
     layer: usize,
@@ -129,12 +160,14 @@ fn widths(plan: &Plan, names: &Names) -> Widths {
         id: plan
             .items
             .iter()
-            .map(|i| names.short(&i.id).chars().count())
+            .filter(|i| !i.hidden)
+            .map(|i| names.short(&i.id).chars().count() + handle_width(&i.author))
             .max()
             .unwrap_or(0),
         layer: plan
             .items
             .iter()
+            .filter(|i| !i.hidden)
             .filter_map(|i| i.layer.as_deref())
             .map(|l| l.chars().count() + 2)
             .max()
@@ -142,6 +175,7 @@ fn widths(plan: &Plan, names: &Names) -> Widths {
         scope: plan
             .items
             .iter()
+            .filter(|i| !i.hidden)
             .map(|i| scope_label(&i.scope).chars().count())
             .max()
             .unwrap_or(0),
@@ -168,7 +202,7 @@ fn item_line(out: &mut String, item: &Item, names: &Names, w: &Widths, marked: b
     let _ = writeln!(
         out,
         "  {step}{mark} {}  {layer} {scope}  {}",
-        bold(&pad(&names.short(&item.id), w.id)),
+        id_cell(&names.short(&item.id), &item.author, w.id),
         clip(&item.title, 52)
     );
 }
@@ -200,7 +234,8 @@ fn origin_section(out: &mut String, plan: &Plan, names: &Names) {
     let present: Vec<&str> = scopes
         .into_iter()
         .filter(|s| {
-            plan.items.iter().any(|i| i.scope == *s) || plan.skipped.iter().any(|k| k.scope == *s)
+            plan.items.iter().any(|i| !i.hidden && i.scope == *s)
+                || plan.skipped.iter().any(|k| !k.hidden && k.scope == *s)
         })
         .collect();
     if present.is_empty() {
@@ -212,8 +247,16 @@ fn origin_section(out: &mut String, plan: &Plan, names: &Names) {
         heading("36", "WHERE IT CAME FROM", "how each PR got into the queue")
     );
     for scope in present {
-        let ready: Vec<&Item> = plan.items.iter().filter(|i| i.scope == scope).collect();
-        let skipped = plan.skipped.iter().filter(|s| s.scope == scope).count();
+        let ready: Vec<&Item> = plan
+            .items
+            .iter()
+            .filter(|i| !i.hidden && i.scope == scope)
+            .collect();
+        let skipped = plan
+            .skipped
+            .iter()
+            .filter(|s| !s.hidden && s.scope == scope)
+            .count();
         let counts = if skipped > 0 {
             format!(
                 "{} ready, {}",
@@ -252,7 +295,7 @@ fn origin_section(out: &mut String, plan: &Plan, names: &Names) {
 }
 
 fn order_section(out: &mut String, plan: &Plan, names: &Names, by_id: &HashMap<&str, &Item>) {
-    if plan.items.is_empty() {
+    if plan.items.iter().all(|i| i.hidden) {
         return;
     }
     let _ = writeln!(
@@ -287,7 +330,11 @@ fn order_section(out: &mut String, plan: &Plan, names: &Names, by_id: &HashMap<&
         );
     }
     let mut stages: BTreeMap<usize, Vec<&Item>> = BTreeMap::new();
-    for item in plan.items.iter().filter(|i| !i.manual_pause || i.gate_late) {
+    for item in plan
+        .items
+        .iter()
+        .filter(|i| !i.hidden && (!i.manual_pause || i.gate_late))
+    {
         stages.entry(item.stage).or_default().push(item);
     }
     for (stage, items) in stages {
@@ -318,14 +365,22 @@ pub fn text(plan: &Plan) -> String {
     let mut out = String::new();
     let names = Names::new(plan);
     let w = widths(plan, &names);
-    let by_id: HashMap<&str, &Item> = plan.items.iter().map(|i| (i.id.as_str(), i)).collect();
-    let marked: HashMap<&str, usize> = plan.questions.iter().filter_map(|q| q.pr.as_deref()).fold(
-        HashMap::new(),
-        |mut acc, id| {
+    let by_id: HashMap<&str, &Item> = plan
+        .items
+        .iter()
+        .filter(|i| !i.hidden)
+        .map(|i| (i.id.as_str(), i))
+        .collect();
+    let visible_questions: Vec<&Question> = plan.questions.iter().filter(|q| !q.hidden).collect();
+    let visible_skipped: Vec<&SkippedOut> = plan.skipped.iter().filter(|s| !s.hidden).collect();
+    let ready_count = by_id.len();
+    let marked: HashMap<&str, usize> = visible_questions
+        .iter()
+        .filter_map(|q| q.pr.as_deref())
+        .fold(HashMap::new(), |mut acc, id| {
             *acc.entry(id).or_default() += 1;
             acc
-        },
-    );
+        });
 
     let _ = writeln!(
         out,
@@ -344,21 +399,21 @@ pub fn text(plan: &Plan) -> String {
         );
     }
     let _ = writeln!(out, "  {} {}", dim("orgs     "), plan.orgs.join(", "));
-    let skipped = if plan.skipped.is_empty() {
-        format!("{} skipped", plan.skipped.len())
+    let skipped = if visible_skipped.is_empty() {
+        format!("{} skipped", visible_skipped.len())
     } else {
-        yellow(&format!("{} skipped", plan.skipped.len()))
+        yellow(&format!("{} skipped", visible_skipped.len()))
     };
-    let questions = if plan.questions.is_empty() {
-        format!("{} questions", plan.questions.len())
+    let questions = if visible_questions.is_empty() {
+        format!("{} questions", visible_questions.len())
     } else {
-        red(&format!("{} questions", plan.questions.len()))
+        red(&format!("{} questions", visible_questions.len()))
     };
     let _ = writeln!(
         out,
         "  {} {}, {}, {}",
         dim("found    "),
-        green(&format!("{} ready", plan.items.len())),
+        green(&format!("{ready_count} ready")),
         skipped,
         questions
     );
@@ -395,6 +450,19 @@ pub fn text(plan: &Plan) -> String {
             plan.stats.elapsed_ms
         )))
     );
+    if plan.stats.hidden_by_author > 0 {
+        let noun = if plan.stats.hidden_by_author == 1 {
+            "PR"
+        } else {
+            "PRs"
+        };
+        let _ = writeln!(
+            out,
+            "  {} {}",
+            dim("hidden   "),
+            dim(&format!("{} {noun} by others", plan.stats.hidden_by_author))
+        );
+    }
 
     if plan.items.is_empty() {
         let _ = writeln!(out, "\n{}", yellow("Nothing ready to plan."));
@@ -410,7 +478,7 @@ pub fn text(plan: &Plan) -> String {
     origin_section(&mut out, plan, &names);
     order_section(&mut out, plan, &names, &by_id);
 
-    if !plan.gate.is_empty() {
+    if plan.gate.iter().any(|id| by_id.contains_key(id.as_str())) {
         let all_late = plan
             .gate
             .iter()
@@ -466,6 +534,9 @@ pub fn text(plan: &Plan) -> String {
     }
 
     for (n, lane) in plan.lanes.iter().enumerate() {
+        if !lane.iter().any(|id| by_id.contains_key(id.as_str())) {
+            continue;
+        }
         let _ = writeln!(out, "\n{}", paint("1;36", &format!("LANE {}", n + 1)));
         for id in lane {
             if let Some(item) = by_id.get(id.as_str()) {
@@ -533,7 +604,12 @@ pub fn text(plan: &Plan) -> String {
         }
     }
 
-    if !plan.conflicts.is_empty() {
+    let conflicts: Vec<&Conflict> = plan
+        .conflicts
+        .iter()
+        .filter(|c| !plan.is_hidden(&c.a) || !plan.is_hidden(&c.b))
+        .collect();
+    if !conflicts.is_empty() {
         let _ = writeln!(
             out,
             "\n{}",
@@ -543,7 +619,7 @@ pub fn text(plan: &Plan) -> String {
                 "same repo, same files; the order does not change"
             )
         );
-        for c in &plan.conflicts {
+        for c in conflicts {
             let _ = writeln!(
                 out,
                 "  {} and {}  {} ({})",
@@ -556,17 +632,18 @@ pub fn text(plan: &Plan) -> String {
         }
     }
 
-    if !plan.skipped.is_empty() {
+    if !visible_skipped.is_empty() {
         let _ = writeln!(
             out,
             "\n{}",
             heading("33", "SKIPPED", "not ready, left out of the plan")
         );
-        for s in &plan.skipped {
+        for s in visible_skipped {
             let _ = writeln!(
                 out,
-                "  {}  {}  {}  {}",
+                "  {}{}  {}  {}  {}",
                 bold(&names.short(&s.id)),
+                handle(&s.author),
                 dim(&clip(&s.title, 40)),
                 scope_paint(
                     &s.scope,
@@ -577,13 +654,13 @@ pub fn text(plan: &Plan) -> String {
         }
     }
 
-    if !plan.questions.is_empty() {
+    if !visible_questions.is_empty() {
         let _ = writeln!(
             out,
             "\n{}",
             heading("31", "?  QUESTIONS", "the planner could not decide these")
         );
-        for q in &plan.questions {
+        for q in visible_questions {
             let who = q.pr.as_deref().map(|id| names.short(id));
             let _ = writeln!(
                 out,

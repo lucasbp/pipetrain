@@ -92,7 +92,7 @@ fn flattened(plan: &Plan) -> Vec<&Item> {
     let mut rest: Vec<&Item> = plan
         .items
         .iter()
-        .filter(|i| !i.manual_pause || i.gate_late)
+        .filter(|i| !i.hidden && (!i.manual_pause || i.gate_late))
         .collect();
     rest.sort_by_key(|i| order_key(i));
     rest
@@ -103,7 +103,7 @@ fn gated(plan: &Plan) -> Vec<&Item> {
         .gate
         .iter()
         .filter_map(|id| plan.items.iter().find(|i| i.id == *id))
-        .filter(|i| !i.gate_late)
+        .filter(|i| !i.gate_late && !i.hidden)
         .collect();
     gate.sort_by_key(|i| order_key(i));
     gate
@@ -156,7 +156,12 @@ pub fn queue_lines(plan: &Plan) -> Vec<String> {
     if lines.is_empty() {
         return lines;
     }
-    let mut out: Vec<String> = plan.conflicts.iter().map(conflict_line).collect();
+    let mut out: Vec<String> = plan
+        .conflicts
+        .iter()
+        .filter(|c| !plan.is_hidden(&c.a) || !plan.is_hidden(&c.b))
+        .map(conflict_line)
+        .collect();
     out.extend(plan.bundles.iter().map(bundle_line));
     out.extend(lines);
     out
@@ -165,12 +170,13 @@ pub fn queue_lines(plan: &Plan) -> Vec<String> {
 pub fn question_lines(plan: &Plan) -> Vec<String> {
     plan.questions
         .iter()
+        .filter(|q| !q.hidden)
         .map(|q| format!("? {}: {}", q.pr.as_deref().unwrap_or(REPO_LEVEL), q.message))
         .collect()
 }
 
 pub fn exit_code(plan: &Plan) -> i32 {
-    if plan.questions.is_empty() {
+    if plan.questions.iter().all(|q| q.hidden) {
         0
     } else {
         EXIT_QUESTIONS

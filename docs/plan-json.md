@@ -30,6 +30,9 @@ The structs live in `src/plan.rs` (`Plan`, `SkippedOut`, `Stats`), `src/bundle.r
 | `questions` | Question[] | What the planner could not decide. Discovery and scan questions come first, then planner questions. |
 | `notes` | string[] | Informational lines. Today only `X depends on Y, already merged`. |
 | `stats` | Stats | Request budget and parallelism figures. |
+| `shown_authors` | string[] (optional) | Lowercase logins the author filter keeps visible. Present only when a filter is on. |
+
+The author filter (`--mine`, `--author`, `authors` in the config) only hides. `shown_authors`, `hidden` and `stats.hidden_by_author` are absent without a filter, so an unfiltered plan is byte for byte the same as before.
 
 ## Item
 
@@ -43,6 +46,8 @@ One ready PR.
 | `number` | integer | PR number. |
 | `title` | string | PR title. |
 | `url` | string | PR web URL. |
+| `author` | string (optional) | The GitHub login of the PR author. Omitted when unknown. |
+| `hidden` | boolean (optional) | `true` when the author filter hides this PR. Omitted otherwise. A hidden item keeps its place in `items`, `lanes` and `gate`, because the plan is computed with every author. |
 | `head` | string | Head branch. |
 | `base` | string | Base branch. |
 | `sha` | string | Head commit SHA read at plan time. |
@@ -103,6 +108,8 @@ A file-overlap report between two ready PRs of the same repo: a hint that they m
 | `id` | string | `org/repo#number`. |
 | `title` | string | PR title. |
 | `url` | string | PR web URL. |
+| `author` | string (optional) | The GitHub login of the PR author. Omitted when unknown. |
+| `hidden` | boolean (optional) | `true` when the author filter hides this PR. Omitted otherwise. |
 | `scope` | string | `train`, `shared-branch`, `into-train`, `explicit` or `released`. |
 | `head` | string | The head branch of the skipped PR, so a `shared-branch` skip can be traced to the branch name that matched. |
 | `reasons` | string[] | One or more of: `already merged`, `closed`, `draft`, `changes requested`, `review required`, `not approved`, `checks pending`, `checks failing`, `checks failing: <names>`, `no checks reported`, `merge conflict`, `mergeability unknown, retry in a minute`, `already in <ref>`, `already in <ref> (same content)`. A merged or closed PR carries only that one reason. `already in <ref>` also stands alone, where `<ref>` is the branch that already contains the PR head: its base branch, or `deploy_branch`. `already in <ref> (same content)` stands alone too: every file the PR changes has identical content in `<ref>`, though the commits differ (for example after a squash merge). `checks failing: <names>` lists the failing checks, for example `checks failing: build, test`: sorted, at most 5 names and then `, +N more`; the plain `checks failing` stays when GitHub gives no name. These are the only reasons with a variable part, so match them by the `already in ` and `checks failing` prefixes; the `(same content)` suffix tells the two `already in` forms apart. |
@@ -115,6 +122,7 @@ A file-overlap report between two ready PRs of the same repo: a hint that they m
 | `code` | string | Stable identifier. Full list and meaning in `planner.md`. |
 | `message` | string | What is undecided. Free text. |
 | `hint` | string | How to resolve it. Free text. |
+| `hidden` | boolean (optional) | `true` when the question is about a PR hidden by the author filter. Omitted otherwise. A question without a PR is never hidden. |
 
 Consumers should switch on `code`, never on `message` or `hint`.
 
@@ -132,6 +140,7 @@ Consumers should switch on `code`, never on `message` or `hint`.
 | `cache_hits` | integer | Lookups answered by the local cache. `0` with `--no-cache` or `--refresh`. |
 | `cache_misses` | integer | Lookups the cache could not answer, so they went to GitHub. `0` with `--no-cache`. |
 | `elapsed_ms` | integer | Milliseconds of wall clock from the start of the command until the data was gathered, before rendering. |
+| `hidden_by_author` | integer (optional) | How many PRs (items and skipped) are hidden by the author filter. Omitted when `0`. |
 
 ## Example
 

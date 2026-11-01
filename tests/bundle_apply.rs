@@ -35,6 +35,7 @@ fn pr(number: u64) -> Pr {
         review: Review::Approved,
         checks: Checks::Success,
         conflicting: false,
+        author: String::new(),
         failed_checks: Vec::new(),
         mergeable_unknown: false,
         files: Vec::new(),

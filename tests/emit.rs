@@ -186,12 +186,14 @@ fn open_questions_give_exit_code_3_and_question_lines() {
         code: "gate-has-predecessor".to_string(),
         message: "needs a decision".to_string(),
         hint: "decide".to_string(),
+        hidden: false,
     });
     plan.questions.push(Question {
         pr: None,
         code: "tree-truncated".to_string(),
         message: "tree too large".to_string(),
         hint: "pin it".to_string(),
+        hidden: false,
     });
     assert_eq!(emit::exit_code(&plan), 3);
     assert_eq!(
@@ -408,6 +410,7 @@ fn late_pr(slug: &str, number: u64, head: &str) -> Pr {
         review: Review::Approved,
         checks: Checks::Success,
         conflicting: false,
+        author: String::new(),
         failed_checks: Vec::new(),
         mergeable_unknown: false,
         files: Vec::new(),

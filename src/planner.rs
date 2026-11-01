@@ -66,6 +66,8 @@ pub struct Item {
     pub number: u64,
     pub title: String,
     pub url: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub author: String,
     pub head: String,
     pub base: String,
     pub sha: String,
@@ -81,6 +83,8 @@ pub struct Item {
     pub stage: usize,
     pub lane: Option<usize>,
     pub after: Vec<Dependency>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
 }
 
 pub struct PlanInput<'a> {
@@ -639,6 +643,7 @@ pub fn plan(input: PlanInput<'_>) -> Planned {
                 number: pr.key.number,
                 title: pr.title.clone(),
                 url: pr.url.clone(),
+                author: pr.author.clone(),
                 head: pr.head_ref.clone(),
                 base: pr.base_ref.clone(),
                 sha: pr.head_sha.clone(),
@@ -652,6 +657,7 @@ pub fn plan(input: PlanInput<'_>) -> Planned {
                 stage: stages[i],
                 lane: lane_of[i].map(|l| l + 1),
                 after,
+                hidden: false,
             }
         })
         .collect();

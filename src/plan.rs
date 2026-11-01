@@ -13,14 +13,22 @@ use crate::publishers::{Publishers, References};
 
 pub const SCHEMA: u32 = 1;
 
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
 #[derive(Debug, Serialize)]
 pub struct SkippedOut {
     pub id: String,
     pub title: String,
     pub url: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub author: String,
     pub scope: String,
     pub head: String,
     pub reasons: Vec<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -35,6 +43,8 @@ pub struct Stats {
     pub cache_hits: u32,
     pub cache_misses: u32,
     pub elapsed_ms: u64,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub hidden_by_author: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -52,6 +62,8 @@ pub struct Plan {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile: Option<ProfileInfo>,
     pub orgs: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shown_authors: Option<Vec<String>>,
     pub items: Vec<Item>,
     pub gate: Vec<String>,
     pub lanes: Vec<Vec<String>>,
@@ -87,9 +99,11 @@ fn skipped_out(skipped: Vec<Skipped>) -> Vec<SkippedOut> {
             id: s.pr.key.to_string(),
             title: s.pr.title,
             url: s.pr.url,
+            author: s.pr.author,
             scope: s.scope.as_str().to_string(),
             head: s.pr.head_ref,
             reasons: s.reasons,
+            hidden: false,
         })
         .collect();
     out.sort_by(|a, b| a.id.cmp(&b.id));
@@ -158,6 +172,7 @@ pub fn build(rules: &Rules, gathered: Gathered) -> Plan {
         deploy_branch: gathered.deploy_branch,
         profile: None,
         orgs: gathered.orgs,
+        shown_authors: None,
         items: planned.items,
         gate: planned.gate,
         lanes: planned.lanes,
@@ -177,6 +192,40 @@ pub fn build(rules: &Rules, gathered: Gathered) -> Plan {
             cache_hits: 0,
             cache_misses: 0,
             elapsed_ms: 0,
+            hidden_by_author: 0,
         },
     }
+}
+
+impl Plan {
+    pub fn is_hidden(&self, id: &str) -> bool {
+        self.items.iter().any(|i| i.id == id && i.hidden)
+            || self.skipped.iter().any(|s| s.id == id && s.hidden)
+    }
+}
+
+pub fn hide_other_authors(plan: &mut Plan, logins: &[String]) {
+    let wanted: BTreeSet<String> = logins.iter().map(|l| l.to_lowercase()).collect();
+    let is_hidden = |author: &str| !author.is_empty() && !wanted.contains(&author.to_lowercase());
+    let mut hidden_ids = BTreeSet::new();
+    for item in &mut plan.items {
+        item.hidden = is_hidden(&item.author);
+        if item.hidden {
+            hidden_ids.insert(item.id.clone());
+        }
+    }
+    for skipped in &mut plan.skipped {
+        skipped.hidden = is_hidden(&skipped.author);
+        if skipped.hidden {
+            hidden_ids.insert(skipped.id.clone());
+        }
+    }
+    for question in &mut plan.questions {
+        question.hidden = question
+            .pr
+            .as_ref()
+            .is_some_and(|pr| hidden_ids.contains(pr));
+    }
+    plan.stats.hidden_by_author = hidden_ids.len();
+    plan.shown_authors = Some(wanted.into_iter().collect());
 }

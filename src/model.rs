@@ -86,6 +86,7 @@ pub struct Pr {
     pub state: PrState,
     pub title: String,
     pub url: String,
+    pub author: String,
     pub body: String,
     pub head_ref: String,
     pub base_ref: String,
@@ -170,6 +171,8 @@ pub struct Question {
     pub code: String,
     pub message: String,
     pub hint: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
 }
 
 impl Question {
@@ -179,6 +182,7 @@ impl Question {
             code: code.to_string(),
             message,
             hint: hint.to_string(),
+            hidden: false,
         }
     }
 }

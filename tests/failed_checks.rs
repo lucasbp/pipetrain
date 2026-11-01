@@ -27,6 +27,7 @@ fn pr_with(failed: &[&str]) -> Pr {
         is_draft: false,
         review: Review::Approved,
         checks: Checks::Failure,
+        author: String::new(),
         failed_checks: failed.iter().map(|n| n.to_string()).collect(),
         conflicting: false,
         mergeable_unknown: false,

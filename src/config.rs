@@ -48,6 +48,7 @@ pub fn validate_date_format(format: &str) -> Result<()> {
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub orgs: Vec<String>,
+    pub authors: Vec<String>,
     pub max_parallel: usize,
     pub train_prefix: String,
     pub train_date_format: String,
@@ -89,6 +90,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             orgs: Vec::new(),
+            authors: Vec::new(),
             max_parallel: 4,
             train_prefix: "deploy/".to_string(),
             train_date_format: DEFAULT_TRAIN_DATE_FORMAT.to_string(),

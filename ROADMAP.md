@@ -32,6 +32,7 @@ pipetrain plans the merge order of pull requests across repos. This file says wh
 - The `# wait` comment names the version the consumer bumps to, read from the consumer PR's manifest diff, and `--json` carries it as `after[].version`. Checking the package feed stays under Later.
 - A read-only conflict report: PRs of the same repo that change the same files, with the kind of file (lockfile, sql, generated, other), in the text output, `--json` (`conflicts`) and as `# conflict:` lines in the queue. The reason of a PR skipped for failing checks names the failing checks.
 - `pipetrain bundle`: dry run by default, `--apply` creates the deploy branch and retargets the bundled PRs, one write at a time, stops at the first failure. It never merges or opens the deploy PR.
+- PR author in the output and a filter for your own PRs (--mine, --author, authors in the config): the plan is computed with everyone and the PRs of other authors are only hidden, so the order stays right.
 
 ## Next
 

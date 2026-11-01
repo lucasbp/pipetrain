@@ -31,7 +31,7 @@ fn encode_path(text: &str) -> String {
     out
 }
 
-const PR_FIELDS: &str = "number title url body headRefName baseRefName baseRef { target { oid } } headRefOid isDraft state reviewDecision mergeable repository { name owner { login } } latestOpinionatedReviews(first: 20, writersOnly: true) { nodes { state } } commits(last: 1) { nodes { commit { statusCheckRollup { state contexts(first: 100) { nodes { __typename ... on CheckRun { name conclusion } ... on StatusContext { context state } } } } } } }";
+const PR_FIELDS: &str = "number title url body headRefName baseRefName baseRef { target { oid } } headRefOid isDraft state reviewDecision mergeable author { login } repository { name owner { login } } latestOpinionatedReviews(first: 20, writersOnly: true) { nodes { state } } commits(last: 1) { nodes { commit { statusCheckRollup { state contexts(first: 100) { nodes { __typename ... on CheckRun { name conclusion } ... on StatusContext { context state } } } } } } }";
 
 impl Client {
     pub fn open_prs(&mut self, org: &str) -> Result<Vec<Pr>> {
@@ -62,6 +62,19 @@ impl Client {
                 .unwrap_or(Value::Null);
         }
         Ok(all)
+    }
+
+    pub fn viewer_login(&mut self) -> Result<String> {
+        let response = self.graphql(
+            "read the token's login",
+            "query { viewer { login } }",
+            json!({}),
+        )?;
+        response
+            .pointer("/data/viewer/login")
+            .and_then(|v| v.as_str())
+            .map(str::to_lowercase)
+            .ok_or_else(|| anyhow!("GitHub did not return the login of the token"))
     }
 
     pub fn pr(&mut self, key: &PrKey) -> Result<Option<Pr>> {

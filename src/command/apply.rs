@@ -149,7 +149,12 @@ fn retarget_action(bundle: &Bundle, item: &Item) -> Action {
     }
 }
 
-fn retargets(plan: &Plan, bundle: &Bundle) -> Result<Vec<Action>> {
+struct Retargets {
+    actions: Vec<Action>,
+    left_alone: Vec<String>,
+}
+
+fn retargets(plan: &Plan, bundle: &Bundle) -> Result<Retargets> {
     if bundle.branch.is_empty() || bundle.branch == bundle.base {
         bail!(
             "refusing to bundle {}: the deploy branch `{}` must be set and differ from the base `{}`",
@@ -158,26 +163,44 @@ fn retargets(plan: &Plan, bundle: &Bundle) -> Result<Vec<Action>> {
             bundle.base
         );
     }
-    bundle
-        .retarget
-        .iter()
-        .map(|id| {
-            let item = plan
-                .items
-                .iter()
-                .find(|item| &item.id == id)
-                .ok_or_else(|| anyhow!("{id} is in the bundle but not in the plan"))?;
-            Ok(retarget_action(bundle, item))
-        })
-        .collect()
+    let mut actions = Vec::new();
+    let mut left_alone = Vec::new();
+    for id in &bundle.retarget {
+        let item = plan
+            .items
+            .iter()
+            .find(|item| &item.id == id)
+            .ok_or_else(|| anyhow!("{id} is in the bundle but not in the plan"))?;
+        if item.hidden {
+            left_alone.push(id.clone());
+        } else {
+            actions.push(retarget_action(bundle, item));
+        }
+    }
+    Ok(Retargets {
+        actions,
+        left_alone,
+    })
 }
 
-fn assemble(bundle: &Bundle, retargets: Vec<Action>, client: &mut Client) -> Result<BundleReport> {
+fn left_alone_note(ids: &[String]) -> Option<String> {
+    if ids.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{} {} by others left alone: {}",
+        ids.len(),
+        if ids.len() == 1 { "PR" } else { "PRs" },
+        ids.join(", ")
+    ))
+}
+
+fn assemble(bundle: &Bundle, found: Retargets, client: &mut Client) -> Result<BundleReport> {
     let mut actions = Vec::new();
-    let mut note = None;
+    let mut notes = Vec::new();
     match &bundle.existing_train_pr {
         Some(pr) => {
-            note = Some(format!(
+            notes.push(format!(
                 "branch exists: {} is the head of {pr}",
                 bundle.branch
             ));
@@ -198,24 +221,37 @@ fn assemble(bundle: &Bundle, retargets: Vec<Action>, client: &mut Client) -> Res
             });
         }
     }
-    actions.extend(retargets);
+    actions.extend(found.actions);
+    notes.extend(left_alone_note(&found.left_alone));
     Ok(BundleReport {
         repo: bundle.repo.clone(),
         base: bundle.base.clone(),
         branch: bundle.branch.clone(),
         actions,
-        note,
+        note: if notes.is_empty() {
+            None
+        } else {
+            Some(notes.join("; "))
+        },
     })
 }
 
 fn prepare(plan: &Plan, client: &mut Client) -> Result<Report> {
     let mut drafts = Vec::new();
     for bundle in &plan.bundles {
-        drafts.push((bundle, retargets(plan, bundle)?));
+        let found = retargets(plan, bundle)?;
+        let nothing_yours = found.actions.is_empty()
+            && !found.left_alone.is_empty()
+            && bundle.existing_train_pr.is_none();
+        if nothing_yours {
+            eprintln!("skipped bundle {}: none of its PRs is yours", bundle.repo);
+            continue;
+        }
+        drafts.push((bundle, found));
     }
     let mut bundles = Vec::new();
-    for (bundle, actions) in drafts {
-        bundles.push(assemble(bundle, actions, client)?);
+    for (bundle, found) in drafts {
+        bundles.push(assemble(bundle, found, client)?);
     }
     Ok(Report {
         schema: 1,

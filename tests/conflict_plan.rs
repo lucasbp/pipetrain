@@ -24,6 +24,7 @@ fn pr(slug: &str, number: u64, head: &str, paths: &[&str]) -> Pr {
         is_draft: false,
         review: Review::Approved,
         checks: Checks::Success,
+        author: String::new(),
         failed_checks: Vec::new(),
         conflicting: false,
         mergeable_unknown: false,

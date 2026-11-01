@@ -6,6 +6,7 @@ use anyhow::{Result, bail};
 use chrono::{Local, NaiveDate, SecondsFormat};
 
 use crate::cache::{Cache, CacheMode};
+use crate::command::authors::{self as author_filter, AuthorFilter};
 use crate::config::{Config, Rules, render_date};
 use crate::contained;
 use crate::content;
@@ -22,6 +23,7 @@ use crate::publishers::{self, Publishers, References};
 use crate::render;
 
 pub mod apply;
+pub mod authors;
 pub mod init;
 pub mod order;
 pub mod orgs;
@@ -38,6 +40,7 @@ pub struct PlanOptions {
     pub config: Option<PathBuf>,
     pub profile: Option<String>,
     pub orgs: Vec<String>,
+    pub authors: AuthorFilter,
     pub date: Option<String>,
     pub verbose: bool,
     pub cache: CacheMode,
@@ -366,6 +369,10 @@ pub(crate) fn build_plan(opts: &PlanOptions) -> Result<(Plan, Client)> {
     let gathered = into_gathered(&cfg, &explicit, train, deploy_branch, &client, collected);
     let mut built = plan::build(&rules, gathered);
     built.profile = Some(profile);
+    let logins = author_filter::resolve(&opts.authors.effective(&cfg), &mut client)?;
+    if !logins.is_empty() {
+        plan::hide_other_authors(&mut built, &logins);
+    }
     built.stats.cache_hits = client.cache_hits();
     built.stats.cache_misses = client.cache_misses();
     built.stats.elapsed_ms = elapsed::millis(started.elapsed());

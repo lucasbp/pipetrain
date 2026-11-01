@@ -146,6 +146,9 @@ pipetrain plan [OPTIONS] [PRS]...
 | `--profile <name>` | Profile to use. Without it the choice follows [the rules below](#profiles). |
 | `--org <org>` | Org to look at. Repeatable. Overrides `orgs` of the selected profile. |
 | `--date <date>` | Train date, instead of today. Accepts the date format of `train_date_format` (default `dd-mm-yyyy`, for example `--date 29-10-2026`) or ISO `yyyy-mm-dd` (`--date 2026-10-29`). |
+| `--mine` | On `plan` and `bundle`. Show only PRs by the token's own login. See [Only your PRs](#only-your-prs). Cannot be combined with `--all-authors`. |
+| `--author <login>` | On `plan` and `bundle`. Show only PRs by this author; repeatable, `@me` is you. Cannot be combined with `--all-authors`. |
+| `--all-authors` | On `plan` and `bundle`. Ignore the authors set in the config and show every author. |
 | `--verbose` | Log every API request to stderr. |
 | `--no-cache` | Neither read nor write the [local cache](#local-cache). Cannot be combined with `--refresh`. |
 | `--refresh` | Ignore what the cache has, fetch it again and rewrite it. Cannot be combined with `--no-cache`. |
@@ -243,7 +246,7 @@ After applying, run `pipetrain plan` again: the retargeted PRs now sit on the de
 
 ## Example output
 
-An invented run for the org `acme`, shown without colors (what `--color never` prints). When a plan has a single org, the `acme/` prefix is dropped from PR names:
+An invented run for the org `acme`, shown without colors (what `--color never` prints). When a plan has a single org, the `acme/` prefix is dropped from PR names. PRs show their author as a dim `@login` right after the name:
 
 ```
 pipetrain plan  (read-only, nothing was merged)
@@ -402,6 +405,20 @@ The profile is chosen by the first rule that applies:
 `folders` is only allowed inside a profile, paths are absolute and not expanded (no `~`), and the same folder cannot be listed in two profiles. Profiles are never merged. `--org` replaces the `orgs` of the selected profile. The text report starts with a line such as `profile acme (from the working folder)`, and `--json` carries `profile {name, source}` with `source` one of `flag`, `args`, `folder`, `default` or `only`.
 
 `pipetrain profiles` shows what applies from the current folder, `pipetrain orgs` lists the orgs your token can see and which profile has each, and `pipetrain init` prints a proposed config with one profile per visible org. `init --write` creates the file only when it does not exist yet, unless `--force` is given.
+
+### Only your PRs
+
+The plan is always computed with every PR, because the order of your PRs can depend on a PR from someone else. The author filter runs at the end and only hides: the text, the queue and the exit code skip the PRs of other authors, while `--json` keeps them marked `hidden`.
+
+```
+pipetrain plan --mine
+pipetrain plan --author alice --author @me
+pipetrain plan --all-authors
+```
+
+`--mine` is `--author @me`, and `@me` is the login of the token. Logins are compared ignoring case. The same filter can live in the config as `authors = ["@me"]`, top level or per profile, and a profile value replaces the shared one. The precedence is the command line, then the config, then no filter; `--all-authors` forces no filter even when the config sets `authors`.
+
+With a filter on, the text report starts with a line such as `hidden    3 PRs by others`, and a `# wait:` line of the queue still names a hidden PR when your PR has to wait for it. A hidden PR never makes `--emit queue` exit 3. `pipetrain bundle` retargets only the visible PRs, notes `N PRs by others left alone: <ids>`, and drops a bundle with none of your PRs and no existing train PR (`skipped bundle <repo>: none of its PRs is yours` on stderr). Reading the token's login costs one extra API request, and only when `@me` or `--mine` is used. Fields in the JSON are in [docs/plan-json.md](docs/plan-json.md).
 
 ### Config order
 

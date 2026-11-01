@@ -6,6 +6,7 @@ use clap::{Parser, Subcommand};
 
 use pipetrain::cache::CacheMode;
 use pipetrain::command::apply::{self, ApplyOptions};
+use pipetrain::command::authors::AuthorFilter;
 use pipetrain::command::init::{self, InitOptions};
 use pipetrain::command::order::{self, OrderOptions};
 use pipetrain::command::orgs::{self, OrgsOptions};
@@ -163,6 +164,23 @@ struct PlanArgs {
     )]
     all: bool,
 
+    #[arg(long, help = "Show only PRs by the token's own login")]
+    mine: bool,
+
+    #[arg(
+        long = "author",
+        value_name = "LOGIN",
+        help = "Show only PRs by this author; repeatable, @me is you"
+    )]
+    authors: Vec<String>,
+
+    #[arg(
+        long,
+        conflicts_with_all = ["mine", "authors"],
+        help = "Ignore the authors set in the config and show every author"
+    )]
+    all_authors: bool,
+
     #[arg(long, help = "Print the plan as JSON")]
     json: bool,
 
@@ -237,6 +255,23 @@ struct BundleArgs {
         help = "Look at every approved open PR in the orgs, whatever its branch"
     )]
     all: bool,
+
+    #[arg(long, help = "Show only PRs by the token's own login")]
+    mine: bool,
+
+    #[arg(
+        long = "author",
+        value_name = "LOGIN",
+        help = "Show only PRs by this author; repeatable, @me is you"
+    )]
+    authors: Vec<String>,
+
+    #[arg(
+        long,
+        conflicts_with_all = ["mine", "authors"],
+        help = "Ignore the authors set in the config and show every author"
+    )]
+    all_authors: bool,
 
     #[arg(
         long,
@@ -360,6 +395,7 @@ fn run_plan(args: PlanArgs) -> Result<i32> {
         config: args.config,
         profile: args.profile,
         orgs: args.orgs,
+        authors: AuthorFilter::from_flags(args.mine, args.authors, args.all_authors),
         date: args.date,
         verbose: args.verbose,
         cache: CacheMode::from_flags(args.no_cache, args.refresh),
@@ -378,6 +414,7 @@ fn run_bundle(args: BundleArgs) -> Result<i32> {
             config: args.config,
             profile: args.profile,
             orgs: args.orgs,
+            authors: AuthorFilter::from_flags(args.mine, args.authors, args.all_authors),
             date: args.date,
             verbose: args.verbose,
             cache: CacheMode::from_flags(args.no_cache, args.refresh),

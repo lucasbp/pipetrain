@@ -25,6 +25,10 @@ allow_missing_checks = false
 # Repos (org/repo globs) where missing checks are accepted (example).
 checks_optional_repos = ["acme/docs-*"]
 
+# Show only the PRs of these authors; "@me" is the login of the token. The plan
+# is still computed with everyone, the others are only hidden (example).
+# authors = ["@me"]
+
 # Layers, in merge order: the first [[layer]] goes first. Repos are
 # case-insensitive globs matched against "org/repo" (example).
 [[layer]]
