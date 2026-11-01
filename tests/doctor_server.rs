@@ -282,23 +282,34 @@ fn a_plain_403_fails_the_api_check() {
     assert_eq!(report::exit_code(&checks), 1);
 }
 
+fn first_refused<T>(attempt: impl Fn(&str) -> Option<T>) -> T {
+    for _ in 0..20 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        if let Some(outcome) = attempt(&base) {
+            return outcome;
+        }
+    }
+    panic!("every freed port was taken by another test before the request");
+}
+
 #[test]
 fn a_refused_connection_is_a_network_error() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    drop(listener);
-    let error = client(&base)
-        .query("viewer", "query { viewer { login } }", json!({}))
-        .unwrap_err();
+    let error = first_refused(|base| {
+        client(base)
+            .query("viewer", "query { viewer { login } }", json!({}))
+            .err()
+    });
     assert!(matches!(error, ApiError::Network));
 }
 
 #[test]
 fn a_refused_connection_fails_the_api_check_with_the_connectivity_fix() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    drop(listener);
-    let checks = remote(client(&base), &orgs(&["acme"]));
+    let checks = first_refused(|base| {
+        let checks = remote(client(base), &orgs(&["acme"]));
+        (checks[0].status == Status::Fail).then_some(checks)
+    });
     assert_eq!(checks[0].status, Status::Fail);
     assert_eq!(checks[0].fix, Some(hint::connectivity_fix()));
     assert_eq!(checks.len(), 3);

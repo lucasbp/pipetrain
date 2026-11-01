@@ -195,14 +195,16 @@ fn echoed_token_never_reaches_the_error() {
 
 #[test]
 fn refused_connection_is_a_network_error() {
-    let port = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let base = format!("http://127.0.0.1:{port}");
-    let error = client(&base).get("/x").unwrap_err();
-    assert_eq!(error, ApiError::Network);
+    for _ in 0..20 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        if let Err(error) = client(&base).get("/x") {
+            assert_eq!(error, ApiError::Network);
+            return;
+        }
+    }
+    panic!("every freed port was taken by another test before the request");
 }
 
 #[test]
