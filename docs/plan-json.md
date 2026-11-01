@@ -116,6 +116,7 @@ Consumers should switch on `code`, never on `message` or `hint`.
 | `deploys_after` | integer | `deploys_now - deploys_saved`: the deploys if every suggestion is applied. |
 | `cache_hits` | integer | Lookups answered by the local cache. `0` with `--no-cache` or `--refresh`. |
 | `cache_misses` | integer | Lookups the cache could not answer, so they went to GitHub. `0` with `--no-cache`. |
+| `elapsed_ms` | integer | Milliseconds of wall clock from the start of the command until the data was gathered, before rendering. |
 
 ## Example
 
@@ -163,7 +164,8 @@ Consumers should switch on `code`, never on `message` or `hint`.
     "deploys_now": 1,
     "deploys_after": 1,
     "cache_hits": 0,
-    "cache_misses": 0
+    "cache_misses": 0,
+    "elapsed_ms": 14600
   }
 }
 ```

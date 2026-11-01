@@ -1,11 +1,13 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 
 use super::resolve;
 use crate::cache::{Cache, CacheMode};
 use crate::config::Config;
+use crate::elapsed;
 use crate::emit::{EXIT_QUESTIONS, REPO_LEVEL};
 use crate::github::{self, ApiError, Client};
 use crate::model::Question;
@@ -170,6 +172,7 @@ pub fn suggest(client: &mut Client, names: &Names) -> Result<Suggestion> {
 }
 
 pub fn run(opts: OrderOptions) -> Result<i32> {
+    let started = Instant::now();
     let (cfg, _) = resolve::load(opts.config.as_deref(), opts.profile.as_deref(), &[], &[])?;
     let (exact, globs) = configured(&cfg);
     let from_config = opts.repos.is_empty();
@@ -193,18 +196,33 @@ pub fn run(opts: OrderOptions) -> Result<i32> {
     for line in &suggestion.stderr {
         eprintln!("{line}");
     }
-    eprintln!("{}", requests_line(&client));
+    eprintln!(
+        "{}",
+        requests_line(client.requests(), client.cache_hits(), started.elapsed())
+    );
     Ok(suggestion.exit)
 }
 
-fn requests_line(client: &Client) -> String {
-    if client.cache_hits() > 0 {
-        format!(
-            "{} requests, {} from cache",
-            client.requests(),
-            client.cache_hits()
-        )
+fn requests_line(requests: u32, cache_hits: u32, elapsed: Duration) -> String {
+    let took = elapsed::format(elapsed);
+    if cache_hits > 0 {
+        format!("{requests} requests in {took}, {cache_hits} from cache")
     } else {
-        format!("{} requests", client.requests())
+        format!("{requests} requests in {took}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_request_line_shows_the_time_and_the_cache_hits() {
+        let took = Duration::from_millis(3_200);
+        assert_eq!(requests_line(9, 0, took), "9 requests in 3.2 s");
+        assert_eq!(
+            requests_line(9, 4, took),
+            "9 requests in 3.2 s, 4 from cache"
+        );
     }
 }

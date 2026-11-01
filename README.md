@@ -201,6 +201,7 @@ pipetrain plan  (read-only, nothing was merged)
   parallel  peak 3 at once (cap 4)
   deploys   8 now, 7 after bundling
   api       23 requests, 4811 left
+  time      14.6 s
 
 WHERE IT CAME FROM  how each PR got into the queue
   ● train   1 ready, 1 skipped  head is deploy/29-10-2026
@@ -382,7 +383,7 @@ GitHub counts the REST API (`core`) and GraphQL separately, and the guard follow
 
 Redirects are not followed. GitHub answers a renamed or moved repo with a redirect, and pipetrain stops with an error saying the repo was renamed or moved, instead of silently planning against a different one. Use the new name.
 
-`--verbose` prints each request, and each wait, to stderr. The `api` line of the output shows how many requests the run used and how many GitHub says remain. On a terminal, a small spinner on stderr shows the phase and a counter while pipetrain talks to GitHub; it never touches stdout.
+`--verbose` prints each request, and each wait, to stderr. The `api` line of the output shows how many requests the run used and how many GitHub says remain. On a terminal, a small spinner on stderr shows the phase and a counter while pipetrain talks to GitHub; it never touches stdout. The `time` line is the wall-clock time of the run until the data was gathered; with the cache it is shorter.
 
 ## Local cache
 

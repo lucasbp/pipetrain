@@ -29,6 +29,10 @@ fn pr(slug: &str, number: u64, head: &str, base: &str) -> Pr {
 }
 
 fn sample() -> String {
+    sample_with(0)
+}
+
+fn sample_with(elapsed_ms: u64) -> String {
     let cfg = Config::parse(
         "orgs = [\"acme\"]\n[[layer]]\nname = \"api\"\nrepos = [\"acme/api-*\"]\n[[layer]]\nname = \"front\"\nrepos = [\"acme/front-*\"]\n",
     )
@@ -42,7 +46,7 @@ fn sample() -> String {
     let front = pr("acme/front-web", 2, "deploy/30-10-2026", "master");
     let feature_a = pr("acme/api-other", 3, "feat/shared", "master");
     let feature_b = pr("acme/front-other", 4, "feat/shared", "master");
-    let built = plan::build(
+    let mut built = plan::build(
         &rules,
         Gathered {
             generated_at: "2026-10-30T09:00:00-03:00".to_string(),
@@ -66,6 +70,7 @@ fn sample() -> String {
             rate_remaining: Some(4000),
         },
     );
+    built.stats.elapsed_ms = elapsed_ms;
     render::text(&built)
 }
 
@@ -87,6 +92,24 @@ fn output_is_colored_and_plain_text_is_intact_after_stripping() {
         assert!(plain.contains(needle), "missing `{needle}` in:\n{plain}");
     }
     assert!(!plain.contains("acme/api-core#1"));
+}
+
+#[test]
+fn the_time_line_follows_the_api_line_with_the_gathering_time() {
+    let plain = anstream::adapter::strip_str(&sample_with(14_600)).to_string();
+    let lines: Vec<&str> = plain.lines().collect();
+    let api = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with("api "))
+        .unwrap();
+    assert_eq!(lines[api + 1], "  time      14.6 s", "{plain}");
+    assert!(plain.contains("time      14.6 s"));
+}
+
+#[test]
+fn the_time_line_switches_to_minutes_after_a_minute() {
+    let plain = anstream::adapter::strip_str(&sample_with(65_000)).to_string();
+    assert!(plain.contains("time      1m 05s"), "{plain}");
 }
 
 #[test]

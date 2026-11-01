@@ -37,6 +37,13 @@ fn cache_counters_start_at_zero() {
 }
 
 #[test]
+fn elapsed_ms_is_an_integer_that_starts_at_zero() {
+    let value: serde_json::Value = serde_json::from_str(&built_json()).unwrap();
+    assert!(value["stats"]["elapsed_ms"].is_u64());
+    assert_eq!(value["stats"]["elapsed_ms"], 0);
+}
+
+#[test]
 fn stats_keys_keep_their_order_and_the_new_ones_come_last() {
     let json = built_json();
     let stats = &json[json.find("\"stats\"").unwrap()..];
@@ -50,6 +57,7 @@ fn stats_keys_keep_their_order_and_the_new_ones_come_last() {
         "deploys_after",
         "cache_hits",
         "cache_misses",
+        "elapsed_ms",
     ];
     let positions: Vec<usize> = keys
         .iter()

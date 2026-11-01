@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
+use std::time::Duration;
 
 use crate::config::GateKind;
+use crate::elapsed;
 use crate::plan::{Plan, Stats};
 use crate::planner::{Item, Rule};
 use crate::style::{bold, dim, green, paint, red, yellow};
@@ -369,6 +371,14 @@ pub fn text(plan: &Plan) -> String {
         "  {} {}",
         dim("api      "),
         dim(&api_summary(&plan.stats))
+    );
+    let _ = writeln!(
+        out,
+        "  {} {}",
+        dim("time     "),
+        dim(&elapsed::format(Duration::from_millis(
+            plan.stats.elapsed_ms
+        )))
     );
 
     if plan.items.is_empty() {

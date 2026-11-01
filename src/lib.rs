@@ -7,6 +7,7 @@ pub mod content;
 pub mod detect;
 pub mod discovery;
 pub mod doctor;
+pub mod elapsed;
 pub mod emit;
 pub mod github;
 pub mod hint;

@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::time::Instant;
 
 use anyhow::{Result, bail};
 use chrono::{Local, NaiveDate, SecondsFormat};
@@ -10,6 +11,7 @@ use crate::contained;
 use crate::content;
 use crate::detect;
 use crate::discovery::{self, Discovered, Scope, Skipped};
+use crate::elapsed;
 use crate::emit::{self, Emit};
 use crate::github::{self, ApiError, Client};
 use crate::model::{Pr, PrKey, Question};
@@ -312,6 +314,7 @@ fn deliver(built: &Plan, json: bool, mode: Option<Emit>) -> Result<i32> {
 }
 
 pub fn plan(opts: PlanOptions) -> Result<i32> {
+    let started = Instant::now();
     let (cfg, profile) = resolve::load(
         opts.config.as_deref(),
         opts.profile.as_deref(),
@@ -359,6 +362,7 @@ pub fn plan(opts: PlanOptions) -> Result<i32> {
     built.profile = Some(profile);
     built.stats.cache_hits = client.cache_hits();
     built.stats.cache_misses = client.cache_misses();
+    built.stats.elapsed_ms = elapsed::millis(started.elapsed());
     drop(progress);
     deliver(&built, opts.json, opts.emit)
 }

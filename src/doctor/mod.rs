@@ -3,15 +3,18 @@ pub mod orgs;
 pub mod report;
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use anyhow::Result;
 use chrono::Utc;
 use serde_json::{Value, json};
 
 use crate::config::ApiConfig;
+use crate::elapsed;
 use crate::github::{ApiError, Client, probe_gh, resolve};
 use crate::hint::Os;
 use crate::profile::{self, Inputs, ProfileSet};
+use crate::style::dim;
 use check::{Check, ConfigState, ProfileState};
 
 const VIEWER_QUERY: &str = "query { viewer { login } }";
@@ -163,11 +166,13 @@ pub fn gather_with(
 }
 
 pub fn run(opts: DoctorOptions) -> Result<i32> {
+    let started = Instant::now();
     let checks = gather_with(opts.config.as_deref(), opts.profile.as_deref(), &opts.orgs);
     if opts.json {
         println!("{}", report::json(&checks));
     } else {
         anstream::print!("{}", report::text(&checks));
+        anstream::println!("{}  {}", dim("time"), elapsed::format(started.elapsed()));
     }
     Ok(report::exit_code(&checks))
 }
