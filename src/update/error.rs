@@ -21,6 +21,26 @@ pub enum UpdateError {
 
 const MANUAL: &str = "Download the release by hand from https://github.com/lucasbp/pipetrain/releases and check it against SHA256SUMS, or run the install script again.";
 
+impl UpdateError {
+    pub fn variant(&self) -> &'static str {
+        match self {
+            Self::Network { .. } => "Network",
+            Self::Api { .. } => "Api",
+            Self::NoRelease => "NoRelease",
+            Self::BadTag { .. } => "BadTag",
+            Self::UnsupportedPlatform { .. } => "UnsupportedPlatform",
+            Self::NoAsset { .. } => "NoAsset",
+            Self::NoChecksums { .. } => "NoChecksums",
+            Self::ChecksumMissing { .. } => "ChecksumMissing",
+            Self::ChecksumMismatch { .. } => "ChecksumMismatch",
+            Self::UntrustedUrl { .. } => "UntrustedUrl",
+            Self::TooLarge { .. } => "TooLarge",
+            Self::BadArchive { .. } => "BadArchive",
+            Self::Replace { .. } => "Replace",
+        }
+    }
+}
+
 impl fmt::Display for UpdateError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

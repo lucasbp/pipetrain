@@ -69,6 +69,7 @@ pub struct Config {
     pub targets: BTreeMap<String, String>,
     pub packages: BTreeMap<String, String>,
     pub api: ApiConfig,
+    pub log: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -112,6 +113,7 @@ impl Default for Config {
             targets: BTreeMap::new(),
             packages: BTreeMap::new(),
             api: ApiConfig::default(),
+            log: false,
         }
     }
 }

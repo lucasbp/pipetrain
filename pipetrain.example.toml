@@ -2,6 +2,12 @@
 # (<config dir>/pipetrain/config.toml). Unknown keys are rejected.
 # Values shown are the built-in defaults unless marked "example".
 
+# Local usage log, off by default. One JSON line per run in the user data
+# directory: time, version, command name, exit code, error type, duration,
+# request count, cache hit. Never tokens, orgs, repos, PRs, arguments or paths.
+# Nothing is sent anywhere. PIPETRAIN_LOG=1/0 and --no-log override it.
+log = false
+
 # GitHub organizations to search for open PRs (example).
 orgs = ["acme"]
 

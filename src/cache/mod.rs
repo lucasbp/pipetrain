@@ -79,7 +79,10 @@ impl Cache {
             _ => None,
         };
         match &found {
-            Some(_) => self.hits = self.hits.saturating_add(1),
+            Some(_) => {
+                self.hits = self.hits.saturating_add(1);
+                crate::log::stats::cache_hit();
+            }
             None => self.misses = self.misses.saturating_add(1),
         }
         found

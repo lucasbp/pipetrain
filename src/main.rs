@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
@@ -11,6 +11,7 @@ use pipetrain::command::authors::AuthorFilter;
 use pipetrain::command::bump::{self, BumpOptions, Level as BumpLevel};
 use pipetrain::command::feed::{self, FeedOptions, WaitOptions};
 use pipetrain::command::init::{self, InitOptions};
+use pipetrain::command::log::{self, LogOptions};
 use pipetrain::command::order::{self, OrderOptions};
 use pipetrain::command::orgs::{self, OrgsOptions};
 use pipetrain::command::profiles::{self, ProfilesOptions};
@@ -34,6 +35,13 @@ struct Cli {
         help = "Do not look for a newer release or print the note about one (also PIPETRAIN_NO_UPDATE_CHECK=1)"
     )]
     no_update_check: bool,
+
+    #[arg(
+        long,
+        global = true,
+        help = "Do not write the local usage log for this run (also PIPETRAIN_LOG=0); the log is off unless `log = true` or PIPETRAIN_LOG=1"
+    )]
+    no_log: bool,
 
     #[command(subcommand)]
     command: Command,
@@ -102,6 +110,20 @@ enum Command {
         about = "Updates this executable from the latest GitHub release; only runs when you call it, --check only reports"
     )]
     Update(UpdateArgs),
+
+    #[command(
+        about = "Read-only: summarizes the local usage log, which is off unless you turn it on"
+    )]
+    Log(LogArgs),
+}
+
+#[derive(clap::Args)]
+struct LogArgs {
+    #[arg(long, help = "Count runs, error rates by type and median time")]
+    summary: bool,
+
+    #[arg(long, requires = "summary", help = "Print the summary as JSON")]
+    json: bool,
 }
 
 #[derive(clap::Args)]
@@ -710,6 +732,10 @@ fn run_command(command: Command) -> Result<i32> {
             api_url: args.api_url,
             verbose: args.verbose,
         }),
+        Command::Log(args) => log::run(LogOptions {
+            summary: args.summary,
+            json: args.json,
+        }),
         Command::Doctor(args) => run_doctor(args),
         Command::Plan(args) => run_plan(args),
         Command::Bundle(args) => run_bundle(args),
@@ -773,10 +799,78 @@ fn run_order(args: OrderArgs) -> Result<i32> {
     }
 }
 
-fn dispatch(command: Command) -> ExitCode {
-    match run_command(command) {
+fn command_name(command: &Command) -> Option<&'static str> {
+    Some(match command {
+        Command::Plan(_) => "plan",
+        Command::Bundle(_) => "bundle",
+        Command::Doctor(_) => "doctor",
+        Command::Profiles(_) => "profiles",
+        Command::Orgs(_) => "orgs",
+        Command::Order(_) => "order",
+        Command::Init(_) => "init",
+        Command::Feed(_) => "feed",
+        Command::Bump(_) => "bump",
+        Command::Update(_) => "update",
+        Command::Log(_) => return None,
+    })
+}
+
+fn config_path(command: &Command) -> Option<PathBuf> {
+    match command {
+        Command::Plan(args) => args.config.clone(),
+        Command::Bundle(args) => args.config.clone(),
+        Command::Doctor(args) => args.config.clone(),
+        Command::Profiles(args) => args.config.clone(),
+        Command::Orgs(args) => args.config.clone(),
+        Command::Bump(args) => args.config.clone(),
+        Command::Order(args) => match &args.action {
+            OrderAction::Suggest(suggest) => suggest.config.clone(),
+        },
+        _ => None,
+    }
+}
+
+struct Logging {
+    name: &'static str,
+    started: Instant,
+}
+
+fn start_logging(cli: &Cli) -> Option<Logging> {
+    let name = command_name(&cli.command)?;
+    let path = config_path(&cli.command);
+    if !pipetrain::log::enabled(cli.no_log, path.as_deref()) {
+        return None;
+    }
+    pipetrain::log::stats::take();
+    Some(Logging {
+        name,
+        started: Instant::now(),
+    })
+}
+
+fn finish_logging(logging: Option<Logging>, result: &Result<i32>) {
+    let Some(logging) = logging else {
+        return;
+    };
+    let (exit, error) = match result {
+        Ok(code) => (*code, None),
+        Err(err) => (1, Some(pipetrain::log::kind_of(err))),
+    };
+    let millis = u64::try_from(logging.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let record = pipetrain::log::build(
+        logging.name,
+        exit,
+        error,
+        millis,
+        pipetrain::log::stats::take(),
+    );
+    pipetrain::log::write(&record);
+}
+
+fn dispatch(result: &Result<i32>) -> ExitCode {
+    match result {
         Ok(0) => ExitCode::SUCCESS,
-        Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
+        Ok(code) => ExitCode::from(u8::try_from(*code).unwrap_or(1)),
         Err(err) => {
             eprintln!("error: {err:#}");
             ExitCode::FAILURE
@@ -787,7 +881,10 @@ fn dispatch(command: Command) -> ExitCode {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let suppress = suppression(&cli);
-    let code = dispatch(cli.command);
+    let logging = start_logging(&cli);
+    let result = run_command(cli.command);
+    let code = dispatch(&result);
+    finish_logging(logging, &result);
     notice::announce(suppress);
     code
 }
