@@ -14,7 +14,54 @@ Not sure your setup is right? Run `pipetrain doctor` (see [Check your setup](#ch
 
 ## Install
 
-Only needed when you build from source. See [Requirements](#requirements).
+Pick one. Every prebuilt option comes from a [GitHub Release](https://github.com/lucasbp/pipetrain/releases) and is checked against the `SHA256SUMS` file in it.
+
+### Install script
+
+Both scripts install into a folder you own, without admin rights or `sudo`, and stop without installing anything if the SHA-256 does not match. They never edit your `PATH`: they print the line to add.
+
+Linux and macOS (`~/.local/bin`):
+
+```
+curl -fsSL https://raw.githubusercontent.com/lucasbp/pipetrain/main/install.sh | sh
+```
+
+Windows (`%LOCALAPPDATA%\Programs\pipetrain`):
+
+```
+irm https://raw.githubusercontent.com/lucasbp/pipetrain/main/install.ps1 | iex
+```
+
+To read the script first, download it and run it. Set `PIPETRAIN_VERSION` (for example `0.2.0`) to pin a version and `PIPETRAIN_INSTALL_DIR` to choose the folder (`-Version` and `-InstallDir` in the PowerShell script).
+
+### Download by hand
+
+Take the archive for your system from the release page, check it against `SHA256SUMS`, and put `pipetrain` (`pipetrain.exe`) somewhere on your `PATH`.
+
+| System | Asset |
+|---|---|
+| Windows x86_64 | `pipetrain-vX.Y.Z-x86_64-pc-windows-msvc.zip` |
+| Linux x86_64 | `pipetrain-vX.Y.Z-x86_64-unknown-linux-musl.tar.gz` |
+| Linux aarch64 | `pipetrain-vX.Y.Z-aarch64-unknown-linux-musl.tar.gz` |
+| macOS Apple silicon | `pipetrain-vX.Y.Z-aarch64-apple-darwin.tar.gz` |
+| macOS Intel | `pipetrain-vX.Y.Z-x86_64-apple-darwin.tar.gz` |
+
+The Linux binaries are static (musl), so they run on any distro. Each file also has a build provenance attestation: `gh attestation verify <file> --repo lucasbp/pipetrain`.
+
+### Debian, Ubuntu, Fedora, Red Hat
+
+The release carries a `.deb` and an `.rpm` for x86_64 and aarch64:
+
+```
+sudo apt install ./pipetrain_X.Y.Z-1_amd64.deb
+sudo dnf install ./pipetrain-X.Y.Z-1.x86_64.rpm
+```
+
+These install to `/usr/bin`: update them by installing the newer package.
+
+### From source
+
+See [Requirements](#requirements).
 
 ```
 cargo build --release
@@ -25,6 +72,16 @@ The binary is `target\release\pipetrain.exe` (`target/release/pipetrain` outside
 ```
 cargo install --path .
 ```
+
+### Update
+
+`pipetrain update --check` asks GitHub for the latest release and tells you whether it is newer than the one you run. It only reads: it downloads nothing and changes nothing. Exit code 0 means you are up to date, 10 means a newer release exists, 1 means an error. `--json` prints `schema`, `current`, `latest`, `update_available` and `updated`.
+
+`pipetrain update` without a flag does nothing yet and exits 1: reinstall with `install.sh` or `install.ps1` instead. The in-place installer exists behind `--experimental-install` (not ready, may change): it downloads the asset of your platform, checks its SHA-256 against the release's `SHA256SUMS` and only then swaps the executable. Any failed check leaves the old executable in place.
+
+When you run a command in an interactive terminal, pipetrain may print one line on stderr: `pipetrain X.Y.Z available, run pipetrain update --check`. It asks GitHub at most once every 24 hours (3 second timeout, any failure is silent) and keeps only the version and the time in the cache folder, never a token. The line never appears with `--json`, `--emit queue`, `CI=true`, when stdout or stderr is redirected, or in `update` itself. Turn it off with `--no-update-check` or `PIPETRAIN_NO_UPDATE_CHECK=1`.
+
+An executable that came from a package manager (`.deb`, `.rpm`, `cargo install`) is better updated by that tool.
 
 ## Authentication
 
@@ -646,6 +703,8 @@ Repos that do not reference the package are not listed. A scanned repo name that
 | 1 | An error: no token, bad config, bad `--date`, a PR not found, budget reached, GitHub failure. The message goes to stderr as `error: ...`. For `bundle` it also means the prompt was declined or a write failed. |
 | 3 | Only with `--emit queue`: the queue was printed, but at least one question is open. Without `--emit queue` this code is never used. |
 
+`pipetrain update --check` also uses 10: a newer release exists.
+
 A command-line usage mistake (an unknown option, for example) exits with clap's own code, 2. `pipetrain doctor` has its own two codes, listed in [Check your setup](#check-your-setup-doctor).
 
 ## Out of scope
@@ -657,6 +716,7 @@ pipetrain does not merge, push, approve, comment, label or re-run checks, and no
 - [docs/planner.md](docs/planner.md): the rules, in the order they apply, and every question the planner can raise.
 - [docs/plan-json.md](docs/plan-json.md): the `--json` contract.
 - [docs/queue-output.md](docs/queue-output.md): the `--emit queue` contract.
+- [docs/releasing.md](docs/releasing.md): how a release is cut, what the workflow builds and the optional crates.io step.
 - [docs/repo-names.md](docs/repo-names.md): how `repo#123` is resolved to an org, and what it costs.
 - [docs/saving-pipelines.md](docs/saving-pipelines.md): why the plan checks "already in the base", why it suggests a deploy branch, and how to apply it by hand.
 - [pipetrain.example.toml](pipetrain.example.toml): the config, annotated.
