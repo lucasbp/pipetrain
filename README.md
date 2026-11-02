@@ -2,7 +2,7 @@
 
 pipetrain is a command-line tool that plans the order in which pull requests should merge across several repositories. It reads GitHub, builds a dependency graph from what it finds, and prints the order: what can merge at the same time, what has to wait for what, and why.
 
-It is read-only by default. It never merges, pushes or comments, and it stores nothing. The only command that writes to GitHub is `pipetrain bundle --apply`, which creates a deploy branch and changes the base of the PRs bundled into it. A `go` command that would execute a whole plan does not exist yet.
+It is read-only by default. It never merges, pushes or comments, and it stores nothing but a cache and, only if you turn it on, a [local usage log](#local-usage-log). The only command that writes to GitHub is `pipetrain bundle --apply`, which creates a deploy branch and changes the base of the PRs bundled into it. A `go` command that would execute a whole plan does not exist yet.
 
 ## Requirements
 
@@ -198,6 +198,7 @@ pipetrain plan [OPTIONS] [PRS]...
 | `pipetrain bump <PACKAGE> [--to <V>]` | Dry run only: shows which manifests of the scanned repos would move to a version of a package. Writes nothing and has no `--apply`. See [Bumping a package](#bumping-a-package-dry-run). |
 | `pipetrain profiles` | Read-only: lists the profiles, their orgs and folders, and which one applies from the current folder. |
 | `pipetrain orgs` | Read-only: lists the GitHub orgs your token can see and which profile lists each one. |
+| `pipetrain log --summary` | Read-only: summarizes the opt-in [local usage log](#local-usage-log): runs per command, error rate by type, median duration. |
 | `pipetrain init` | Prints a proposed config with one profile per visible org. Writes nothing unless `--write [PATH]` is given; an existing file is kept unless `--force` is added. |
 
 | Option | Meaning |
@@ -707,6 +708,14 @@ Repos that do not reference the package are not listed. A scanned repo name that
 
 A command-line usage mistake (an unknown option, for example) exits with clap's own code, 2. `pipetrain doctor` has its own two codes, listed in [Check your setup](#check-your-setup-doctor).
 
+## Local usage log
+
+Off by default. Turn it on with `log = true` in the config or `PIPETRAIN_LOG=1`; `--no-log` and `PIPETRAIN_LOG=0` turn it off. It writes one JSON line per run to `log.jsonl` in your user data directory (override with `PIPETRAIN_LOG_DIR`), rotated at 1 MiB, 3 files at most. Nothing is sent anywhere.
+
+A line holds the time, the version, the subcommand name, the exit code, the error type (such as `ApiError`), the duration, the number of requests and whether the cache answered. It never holds a token, an org or repo name, a PR number or title, an argument value, a path, a diff or an error message. A failure to write it never fails or slows the command.
+
+`pipetrain log --summary [--json]` counts runs per command, the error rate by type and the median duration. Details and the JSON shape: [docs/log.md](docs/log.md).
+
 ## Out of scope
 
 pipetrain does not merge, push, approve, comment, label or re-run checks, and nothing in it is a deploy tool. The only thing it writes to GitHub is what `pipetrain bundle --apply` does: create a deploy branch and change the base of the PRs bundled into it. It decides order, not safety: it does not know whether a migration is backward compatible, only that it has to go first.
@@ -716,6 +725,7 @@ pipetrain does not merge, push, approve, comment, label or re-run checks, and no
 - [docs/planner.md](docs/planner.md): the rules, in the order they apply, and every question the planner can raise.
 - [docs/plan-json.md](docs/plan-json.md): the `--json` contract.
 - [docs/queue-output.md](docs/queue-output.md): the `--emit queue` contract.
+- [docs/log.md](docs/log.md): the opt-in local usage log, what a line holds and what never enters it.
 - [docs/releasing.md](docs/releasing.md): how a release is cut, what the workflow builds and the optional crates.io step.
 - [docs/repo-names.md](docs/repo-names.md): how `repo#123` is resolved to an org, and what it costs.
 - [docs/saving-pipelines.md](docs/saving-pipelines.md): why the plan checks "already in the base", why it suggests a deploy branch, and how to apply it by hand.

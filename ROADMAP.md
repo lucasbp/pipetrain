@@ -49,6 +49,8 @@ pipetrain plans the merge order of pull requests across repos. This file says wh
 - Prebuilt binaries: a tag `v*` triggers a workflow that builds Windows x86_64, Linux x86_64 and aarch64 (static musl) and macOS arm64 and x86_64, plus `.deb` and `.rpm` for Linux x86_64 and aarch64, and publishes them with `SHA256SUMS` and a build provenance attestation to a GitHub Release. `install.sh` and `install.ps1` install into a user folder and verify the SHA-256. Publishing the crate on crates.io is a separate manual step, documented in `docs/releasing.md`.
 - `pipetrain update --check`: read-only, exits 10 when a newer release exists. A passive one-line notice on stderr, at most once every 24 hours, interactive terminals only and off with `--no-update-check` or `PIPETRAIN_NO_UPDATE_CHECK=1`. The in-place swap of the executable exists behind `--experimental-install` and is not ready.
 
+- An opt-in local usage log (`log = true`, `PIPETRAIN_LOG=1`, off with `--no-log`): one JSON line per run with the command name, exit code, error type, duration, request count and cache hit, never tokens, names, arguments or paths, rotated at 1 MiB. `pipetrain log --summary` reads it. Nothing is sent anywhere.
+
 ## Next
 
 Small, well understood, in this order:

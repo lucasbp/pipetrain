@@ -28,6 +28,7 @@ pub mod bump;
 mod checklist;
 pub mod feed;
 pub mod init;
+pub mod log;
 pub mod names;
 pub mod order;
 pub mod orgs;
