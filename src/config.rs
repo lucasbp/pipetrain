@@ -44,6 +44,13 @@ pub fn validate_date_format(format: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn validate_train_label(label: Option<&str>) -> Result<()> {
+    if label.is_some_and(|l| l.trim().is_empty()) {
+        bail!("`train_label` is empty");
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -52,6 +59,7 @@ pub struct Config {
     pub max_parallel: usize,
     pub train_prefix: String,
     pub train_date_format: String,
+    pub train_label: Option<String>,
     pub ignore_branch_prefixes: Vec<String>,
     pub allow_missing_checks: bool,
     pub checks_optional_repos: Vec<String>,
@@ -94,6 +102,7 @@ impl Default for Config {
             max_parallel: 4,
             train_prefix: "deploy/".to_string(),
             train_date_format: DEFAULT_TRAIN_DATE_FORMAT.to_string(),
+            train_label: None,
             ignore_branch_prefixes: vec!["dependabot/".to_string(), "renovate/".to_string()],
             allow_missing_checks: false,
             checks_optional_repos: Vec::new(),

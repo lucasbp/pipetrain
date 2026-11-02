@@ -167,11 +167,13 @@ PR references are written as `org/repo#123`. A PR that cannot be found stops the
 
 The train branch is `train_prefix` plus the date, for example `deploy/29-10-2026`. The date is written with `train_date_format` (default `dd-mm-yyyy`). In each org, pipetrain searches open, non-archived PRs and keeps the ones that are:
 
-- on the train branch (`train`);
+- on the train branch (`train`), or carrying the label set in `train_label` (also `train`, see below);
 - on a branch name that is open in 2 or more repos, which is how one change spans repos (`shared-branch`);
 - targeting the train branch (`into-train`).
 
 Of those, only PRs that are ready enter the plan: not draft, approved, checks green, no merge conflict. A repo with no checks at all blocks its PRs, unless `allow_missing_checks` is on or the repo matches a glob in `checks_optional_repos`. The rest are listed as `SKIPPED` with the reasons, and a few of them raise a question when they affect a ready PR. How the order is then decided, rule by rule, is in [docs/planner.md](docs/planner.md).
+
+**Finding the train by label.** Set `train_label` in the config (for example `train_label = "train"`) and any open PR with that label joins the train with scope `train`, whatever its branch name. The match ignores case, and a PR that carries the label is never counted as a shared branch. Without `train_label` nothing changes: only the branch name finds the train. An empty value is a config error. It can be set per profile, and a profile inherits the shared value. With `--all` a labelled approved PR also gets scope `train`.
 
 ## Any day: released PRs
 

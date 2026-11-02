@@ -49,11 +49,18 @@ pub fn train_branch(cfg: &Config, date: NaiveDate) -> String {
     format!("{}{}", cfg.train_prefix, formatted)
 }
 
+fn labelled(pr: &Pr, cfg: &Config) -> bool {
+    cfg.train_label
+        .as_deref()
+        .is_some_and(|label| pr.has_label(label))
+}
+
 fn shared_branches(all: &[Pr], cfg: &Config, train: &str) -> HashSet<String> {
     let mut repos: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
     for pr in all {
         let head = pr.head_ref.as_str();
-        let ignored = head.eq_ignore_ascii_case(train)
+        let ignored = labelled(pr, cfg)
+            || head.eq_ignore_ascii_case(train)
             || head
                 .to_lowercase()
                 .starts_with(&cfg.train_prefix.to_lowercase())
@@ -77,8 +84,8 @@ fn shared_branches(all: &[Pr], cfg: &Config, train: &str) -> HashSet<String> {
         .collect()
 }
 
-fn classify_scope(pr: &Pr, shared: &HashSet<String>, train: &str) -> Option<Scope> {
-    if pr.head_ref.eq_ignore_ascii_case(train) {
+fn classify_scope(pr: &Pr, cfg: &Config, shared: &HashSet<String>, train: &str) -> Option<Scope> {
+    if pr.head_ref.eq_ignore_ascii_case(train) || labelled(pr, cfg) {
         Some(Scope::Train)
     } else if shared.contains(&pr.head_ref) {
         Some(Scope::SharedBranch)
@@ -147,7 +154,7 @@ pub fn discover(all: Vec<Pr>, cfg: &Config, train: &str) -> Discovered {
     let shared = shared_branches(&all, cfg, train);
     let mut out = Discovered::default();
     for pr in all {
-        let Some(scope) = classify_scope(&pr, &shared, train) else {
+        let Some(scope) = classify_scope(&pr, cfg, &shared, train) else {
             continue;
         };
         let reasons = pr.blockers(cfg.allows_missing_checks(&pr.key.slug()));
@@ -170,7 +177,7 @@ pub fn released(all: Vec<Pr>, cfg: &Config, train: &str) -> Discovered {
         if pr.review != Review::Approved {
             continue;
         }
-        let scope = if pr.head_ref.eq_ignore_ascii_case(train) {
+        let scope = if pr.head_ref.eq_ignore_ascii_case(train) || labelled(&pr, cfg) {
             Scope::Train
         } else if pr.base_ref.eq_ignore_ascii_case(train) {
             Scope::IntoTrain

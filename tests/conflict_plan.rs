@@ -36,6 +36,7 @@ fn pr(slug: &str, number: u64, head: &str, paths: &[&str]) -> Pr {
             })
             .collect(),
         files_complete: true,
+        labels: Vec::new(),
     }
 }
 

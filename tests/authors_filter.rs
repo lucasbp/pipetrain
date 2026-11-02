@@ -42,6 +42,7 @@ fn pr(number: u64, author: &str) -> Pr {
         mergeable_unknown: false,
         files: Vec::new(),
         files_complete: true,
+        labels: Vec::new(),
     }
 }
 

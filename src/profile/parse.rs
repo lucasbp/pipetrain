@@ -5,7 +5,7 @@ use toml::{Table, Value};
 
 use super::select::components;
 use super::{IMPLICIT, Profile, ProfileSet};
-use crate::config::{Config, validate_date_format};
+use crate::config::{Config, validate_date_format, validate_train_label};
 
 pub fn parse(text: &str) -> Result<ProfileSet> {
     let mut shared: Table = text.parse().context("invalid config")?;
@@ -33,6 +33,7 @@ pub fn parse(text: &str) -> Result<ProfileSet> {
 fn flat(shared: Table, default_profile: Option<String>) -> Result<ProfileSet> {
     let config: Config = shared.try_into().context("invalid config")?;
     validate_date_format(&config.train_date_format)?;
+    validate_train_label(config.train_label.as_deref())?;
     let mut set = ProfileSet::single(config);
     set.default_profile = default_profile;
     check_default(&set)?;
@@ -79,6 +80,8 @@ fn build(name: &str, shared: &Table, mut own: Table) -> Result<Profile> {
         .try_into()
         .with_context(|| format!("invalid config in profile `{name}`"))?;
     validate_date_format(&config.train_date_format)
+        .with_context(|| format!("invalid config in profile `{name}`"))?;
+    validate_train_label(config.train_label.as_deref())
         .with_context(|| format!("invalid config in profile `{name}`"))?;
     Ok(Profile {
         name: name.to_string(),

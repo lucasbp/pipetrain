@@ -16,6 +16,10 @@ train_prefix = "deploy/"
 # the same branch. Example: "%Y-%m-%d" gives deploy/2026-10-29.
 # train_date_format = "%Y-%m-%d"
 
+# A PR carrying this label (case-insensitive) joins the train, whatever its
+# branch name. Unset by default, so only the branch name finds the train.
+# train_label = "train"
+
 # Head branches starting with these prefixes never count as a shared branch.
 ignore_branch_prefixes = ["dependabot/", "renovate/"]
 

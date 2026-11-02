@@ -463,6 +463,7 @@ fn pr(number: u64, slug: &str) -> Pr {
         mergeable_unknown: false,
         files: Vec::new(),
         files_complete: true,
+        labels: Vec::new(),
     }
 }
 

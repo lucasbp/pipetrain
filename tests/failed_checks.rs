@@ -33,6 +33,7 @@ fn pr_with(failed: &[&str]) -> Pr {
         mergeable_unknown: false,
         files: Vec::new(),
         files_complete: true,
+        labels: Vec::new(),
     }
 }
 

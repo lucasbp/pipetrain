@@ -62,11 +62,11 @@ Review and checks, as read from GitHub:
 
 How PRs are discovered (scope, in this order of precedence):
 
-1. `train`: the head branch is the train branch (`train_prefix` + the date in the configured `train_date_format`, default `dd-mm-yyyy`; case-insensitive).
-2. `shared-branch`: the same head branch is open in 2 or more repos. Ignored for this purpose: the train branch, anything starting with `train_prefix` or with an `ignore_branch_prefixes` entry, and `main`, `master`, `develop`, `development`.
+1. `train`: the head branch is the train branch (`train_prefix` + the date in the configured `train_date_format`, default `dd-mm-yyyy`; case-insensitive), or the PR carries the label set in `train_label` (case-insensitive, whatever its branch). `train_label` is unset by default.
+2. `shared-branch`: the same head branch is open in 2 or more repos. Ignored for this purpose: PRs with the `train_label` label, the train branch, anything starting with `train_prefix` or with an `ignore_branch_prefixes` entry, and `main`, `master`, `develop`, `development`.
 3. `into-train`: the base branch is the train branch.
 4. `explicit`: PRs passed on the command line. They skip discovery and go through the same readiness check. A PR that cannot be found aborts the run.
-5. `released`: only with `--all`. Every open PR whose review is approved, whatever its branch. Inside `--all` the precedence is: head is the train branch gives `train`; base is the train branch gives `into-train`; anything else is `released`. An approved PR that fails the readiness check goes to `SKIPPED` with the reasons, and a PR that is not approved is ignored without a trace. Shared branches are not looked for, so `sibling-not-ready` and `stacked-not-ready` are not raised. `--all` and explicit PRs are mutually exclusive.
+5. `released`: only with `--all`. Every open PR whose review is approved, whatever its branch. Inside `--all` the precedence is: head is the train branch, or the PR has the `train_label` label, gives `train`; base is the train branch gives `into-train`; anything else is `released`. An approved PR that fails the readiness check goes to `SKIPPED` with the reasons, and a PR that is not approved is ignored without a trace. Shared branches are not looked for, so `sibling-not-ready` and `stacked-not-ready` are not raised. `--all` and explicit PRs are mutually exclusive.
 
 Anything else is discarded without a trace.
 

@@ -88,6 +88,19 @@ fn parse_failed_checks(node: &Value) -> Vec<String> {
     names.into_iter().collect()
 }
 
+fn parse_labels(node: &Value) -> Vec<String> {
+    node.pointer("/labels/nodes")
+        .and_then(|v| v.as_array())
+        .map(|nodes| {
+            nodes
+                .iter()
+                .filter_map(|n| n.get("name").and_then(|s| s.as_str()))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub fn parse_pr(node: &Value) -> Option<Pr> {
     let number = node.get("number")?.as_u64()?;
     let repo = node.get("repository")?;
@@ -124,6 +137,7 @@ pub fn parse_pr(node: &Value) -> Option<Pr> {
         mergeable_unknown: matches!(mergeable, None | Some("UNKNOWN")),
         files: Vec::new(),
         files_complete: true,
+        labels: parse_labels(node),
     })
 }
 

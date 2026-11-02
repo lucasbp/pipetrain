@@ -100,11 +100,16 @@ pub struct Pr {
     pub mergeable_unknown: bool,
     pub files: Vec<ChangedFile>,
     pub files_complete: bool,
+    pub labels: Vec<String>,
 }
 
 const MAX_FAILED_NAMES: usize = 5;
 
 impl Pr {
+    pub fn has_label(&self, label: &str) -> bool {
+        self.labels.iter().any(|l| l.eq_ignore_ascii_case(label))
+    }
+
     fn failing_reason(&self) -> String {
         if self.failed_checks.is_empty() {
             return "checks failing".to_string();
