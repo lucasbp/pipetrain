@@ -4,6 +4,7 @@ use std::sync::OnceLock;
 use regex::Regex;
 
 use crate::model::{ChangedFile, PrKey};
+use crate::{cargo, gomod, pyproject};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Dep {
@@ -62,8 +63,34 @@ fn is_package_json(path: &str) -> bool {
     file_name(path).eq_ignore_ascii_case("package.json")
 }
 
+pub fn is_cargo_toml(path: &str) -> bool {
+    file_name(path).eq_ignore_ascii_case("cargo.toml")
+}
+
+pub fn is_pyproject(path: &str) -> bool {
+    file_name(path).eq_ignore_ascii_case("pyproject.toml")
+}
+
+pub fn is_go_mod(path: &str) -> bool {
+    file_name(path).eq_ignore_ascii_case("go.mod")
+}
+
 pub fn keeps_patch(path: &str) -> bool {
-    is_dotnet_manifest(path) || is_package_json(path)
+    is_dotnet_manifest(path)
+        || is_package_json(path)
+        || is_cargo_toml(path)
+        || is_pyproject(path)
+        || is_go_mod(path)
+}
+
+pub(crate) fn side_lines(patch: &str, prefix: char) -> impl Iterator<Item = (bool, &str)> {
+    patch
+        .lines()
+        .filter_map(move |line| match line.chars().next() {
+            Some(marker) if marker == prefix => Some((true, &line[marker.len_utf8()..])),
+            Some(' ') => Some((false, &line[1..])),
+            _ => None,
+        })
 }
 
 fn dotnet_versions(patch: &str, prefix: char) -> BTreeMap<String, String> {
@@ -130,6 +157,12 @@ fn bumped_entries(files: &[ChangedFile]) -> Vec<(String, String)> {
             (dotnet_versions(patch, '+'), dotnet_versions(patch, '-'))
         } else if is_package_json(&file.path) {
             (npm_versions(patch, '+'), npm_versions(patch, '-'))
+        } else if is_cargo_toml(&file.path) {
+            (cargo::bumped(patch, '+'), cargo::bumped(patch, '-'))
+        } else if is_pyproject(&file.path) {
+            (pyproject::bumped(patch, '+'), pyproject::bumped(patch, '-'))
+        } else if is_go_mod(&file.path) {
+            (gomod::bumped(patch, '+'), gomod::bumped(patch, '-'))
         } else {
             continue;
         };

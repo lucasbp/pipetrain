@@ -43,13 +43,14 @@ pipetrain plans the merge order of pull requests across repos. This file says wh
 - `bump --only major|minor|patch`, `--changes-only` and `--check`: additive options on the dry run. `--only` (repeatable) leaves the other levels as `other_level`, `--changes-only` lists just the manifests that would change, and `--check` exits 1 when something would. Without them the output and the JSON are unchanged.
 - `pipetrain feed <package> --version <v> --wait [--interval <s>] [--timeout <s>]`: blocks until the version is published, with exit codes a runner can use (0 published, 1 timeout, 2 refused, 3 persistent error). Progress goes to stderr, the result to stdout once, and `--json` gains `waited`, `attempts`, `elapsed_seconds` and `timed_out` with schema 1 intact.
 
+- Package detection for `Cargo.toml`, `pyproject.toml` and `go.mod`, next to NuGet and npm: a repo that publishes a package and another that references it get the `dependency` edge, and a readable version bump in the manifest diff gives the `package` edge and the `# wait` line. `path`, `workspace` and `git` dependencies, compound ranges and Go pseudo-versions never become a version. `feed`, `bump` and `--check-feeds` still know only NuGet and npm.
+
 ## Next
 
 Small, well understood, in this order:
 
 1. `bump --apply`: an opt-in mode that opens one PR per repo with the new version, on top of the dry run.
-2. Package detection for `Cargo.toml` and `pyproject.toml`, next to npm and NuGet.
-3. A deeper conflict report that simulates the merge, beyond files changed by more than one PR.
+2. A deeper conflict report that simulates the merge, beyond files changed by more than one PR.
 
 ## Later
 
@@ -61,7 +62,7 @@ Bigger or riskier, no order yet:
 - An execution mode that performs the merges. Opt-in, resumable, with a report. Never the default.
 - A GitHub Action and an MCP server on top of `--json`, so automation and AI agents can ask what is safe to merge and in what order.
 - Bump consumers automatically after a package release: wait for the new version to reach the feed, update the reference in the dependent repos, then release them. This writes to repos, so it ships as an opt-in mode.
-- Package detection for Go, Maven and Gradle.
+- Package detection for Maven and Gradle.
 - Other forges.
 - Optional encryption for local storage.
 

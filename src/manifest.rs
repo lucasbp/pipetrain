@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
-use crate::detect;
+use crate::{cargo, detect, gomod, pyproject};
 
 fn regex(cell: &'static OnceLock<Regex>, pattern: &str) -> &'static Regex {
     cell.get_or_init(|| Regex::new(pattern).expect("valid regex"))
@@ -71,6 +71,15 @@ fn implicit_id(path: &str, text: &str) -> Option<String> {
 }
 
 pub fn published(path: &str, text: &str) -> Option<String> {
+    if detect::is_cargo_toml(path) {
+        return cargo::published(text);
+    }
+    if detect::is_pyproject(path) {
+        return pyproject::published(text);
+    }
+    if detect::is_go_mod(path) {
+        return gomod::published(text);
+    }
     if !is_project(path) {
         return detect::published_package(path, text);
     }
@@ -110,6 +119,15 @@ pub fn references(path: &str, text: &str) -> BTreeSet<String> {
     }
     if is_project(path) || is_props(path) {
         return dotnet_references(text);
+    }
+    if detect::is_cargo_toml(path) {
+        return cargo::references(text);
+    }
+    if detect::is_pyproject(path) {
+        return pyproject::references(text);
+    }
+    if detect::is_go_mod(path) {
+        return gomod::references(text);
     }
     BTreeSet::new()
 }

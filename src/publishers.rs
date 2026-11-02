@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::manifest;
+use crate::{detect, manifest};
 
 pub type Publishers = BTreeMap<String, BTreeSet<String>>;
 
@@ -50,7 +50,21 @@ pub fn candidate_paths(tree: &[String]) -> (Vec<String>, bool) {
             let noise = p
                 .split('/')
                 .any(|s| matches!(s, "node_modules" | "bin" | "obj" | ".git"));
-            manifest && !noise
+            let native =
+                detect::is_cargo_toml(p) || detect::is_pyproject(p) || detect::is_go_mod(p);
+            let native_noise = p.split('/').any(|s| {
+                matches!(
+                    s,
+                    "target"
+                        | "vendor"
+                        | ".venv"
+                        | "venv"
+                        | "site-packages"
+                        | "testdata"
+                        | "__pycache__"
+                )
+            });
+            (manifest || native) && !noise && !(native && native_noise)
         })
         .cloned()
         .collect();
@@ -117,6 +131,34 @@ mod tests {
         assert_eq!(
             paths,
             vec!["Directory.Packages.props", "src/Lib/Lib.csproj"]
+        );
+    }
+
+    #[test]
+    fn candidates_include_cargo_pyproject_and_go_manifests_but_not_their_noise() {
+        let tree: Vec<String> = [
+            "Cargo.toml",
+            "crates/acme/Cargo.toml",
+            "target/package/acme-1.0.0/Cargo.toml",
+            "py/pyproject.toml",
+            ".venv/lib/site-packages/x/pyproject.toml",
+            "go.mod",
+            "vendor/x/go.mod",
+            "pkg/testdata/go.mod",
+            "tools/mygo.mod",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let (paths, _) = candidate_paths(&tree);
+        assert_eq!(
+            paths,
+            vec![
+                "Cargo.toml",
+                "go.mod",
+                "py/pyproject.toml",
+                "crates/acme/Cargo.toml"
+            ]
         );
     }
 

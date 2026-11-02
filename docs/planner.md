@@ -4,7 +4,7 @@ The planner turns a set of ready PRs into a directed graph: an edge `A -> B` mea
 
 The guiding principle is **when in doubt, serial**. Waiting is cheap and a wrong parallel merge is not, so every rule only ever adds an ordering constraint. The planner never removes one, and it never guesses a direction it cannot justify: it asks a question instead (see "Questions").
 
-Code: `src/planner.rs` (rules, graph, stages, lanes), `src/planner/order.rs` (the `order` rule), `src/planner/dependency.rs` (the `dependency` rule), `src/manifest.rs` (manifest parsing: published and referenced package ids), `src/discovery.rs` (which PRs are in), `src/contained.rs` (PRs already in the base or the train by commit), `src/content.rs` (same, by file content), `src/bundle.rs` (deploy bundling suggestion), `src/detect.rs` (Depends-On and package bumps), `src/config.rs` (gate, layer, target matching).
+Code: `src/planner.rs` (rules, graph, stages, lanes), `src/planner/order.rs` (the `order` rule), `src/planner/dependency.rs` (the `dependency` rule), `src/manifest.rs` (manifest parsing: published and referenced package ids, with `src/cargo.rs`, `src/pyproject.rs` and `src/gomod.rs` for Cargo, Python and Go), `src/discovery.rs` (which PRs are in), `src/contained.rs` (PRs already in the base or the train by commit), `src/content.rs` (same, by file content), `src/bundle.rs` (deploy bundling suggestion), `src/detect.rs` (Depends-On and package bumps), `src/config.rs` (gate, layer, target matching).
 
 ## What goes into the plan
 
@@ -94,7 +94,7 @@ When a PR bumps a package that another repo in the plan publishes, the publisher
 
 Bumps are read from changed files: `.csproj`, `.fsproj`, `.props` and `.targets` (`PackageReference` or `PackageVersion` with `Include` or `Update` and a `Version` or `VersionOverride`), and `package.json` (semver values, ignoring `name` and `version`). Lock files are ignored.
 
-Publishers come from a scan of the repos that have a ready PR (manifests found by file name: `.csproj`, `.fsproj`, `.props`, `package.json`, skipping `node_modules`, `bin`, `obj`, `.git`; shallowest first, at most 40 per repo), then `[packages]` in the config overrides the scan for the package it names. The scan runs when some PR bumps a package that is not pinned in `[packages]`, or when two or more repos have a ready PR (the `dependency` rule needs it). The same scan also collects the package ids each manifest references.
+Publishers come from a scan of the repos that have a ready PR (manifests found by file name: `.csproj`, `.fsproj`, `.props`, `package.json`, `Cargo.toml`, `pyproject.toml`, `go.mod`, skipping `node_modules`, `bin`, `obj`, `.git`, and for the last three also `target`, `vendor`, `.venv`, `venv`, `site-packages`, `testdata`, `__pycache__`; shallowest first, at most 40 per repo), then `[packages]` in the config overrides the scan for the package it names. The scan runs when some PR bumps a package that is not pinned in `[packages]`, or when two or more repos have a ready PR (the `dependency` rule needs it). The same scan also collects the package ids each manifest references.
 
 A PR is never made to wait for its own repo.
 
@@ -209,7 +209,10 @@ Only `layer-unknown`, `package-ambiguous`, `tree-truncated`, `manifests-truncate
 
 - A PR with more than 300 changed files is read partially (`files-truncated`).
 - Package publishers are found by manifest scan, at most 40 manifests per repo, and a truncated tree can hide one.
-- The `dependency` rule sees NuGet and npm references inside one ecosystem. A NuGet package that feeds an npm package, or the reverse, is not detectable from manifests.
+- The `dependency` rule sees NuGet, npm, Cargo, Python and Go references inside one ecosystem. A NuGet package that feeds an npm package, or any other pair of ecosystems, is not detectable from manifests and stays explicit (`[[order]]`).
+- What publishes a package: `[package] name` in `Cargo.toml` (not with `publish = false` or `publish = []`), `[project] name` or `[tool.poetry] name` in `pyproject.toml` (not with `package-mode = false`, `[tool.uv] package = false` or the `Private :: Do Not Upload` classifier), and the `module` path in `go.mod`. Cargo names are lowercase with `_` read as `-`, Python names follow PEP 503, Go module paths are lowercase.
+- A `package` edge needs a readable version in the manifest diff. A `path`, `workspace` or `git` dependency never becomes a version, and the bump is not reported. A Python requirement gives a version only for a single `==`, `===`, `~=`, `>=` or `>` bound; a compound range (`>=1,<2`), `<`, `<=`, `!=` and a `1.*` wildcard give a bump without a version. A Go pseudo-version (`v0.0.0-<timestamp>-<commit>`) gives a bump without a version, and `+incompatible` is dropped. Cargo and Poetry tables written as `[dependencies.name]` are read only when the `[...]` header is inside the diff hunk.
+- `feed`, `bump` and `plan --check-feeds` only understand NuGet and npm. A `# wait` line for a Cargo, Python or Go package is looked up in the NuGet or npm feed, so it ends as `(feed check failed: ...)`.
 - Only direct references count, and the scan reads at most 40 manifests per repo.
 - No rule reads code: ordering is inferred from branches, files and PR text, never from what the code does.
 - The planner decides order, not safety. It does not know whether a migration is backward compatible.
