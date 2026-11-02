@@ -1,34 +1,11 @@
+mod common;
+
+use common::pr;
 use pipetrain::contained::{self, Target};
 use pipetrain::discovery::Scope;
-use pipetrain::model::{Checks, Pr, PrKey, PrState, Review};
 use serde_json::json;
 
 const TRAIN: &str = "deploy/29-10-2026";
-
-fn pr(slug: &str, number: u64, head: &str, base: &str) -> Pr {
-    let (org, repo) = slug.split_once('/').unwrap();
-    Pr {
-        key: PrKey::new(org, repo, number),
-        state: PrState::Open,
-        title: format!("change {number}"),
-        url: format!("https://github.com/{slug}/pull/{number}"),
-        body: String::new(),
-        head_ref: head.to_string(),
-        base_ref: base.to_string(),
-        head_sha: format!("{number:040x}"),
-        base_sha: String::new(),
-        is_draft: false,
-        review: Review::Approved,
-        checks: Checks::Success,
-        conflicting: false,
-        author: String::new(),
-        failed_checks: Vec::new(),
-        mergeable_unknown: false,
-        files: Vec::new(),
-        files_complete: true,
-        labels: Vec::new(),
-    }
-}
 
 fn target(slug: &str, reference: &str, sha: &str) -> Target {
     Target {

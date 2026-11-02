@@ -1,7 +1,6 @@
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::thread::{self, JoinHandle};
+mod common;
 
+use common::{Canned, serve};
 use pipetrain::command::names::{self, NameError, Target};
 use pipetrain::config::ApiConfig;
 use pipetrain::github::{ApiError, Client};
@@ -9,60 +8,15 @@ use pipetrain::model::PrKey;
 
 const FAKE: &str = "ghp_FAKE0123456789";
 
-struct Canned {
-    status: &'static str,
-    body: String,
-}
-
 fn found(owner: &str, name: &str) -> Canned {
-    Canned {
-        status: "200 OK",
-        body: format!(r#"{{"name":"{name}","owner":{{"login":"{owner}"}}}}"#),
-    }
+    common::canned(
+        "200 OK",
+        &format!(r#"{{"name":"{name}","owner":{{"login":"{owner}"}}}}"#),
+    )
 }
 
 fn missing() -> Canned {
-    Canned {
-        status: "404 Not Found",
-        body: r#"{"message":"Not Found"}"#.to_string(),
-    }
-}
-
-fn serve(replies: Vec<Canned>) -> (String, JoinHandle<Vec<String>>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    let handle = thread::spawn(move || {
-        let mut seen = Vec::new();
-        for reply in replies {
-            let (mut stream, _) = listener.accept().unwrap();
-            seen.push(read_request(&mut stream));
-            stream.write_all(render(&reply).as_bytes()).unwrap();
-        }
-        seen
-    });
-    (base, handle)
-}
-
-fn read_request(stream: &mut TcpStream) -> String {
-    let mut data = Vec::new();
-    let mut chunk = [0u8; 4096];
-    loop {
-        let read = stream.read(&mut chunk).unwrap();
-        data.extend_from_slice(&chunk[..read]);
-        let text = String::from_utf8_lossy(&data).to_string();
-        if read == 0 || text.contains("\r\n\r\n") {
-            return text;
-        }
-    }
-}
-
-fn render(reply: &Canned) -> String {
-    format!(
-        "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        reply.status,
-        reply.body.len(),
-        reply.body
-    )
+    common::canned("404 Not Found", r#"{"message":"Not Found"}"#)
 }
 
 fn client(base: &str) -> Client {
@@ -232,10 +186,7 @@ fn distinct_names_are_looked_up_separately() {
 
 #[test]
 fn unauthorized_is_not_mistaken_for_missing() {
-    let reply = Canned {
-        status: "401 Unauthorized",
-        body: r#"{"message":"Bad credentials"}"#.to_string(),
-    };
+    let reply = common::canned("401 Unauthorized", r#"{"message":"Bad credentials"}"#);
     let (base, server) = serve(vec![reply]);
     let error =
         names::resolve(&mut client(&base), vec![bare("api", 1)], &orgs(&["acme"])).unwrap_err();

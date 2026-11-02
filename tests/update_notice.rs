@@ -1,10 +1,13 @@
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::io::Write;
+use std::net::TcpListener;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+mod common;
+
+use common::read_head as read_request;
 use pipetrain::update::notice::{fetch_latest, read};
 
 const TOKEN: &str = "ghp_FAKEnotice0123456789";
@@ -12,19 +15,6 @@ const TOKEN: &str = "ghp_FAKEnotice0123456789";
 struct Server {
     base: String,
     seen: Arc<Mutex<Vec<String>>>,
-}
-
-fn read_request(stream: &mut TcpStream) -> String {
-    let mut data = Vec::new();
-    let mut chunk = [0u8; 4096];
-    loop {
-        let read = stream.read(&mut chunk).unwrap();
-        data.extend_from_slice(&chunk[..read]);
-        let text = String::from_utf8_lossy(&data).to_string();
-        if read == 0 || text.contains("\r\n\r\n") {
-            return text;
-        }
-    }
 }
 
 fn serve(status: u16, body: &'static str, delay: Duration) -> Server {

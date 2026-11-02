@@ -1,10 +1,13 @@
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::io::Write;
+use std::net::TcpListener;
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+mod common;
+
+use common::read_head as read_request;
 use serde_json::{Value, json};
 
 struct Server {
@@ -44,19 +47,6 @@ where
         }
     });
     Server { base, seen }
-}
-
-fn read_request(stream: &mut TcpStream) -> String {
-    let mut data = Vec::new();
-    let mut chunk = [0u8; 4096];
-    loop {
-        let read = stream.read(&mut chunk).unwrap();
-        data.extend_from_slice(&chunk[..read]);
-        let text = String::from_utf8_lossy(&data).to_string();
-        if read == 0 || text.contains("\r\n\r\n") {
-            return text;
-        }
-    }
 }
 
 fn packument(versions: &[&str]) -> String {

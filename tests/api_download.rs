@@ -1,7 +1,10 @@
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::io::Write;
+use std::net::TcpListener;
 use std::thread::{self, JoinHandle};
 
+mod common;
+
+use common::read_head as read_request;
 use pipetrain::config::ApiConfig;
 use pipetrain::github::{ApiError, Client, Download};
 
@@ -35,19 +38,6 @@ fn serve(make: impl FnOnce(&str) -> Vec<Canned>) -> (String, JoinHandle<Vec<Stri
         seen
     });
     (base, handle)
-}
-
-fn read_request(stream: &mut TcpStream) -> String {
-    let mut data = Vec::new();
-    let mut chunk = [0u8; 4096];
-    loop {
-        let read = stream.read(&mut chunk).unwrap();
-        data.extend_from_slice(&chunk[..read]);
-        let text = String::from_utf8_lossy(&data).to_string();
-        if read == 0 || text.contains("\r\n\r\n") {
-            return text;
-        }
-    }
 }
 
 fn render(reply: &Canned) -> String {
