@@ -26,3 +26,4 @@ pub mod publishers;
 pub mod pyproject;
 pub mod render;
 pub mod style;
+pub mod update;

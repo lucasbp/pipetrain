@@ -13,6 +13,28 @@ use crate::config::ApiConfig;
 
 const API: &str = "https://api.github.com";
 
+const MAX_HOPS: usize = 5;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Download {
+    Api(ApiError),
+    TooLarge,
+}
+
+pub fn origin(url: &str) -> &str {
+    let rest = url
+        .split_once("://")
+        .map_or(0, |(scheme, _)| scheme.len() + 3);
+    match url[rest..].find('/') {
+        Some(end) => &url[..rest + end],
+        None => url,
+    }
+}
+
+fn same_origin(left: &str, right: &str) -> bool {
+    origin(left).eq_ignore_ascii_case(origin(right))
+}
+
 pub struct Client {
     agent: Agent,
     token: String,
@@ -40,10 +62,20 @@ impl Client {
 
     #[doc(hidden)]
     pub fn with_base_url(token: String, cfg: &ApiConfig, verbose: bool, base: &str) -> Self {
+        Self::with_timeout(token, cfg, verbose, base, Duration::from_secs(40))
+    }
+
+    pub fn with_timeout(
+        token: String,
+        cfg: &ApiConfig,
+        verbose: bool,
+        base: &str,
+        timeout: Duration,
+    ) -> Self {
         let config = Agent::config_builder()
             .http_status_as_error(false)
             .max_redirects(0)
-            .timeout_global(Some(Duration::from_secs(40)))
+            .timeout_global(Some(timeout))
             .user_agent(concat!("pipetrain/", env!("CARGO_PKG_VERSION")))
             .build();
         Self {
@@ -88,17 +120,72 @@ impl Client {
 
     pub fn get(&mut self, path: &str) -> Result<Reply, ApiError> {
         self.guard.before("core", &format!("GET {path}"))?;
-        let result = self
+        let mut request = self
             .agent
             .get(format!("{}{path}", self.base))
-            .header("Authorization", format!("Bearer {}", self.token))
             .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .call();
-        match result {
+            .header("X-GitHub-Api-Version", "2022-11-28");
+        if !self.token.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", self.token));
+        }
+        match request.call() {
             Ok(response) => Ok(self.read(response)),
             Err(error) => Err(transport(error, &format!("GET {path}")).redacted(&self.token)),
         }
+    }
+
+    pub fn download(&mut self, url: &str, limit: u64) -> Result<Vec<u8>, Download> {
+        let mut current = url.to_string();
+        for _ in 0..=MAX_HOPS {
+            self.guard
+                .before("core", &format!("GET {current}"))
+                .map_err(Download::Api)?;
+            let mut request = self.agent.get(&current);
+            if !self.token.is_empty() && same_origin(&current, &self.base) {
+                request = request.header("Authorization", format!("Bearer {}", self.token));
+            }
+            let mut response = request.call().map_err(|error| {
+                Download::Api(transport(error, &format!("GET {current}")).redacted(&self.token))
+            })?;
+            let status = response.status().as_u16();
+            if (300..400).contains(&status) {
+                let location = response
+                    .headers()
+                    .get("location")
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string);
+                let Some(next) = location
+                    .filter(|next| next.starts_with("https://") || same_origin(next, &self.base))
+                else {
+                    return Err(Download::Api(ApiError::Other {
+                        message: format!(
+                            "GitHub redirected {current} somewhere that is not trusted"
+                        ),
+                    }));
+                };
+                current = next;
+                continue;
+            }
+            if !(200..300).contains(&status) {
+                let reply = Reply {
+                    status,
+                    rate: Rate::from_headers(response.headers()),
+                    body: response.body_mut().read_json().unwrap_or(Value::Null),
+                };
+                let error = reply.into_body(&current).err().unwrap_or(ApiError::Other {
+                    message: format!("GitHub answered {status} for {current}"),
+                });
+                return Err(Download::Api(error.redacted(&self.token)));
+            }
+            return match response.body_mut().with_config().limit(limit).read_to_vec() {
+                Ok(bytes) => Ok(bytes),
+                Err(ureq::Error::BodyExceedsLimit(_)) => Err(Download::TooLarge),
+                Err(error) => Err(Download::Api(transport(error, &format!("GET {current}")))),
+            };
+        }
+        Err(Download::Api(ApiError::Other {
+            message: format!("too many redirects for {url}"),
+        }))
     }
 
     pub(super) fn redact(&self, error: ApiError) -> ApiError {
