@@ -283,9 +283,18 @@ fn into_gathered(
     }
 }
 
+fn plan_text(built: &Plan) -> Result<String> {
+    Ok(serde_json::to_string_pretty(built)?)
+}
+
+pub fn plan_json(opts: &PlanOptions) -> Result<String> {
+    let (built, _) = build_plan(opts)?;
+    plan_text(&built)
+}
+
 fn emit(built: &Plan, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(built)?);
+        println!("{}", plan_text(built)?);
     } else {
         anstream::print!("{}", render::text(built));
     }

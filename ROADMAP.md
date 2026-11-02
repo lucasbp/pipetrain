@@ -52,6 +52,8 @@ pipetrain plans the merge order of pull requests across repos. This file says wh
 
 - An opt-in local usage log (`log = true`, `PIPETRAIN_LOG=1`, off with `--no-log`): one JSON line per run with the command name, exit code, error type, duration, request count and cache hit, never tokens, names, arguments or paths, rotated at 1 MiB. `pipetrain log --summary` reads it. Nothing is sent anywhere.
 
+- `pipetrain mcp`: a read-only MCP server over stdio with five tools (`plan`, `feed`, `bump` as a dry run, `doctor`, `order_suggest`) that return the same `--json` schema 1 as the commands. No port, no daemon, no write tool. See `docs/mcp.md`.
+
 ## Next
 
 Small, well understood, in this order:
@@ -67,7 +69,6 @@ Bigger or riskier, no order yet:
 - Discover orgs and repos from local clones, and use the token Git already stores as a last-resort credential.
 - Conflict resolution in steps: mechanical rules first (lockfiles, version bumps, append-only files), then proposed diffs for the rest that a human approves, then rebase on a throwaway branch that is always reversible.
 - An execution mode that performs the merges. Opt-in, resumable, with a report. Never the default.
-- An MCP server on top of `--json`, so AI agents can ask what is safe to merge and in what order.
 - Bump consumers automatically after a package release: wait for the new version to reach the feed, update the reference in the dependent repos, then release them. This writes to repos, so it ships as an opt-in mode.
 - Package detection for Maven and Gradle.
 - Other forges.

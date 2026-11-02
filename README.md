@@ -729,6 +729,29 @@ A line holds the time, the version, the subcommand name, the exit code, the erro
 
 `pipetrain log --summary [--json]` counts runs per command, the error rate by type and the median duration. Details and the JSON shape: [docs/log.md](docs/log.md).
 
+## MCP server for AI agents
+
+`pipetrain mcp` is a read-only [Model Context Protocol](https://modelcontextprotocol.io) server on stdin and stdout: no port, no daemon, nothing that writes. It has five tools, `plan`, `feed`, `bump` (dry run), `doctor` and `order_suggest`, and each returns the same `--json` (schema 1) its command prints; `order_suggest` returns the `[[order]]` text because that command has no `--json`. The token comes from `GH_TOKEN` or `gh auth` as in the CLI and never appears in an answer.
+
+Claude Code:
+
+```
+claude mcp add pipetrain -- pipetrain mcp
+claude mcp add pipetrain -- pipetrain mcp --config /path/to/pipetrain.toml
+```
+
+Keep the token out of the command: export `GH_TOKEN` in the environment that starts Claude Code, or rely on `gh auth login`.
+
+Codex, in `~/.codex/config.toml` (not verified: written from the documented `mcp_servers` shape, not tested against Codex):
+
+```toml
+[mcp_servers.pipetrain]
+command = "pipetrain"
+args = ["mcp"]
+```
+
+The tools, the result format, the errors and the protocol choice are in [docs/mcp.md](docs/mcp.md). With the [usage log](#local-usage-log) on, each tool call is logged as `mcp:<tool>`, with the same exclusions as any run.
+
 ## Out of scope
 
 pipetrain does not merge, push, approve, comment, label or re-run checks, and nothing in it is a deploy tool. The only thing it writes to GitHub is what `pipetrain bundle --apply` does: create a deploy branch and change the base of the PRs bundled into it. It decides order, not safety: it does not know whether a migration is backward compatible, only that it has to go first.
@@ -740,6 +763,7 @@ pipetrain does not merge, push, approve, comment, label or re-run checks, and no
 - [docs/queue-output.md](docs/queue-output.md): the `--emit queue` contract.
 - [docs/github-action.md](docs/github-action.md): the GitHub Action, its inputs, outputs and exit codes.
 - [docs/log.md](docs/log.md): the opt-in local usage log, what a line holds and what never enters it.
+- [docs/mcp.md](docs/mcp.md): the MCP server, its five read-only tools, results, errors and the protocol choice.
 - [docs/releasing.md](docs/releasing.md): how a release is cut, what the workflow builds and the optional crates.io step.
 - [docs/repo-names.md](docs/repo-names.md): how `repo#123` is resolved to an org, and what it costs.
 - [docs/saving-pipelines.md](docs/saving-pipelines.md): why the plan checks "already in the base", why it suggests a deploy branch, and how to apply it by hand.

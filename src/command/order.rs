@@ -171,7 +171,13 @@ pub fn suggest(client: &mut Client, names: &Names) -> Result<Suggestion> {
     Ok(suggestion)
 }
 
-pub fn run(opts: OrderOptions) -> Result<i32> {
+pub struct Suggested {
+    pub suggestion: Suggestion,
+    pub before: Vec<String>,
+    pub after: String,
+}
+
+pub fn execute(opts: &OrderOptions) -> Result<Suggested> {
     let started = Instant::now();
     let (cfg, _) = resolve::load(opts.config.as_deref(), opts.profile.as_deref(), &[], &[])?;
     let (exact, globs) = configured(&cfg);
@@ -179,28 +185,42 @@ pub fn run(opts: OrderOptions) -> Result<i32> {
     let names = if from_config {
         names_of(exact)
     } else {
-        names_of(opts.repos)
+        names_of(opts.repos.clone())
     };
     if names.is_empty() {
         bail!("no repos given and the profile has no exact repo names in [[layer]] or [[order]]");
     }
+    let mut before = Vec::new();
     if from_config && !globs.is_empty() {
-        eprintln!("warning: ignored names with a glob: {}", globs.join(", "));
+        before.push(format!(
+            "warning: ignored names with a glob: {}",
+            globs.join(", ")
+        ));
     }
     let mut client = Client::new(github::token()?, &cfg.api, opts.verbose)
         .with_cache(Cache::at_default(opts.cache));
     let progress = Progress::start(opts.progress);
     let suggestion = suggest(&mut client, &names)?;
     drop(progress);
-    print!("{}", suggestion.stdout);
-    for line in &suggestion.stderr {
+    let after = requests_line(client.requests(), client.cache_hits(), started.elapsed());
+    Ok(Suggested {
+        suggestion,
+        before,
+        after,
+    })
+}
+
+pub fn run(opts: OrderOptions) -> Result<i32> {
+    let done = execute(&opts)?;
+    for note in &done.before {
+        eprintln!("{note}");
+    }
+    print!("{}", done.suggestion.stdout);
+    for line in &done.suggestion.stderr {
         eprintln!("{line}");
     }
-    eprintln!(
-        "{}",
-        requests_line(client.requests(), client.cache_hits(), started.elapsed())
-    );
-    Ok(suggestion.exit)
+    eprintln!("{}", done.after);
+    Ok(done.suggestion.exit)
 }
 
 pub(crate) fn requests_line(requests: u32, cache_hits: u32, elapsed: Duration) -> String {
