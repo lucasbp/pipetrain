@@ -578,7 +578,7 @@ With `--check-feeds`, `plan` runs this same lookup once for each distinct packag
 ## Bumping a package (dry run)
 
 ```
-pipetrain bump <PACKAGE> [--to <VERSION>] [--ecosystem nuget|npm] [--org <ORG>] [--registry <URL>] [--repo <ORG/REPO>]... [--profile <NAME>] [--json]
+pipetrain bump <PACKAGE> [--to <VERSION>] [--ecosystem nuget|npm] [--org <ORG>] [--registry <URL>] [--repo <ORG/REPO>]... [--profile <NAME>] [--only major|minor|patch]... [--changes-only] [--check] [--json]
 ```
 
 `bump` shows which manifests would move to a version of a package. It is a dry run and only a dry run: there is no `--apply`, and clap rejects it as an unknown option.
@@ -608,15 +608,22 @@ dry run: nothing was written
 | `up_to_date` | The manifest already has the target version. |
 | `ahead` | The manifest references a newer version than the target (`ahead of target (left alone)`). |
 | `range` | The manifest uses a floating range such as `1.*` or `^1.2.0`. The raw spec is shown and it is left alone. |
+| `other_level` | Only with `--only`: the manifest would change, but not by one of the chosen levels (`different level (left alone)`). |
+
+Three options narrow what is reported. None of them is needed, and without them the output and the JSON are exactly as before.
+
+- `--only major|minor|patch` (repeatable): count as `change` only the manifests whose move to the target is of one of these levels. The level is the first number that differs from the target (`1.2.0` to `2.0.0` is major, to `1.3.0` minor, and anything after that, including a prerelease becoming final or a fourth number, is patch). The other changes become `other_level`, are left alone and count under `left alone` in the summary. The other statuses are not touched.
+- `--changes-only`: list only the manifests that would change, and only the repos that have at least one. The summary line still counts everything.
+- `--check`: exit 1 when at least one manifest would change, after printing the report, with `--check: N would change` on stderr. Exit 0 when nothing would change. Meant for a runner that gates on a pending bump. With `--only`, only the chosen levels count.
 
 Repos that do not reference the package are not listed. A scanned repo name that GitHub does not know is skipped with a warning on stderr, and the scan fails only when no repo could be read. The colors follow `bundle` (`--color auto|always|never`, not allowed with `--json`), and a spinner on stderr covers the scan like it does for `plan` (`--no-progress`, `--no-cache` and `--refresh` work as there).
 
-`--json` prints `{"schema": 1, "package", "ecosystem", "target", "repos": [{"repo", "files": [{"path", "current", "status"}]}], "dry_run": true}` with `status` one of `change`, `up_to_date`, `ahead` or `range`.
+`--json` prints `{"schema": 1, "package", "ecosystem", "target", "repos": [{"repo", "files": [{"path", "current", "status"}]}], "dry_run": true}` with `status` one of `change`, `up_to_date`, `ahead`, `range` or `other_level`. With `--only`, the object also has `"only": [...]` with the levels chosen (the key is absent otherwise). With `--changes-only`, `files` and `repos` hold only the changes.
 
 | Code | Meaning |
 |---|---|
-| 0 | The scan ran, whether or not anything would change. |
-| 1 | The package is referenced nowhere (`PACKAGE is not referenced in any scanned manifest`), the feed does not know the package or the version, no repo was given or could be read, or another error (`error: ...` on stderr). |
+| 0 | The scan ran, whether or not anything would change (and, with `--check`, nothing would). |
+| 1 | With `--check`: at least one manifest would change (`--check: N would change` on stderr). Also: the package is referenced nowhere (`PACKAGE is not referenced in any scanned manifest`), the feed does not know the package or the version, no repo was given or could be read, or another error (`error: ...` on stderr). Code 1 also means "not referenced", so with `--check` tell the cases apart by the message on stderr. |
 | 2 | The feed answered 401 or 403: the token is missing or lacks `read:packages` (the message and code of `feed`). |
 
 ## Exit code

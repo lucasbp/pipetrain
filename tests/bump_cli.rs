@@ -145,6 +145,49 @@ fn without_repos_or_profile_names_it_stops_before_the_feed() {
 }
 
 #[test]
+fn an_unknown_level_lists_the_valid_ones() {
+    let output = bump(&["Acme.Util", "--only", "huge"]);
+    assert_eq!(output.status.code(), Some(2));
+    let text = stderr(&output);
+    assert!(text.contains("invalid value 'huge'"), "{text}");
+    for level in ["major", "minor", "patch"] {
+        assert!(text.contains(level), "{text}");
+    }
+}
+
+fn passes_the_parser(extra: &[&str]) {
+    let server = serve(401, "{}");
+    let mut args = vec![
+        "@acme/ui",
+        "--ecosystem",
+        "npm",
+        "--registry",
+        &server.base,
+        "--repo",
+        "acme/web",
+    ];
+    args.extend_from_slice(extra);
+    let output = bump(&args);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("read:packages"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(server.requests(), 1);
+}
+
+#[test]
+fn only_can_be_repeated() {
+    passes_the_parser(&["--only", "major", "--only", "minor"]);
+}
+
+#[test]
+fn changes_only_and_check_are_accepted_together() {
+    passes_the_parser(&["--changes-only", "--check"]);
+}
+
+#[test]
 fn json_and_color_cannot_be_combined() {
     let output = bump(&["Acme.Util", "--json", "--color", "always"]);
     assert!(!output.status.success());

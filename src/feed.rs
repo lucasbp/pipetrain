@@ -150,6 +150,10 @@ pub struct Version {
 }
 
 impl Version {
+    pub fn numbers(&self) -> &[u64] {
+        &self.numbers
+    }
+
     pub fn parse(text: &str) -> Self {
         let text = text.trim();
         let text = text.strip_prefix(['v', 'V']).unwrap_or(text);

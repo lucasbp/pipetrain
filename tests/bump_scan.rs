@@ -232,6 +232,31 @@ fn a_dry_run_reports_each_manifest_and_only_reads() {
 }
 
 #[test]
+fn restricting_a_scanned_report_marks_the_other_levels() {
+    let repos = vec![RepoRefs {
+        repo: "acme/api".to_string(),
+        refs: vec![
+            ("Major.csproj".to_string(), "1.0.0".to_string()),
+            ("Minor.csproj".to_string(), "2.0.0".to_string()),
+            ("Patch.csproj".to_string(), "2.1.0".to_string()),
+            ("Current.csproj".to_string(), "2.1.4".to_string()),
+        ],
+    }];
+    let report = Report::build("Acme.Util", Ecosystem::Nuget, "2.1.4", &repos)
+        .restrict(&[bump::Level::Patch]);
+    let statuses: Vec<Status> = report.repos[0].files.iter().map(|row| row.status).collect();
+    assert_eq!(
+        statuses,
+        vec![
+            Status::OtherLevel,
+            Status::OtherLevel,
+            Status::Change,
+            Status::UpToDate,
+        ]
+    );
+}
+
+#[test]
 fn only_manifests_of_the_chosen_ecosystem_are_read() {
     let server = serve(fixtures());
     let mut client = client(&server);

@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 use pipetrain::cache::CacheMode;
 use pipetrain::command::apply::{self, ApplyOptions};
 use pipetrain::command::authors::AuthorFilter;
-use pipetrain::command::bump::{self, BumpOptions};
+use pipetrain::command::bump::{self, BumpOptions, Level as BumpLevel};
 use pipetrain::command::feed::{self, FeedOptions, WaitOptions};
 use pipetrain::command::init::{self, InitOptions};
 use pipetrain::command::order::{self, OrderOptions};
@@ -150,6 +150,22 @@ struct BumpArgs {
         help = "Colors: auto (only on a terminal, honors NO_COLOR), always, never"
     )]
     color: clap::ColorChoice,
+
+    #[arg(
+        long,
+        value_enum,
+        help = "Only count a change of this level (major, minor or patch; repeatable), the others are left alone"
+    )]
+    only: Vec<BumpLevel>,
+
+    #[arg(long, help = "List only the manifests that would change")]
+    changes_only: bool,
+
+    #[arg(
+        long,
+        help = "Exit 1 when something would change, 0 when nothing would"
+    )]
+    check: bool,
 }
 
 #[derive(clap::Args)]
@@ -613,6 +629,9 @@ fn run_bump(args: BumpArgs) -> Result<i32> {
         cache: CacheMode::from_flags(args.no_cache, args.refresh),
         progress,
         json: args.json,
+        only: args.only,
+        changes_only: args.changes_only,
+        check: args.check,
     })
 }
 

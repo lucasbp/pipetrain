@@ -40,6 +40,7 @@ pipetrain plans the merge order of pull requests across repos. This file says wh
 - `pipetrain bump <package> [--to <v>]`: a dry run of the consumer bump, built on `feed`. It reads the manifests of the chosen repos (or the exact repos of the profile) and reports each as `change`, `up_to_date`, `ahead` or `range`, with `--json`. It writes nothing and has no `--apply`.
 - `plan --check-feeds`: an opt-in flag that appends `(published)`, `(not yet)` or `(feed check failed: ...)` to each `# wait` comment that names a version, using the `feed` lookup. Informational only, with `published` and `feed_error` on `after[]` in `--json`.
 - A train label in addition to the branch name: `train_label` in the config (and in a profile) marks the PRs of the train by label, next to `train_branch`. A PR that matches either one is in the train.
+- `bump --only major|minor|patch`, `--changes-only` and `--check`: additive options on the dry run. `--only` (repeatable) leaves the other levels as `other_level`, `--changes-only` lists just the manifests that would change, and `--check` exits 1 when something would. Without them the output and the JSON are unchanged.
 - `pipetrain feed <package> --version <v> --wait [--interval <s>] [--timeout <s>]`: blocks until the version is published, with exit codes a runner can use (0 published, 1 timeout, 2 refused, 3 persistent error). Progress goes to stderr, the result to stdout once, and `--json` gains `waited`, `attempts`, `elapsed_seconds` and `timed_out` with schema 1 intact.
 
 ## Next

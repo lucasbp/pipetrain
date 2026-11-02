@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
+use clap::ValueEnum;
 use serde_json::{Value, json};
 
 use super::apply::tint;
@@ -29,6 +30,42 @@ pub struct BumpOptions {
     pub cache: CacheMode,
     pub progress: bool,
     pub json: bool,
+    pub only: Vec<Level>,
+    pub changes_only: bool,
+    pub check: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Level {
+    Major,
+    Minor,
+    Patch,
+}
+
+impl Level {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Major => "major",
+            Self::Minor => "minor",
+            Self::Patch => "patch",
+        }
+    }
+}
+
+pub fn level_of(current: &str, target: &str) -> Level {
+    let from = feed::Version::parse(current);
+    let to = feed::Version::parse(target);
+    let (from, to) = (from.numbers(), to.numbers());
+    for index in 0..from.len().max(to.len()) {
+        if from.get(index).unwrap_or(&0) != to.get(index).unwrap_or(&0) {
+            return match index {
+                0 => Level::Major,
+                1 => Level::Minor,
+                _ => Level::Patch,
+            };
+        }
+    }
+    Level::Patch
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +74,7 @@ pub enum Status {
     UpToDate,
     Ahead,
     Range,
+    OtherLevel,
 }
 
 impl Status {
@@ -46,6 +84,7 @@ impl Status {
             Self::UpToDate => "up_to_date",
             Self::Ahead => "ahead",
             Self::Range => "range",
+            Self::OtherLevel => "other_level",
         }
     }
 }
@@ -201,6 +240,19 @@ impl Report {
         }
     }
 
+    pub fn restrict(mut self, only: &[Level]) -> Self {
+        if only.is_empty() {
+            return self;
+        }
+        let target = self.target.clone();
+        for row in self.repos.iter_mut().flat_map(|repo| repo.files.iter_mut()) {
+            if row.status == Status::Change && !only.contains(&level_of(&row.current, &target)) {
+                row.status = Status::OtherLevel;
+            }
+        }
+        self
+    }
+
     pub fn count(&self, status: Status) -> usize {
         self.repos
             .iter()
@@ -220,13 +272,19 @@ fn row_text(report: &Report, row: &Row, color: bool) -> String {
             tint(color, dim, "ahead of target (left alone)")
         ),
         Status::Range => format!("{head} {}", tint(color, yellow, "range, left alone")),
+        Status::OtherLevel => format!(
+            "{head} {}",
+            tint(color, dim, "different level (left alone)")
+        ),
     }
 }
 
 fn summary_line(report: &Report, elapsed: Option<Duration>) -> String {
     let change = report.count(Status::Change);
     let up_to_date = report.count(Status::UpToDate);
-    let left = report.count(Status::Ahead) + report.count(Status::Range);
+    let left = report.count(Status::Ahead)
+        + report.count(Status::Range)
+        + report.count(Status::OtherLevel);
     let repos = report.repos.len();
     let noun = if repos == 1 { "repo" } else { "repos" };
     let suffix = elapsed
@@ -238,12 +296,29 @@ fn summary_line(report: &Report, elapsed: Option<Duration>) -> String {
 }
 
 pub fn render_with(report: &Report, color: bool, elapsed: Option<Duration>) -> String {
+    render_rows(report, color, elapsed, false)
+}
+
+pub fn render_rows(
+    report: &Report,
+    color: bool,
+    elapsed: Option<Duration>,
+    changes_only: bool,
+) -> String {
     let mut out = String::new();
     let title = format!("bump {} to {}", report.package, report.target);
     out.push_str(&format!("{}\n", tint(color, bold, &title)));
     for repo in &report.repos {
+        let rows: Vec<&Row> = repo
+            .files
+            .iter()
+            .filter(|row| !changes_only || row.status == Status::Change)
+            .collect();
+        if rows.is_empty() {
+            continue;
+        }
         out.push_str(&format!("{}\n", tint(color, bold, &repo.repo)));
-        for row in &repo.files {
+        for row in rows {
             out.push_str(&format!("  {}\n", row_text(report, row, color)));
         }
     }
@@ -260,13 +335,19 @@ pub fn render(report: &Report) -> String {
 }
 
 pub fn to_json(report: &Report) -> Value {
+    to_json_with(report, &[], false)
+}
+
+pub fn to_json_with(report: &Report, only: &[Level], changes_only: bool) -> Value {
     let repos: Vec<Value> = report
         .repos
         .iter()
+        .filter(|repo| !changes_only || repo.files.iter().any(|row| row.status == Status::Change))
         .map(|repo| {
             let files: Vec<Value> = repo
                 .files
                 .iter()
+                .filter(|row| !changes_only || row.status == Status::Change)
                 .map(|row| {
                     json!({
                         "path": row.path,
@@ -278,14 +359,18 @@ pub fn to_json(report: &Report) -> Value {
             json!({ "repo": repo.repo, "files": files })
         })
         .collect();
-    json!({
+    let mut out = json!({
         "schema": 1,
         "package": report.package,
         "ecosystem": report.ecosystem.as_str(),
         "target": report.target,
         "repos": repos,
         "dry_run": true,
-    })
+    });
+    if !only.is_empty() {
+        out["only"] = only.iter().map(|level| level.as_str()).collect();
+    }
+    out
 }
 
 pub fn run(opts: BumpOptions) -> Result<i32> {
@@ -334,16 +419,26 @@ pub fn run(opts: BumpOptions) -> Result<i32> {
         eprintln!("{} is not referenced in any scanned manifest", opts.package);
         return Ok(1);
     }
-    let report = Report::build(&opts.package, ecosystem, &target, &scanned.repos);
+    let report =
+        Report::build(&opts.package, ecosystem, &target, &scanned.repos).restrict(&opts.only);
     if opts.json {
-        println!("{}", serde_json::to_string_pretty(&to_json(&report))?);
+        let json = to_json_with(&report, &opts.only, opts.changes_only);
+        println!("{}", serde_json::to_string_pretty(&json)?);
     } else {
-        anstream::print!("{}", render_with(&report, true, Some(started.elapsed())));
+        anstream::print!(
+            "{}",
+            render_rows(&report, true, Some(started.elapsed()), opts.changes_only)
+        );
     }
     eprintln!(
         "{}",
         requests_line(client.requests(), client.cache_hits(), started.elapsed())
     );
+    let pending = report.count(Status::Change);
+    if opts.check && pending > 0 {
+        eprintln!("--check: {pending} would change");
+        return Ok(1);
+    }
     Ok(0)
 }
 
@@ -503,5 +598,161 @@ mod tests {
                 "dry_run": true
             })
         );
+    }
+
+    fn leveled() -> Report {
+        let repos = vec![
+            RepoRefs {
+                repo: "acme/api".to_string(),
+                refs: vec![
+                    ("A.csproj".to_string(), "1.0.0".to_string()),
+                    ("B.csproj".to_string(), "2.0.0".to_string()),
+                    ("C.csproj".to_string(), "2.1.0".to_string()),
+                    ("D.csproj".to_string(), "2.1.5".to_string()),
+                    ("E.csproj".to_string(), "3.0.0".to_string()),
+                    ("F.csproj".to_string(), "^1.0".to_string()),
+                ],
+            },
+            RepoRefs {
+                repo: "acme/web".to_string(),
+                refs: vec![
+                    ("G.csproj".to_string(), "2.1.5".to_string()),
+                    ("H.csproj".to_string(), "3.0.0".to_string()),
+                ],
+            },
+        ];
+        Report::build("Acme.Util", Ecosystem::Nuget, "2.1.5", &repos)
+    }
+
+    fn statuses(report: &Report) -> Vec<Status> {
+        report
+            .repos
+            .iter()
+            .flat_map(|repo| repo.files.iter().map(|row| row.status))
+            .collect()
+    }
+
+    #[test]
+    fn the_level_is_the_first_number_that_differs() {
+        assert_eq!(level_of("1.2.0", "2.0.0"), Level::Major);
+        assert_eq!(level_of("1.2.0", "1.3.0"), Level::Minor);
+        assert_eq!(level_of("1.2.0", "1.2.5"), Level::Patch);
+        assert_eq!(level_of("1.2.0", "1.2.0.1"), Level::Patch);
+        assert_eq!(level_of("1.0.0-beta", "1.0.0"), Level::Patch);
+        assert_eq!(level_of("1.10", "1.10.1"), Level::Patch);
+    }
+
+    #[test]
+    fn restrict_leaves_only_changes_of_the_chosen_level() {
+        let report = leveled().restrict(&[Level::Minor]);
+        assert_eq!(
+            statuses(&report),
+            vec![
+                Status::OtherLevel,
+                Status::Change,
+                Status::OtherLevel,
+                Status::UpToDate,
+                Status::Ahead,
+                Status::Range,
+                Status::UpToDate,
+                Status::Ahead,
+            ]
+        );
+    }
+
+    #[test]
+    fn restrict_accepts_several_levels() {
+        let report = leveled().restrict(&[Level::Major, Level::Patch]);
+        assert_eq!(report.count(Status::Change), 2);
+        assert_eq!(report.count(Status::OtherLevel), 1);
+    }
+
+    #[test]
+    fn an_empty_restriction_changes_nothing() {
+        assert_eq!(leveled().restrict(&[]), leveled());
+    }
+
+    #[test]
+    fn the_summary_counts_other_levels_as_left_alone() {
+        let text = render(&leveled().restrict(&[Level::Minor]));
+        assert!(
+            text.contains("1 would change, 2 up to date, 5 left alone in 2 repos"),
+            "{text}"
+        );
+        assert!(text.contains("A.csproj  Acme.Util 1.0.0 different level (left alone)"));
+    }
+
+    #[test]
+    fn changes_only_lists_just_the_changes_and_keeps_the_summary() {
+        let text = render_rows(&leveled(), false, None, true);
+        let expected = [
+            "bump Acme.Util to 2.1.5",
+            "acme/api",
+            "  A.csproj  Acme.Util 1.0.0 -> 2.1.5",
+            "  B.csproj  Acme.Util 2.0.0 -> 2.1.5",
+            "  C.csproj  Acme.Util 2.1.0 -> 2.1.5",
+            "3 would change, 2 up to date, 3 left alone in 2 repos",
+            "dry run: nothing was written",
+            "",
+        ]
+        .join("\n");
+        assert_eq!(text, expected);
+    }
+
+    #[test]
+    fn changes_only_follows_the_restriction() {
+        let text = render_rows(&leveled().restrict(&[Level::Minor]), false, None, true);
+        let expected = [
+            "bump Acme.Util to 2.1.5",
+            "acme/api",
+            "  B.csproj  Acme.Util 2.0.0 -> 2.1.5",
+            "1 would change, 2 up to date, 5 left alone in 2 repos",
+            "dry run: nothing was written",
+            "",
+        ]
+        .join("\n");
+        assert_eq!(text, expected);
+    }
+
+    #[test]
+    fn without_the_new_options_the_render_is_unchanged() {
+        let report = leveled();
+        assert_eq!(
+            render_rows(&report, false, None, false),
+            render_with(&report, false, None)
+        );
+    }
+
+    #[test]
+    fn json_without_options_equals_the_plain_json() {
+        let report = leveled();
+        let json = to_json_with(&report, &[], false);
+        assert_eq!(json, to_json(&report));
+        assert!(json.get("only").is_none());
+    }
+
+    #[test]
+    fn json_lists_the_levels_it_was_restricted_to() {
+        let report = leveled().restrict(&[Level::Minor]);
+        let json = to_json_with(&report, &[Level::Minor], false);
+        assert_eq!(json["only"], json!(["minor"]));
+        assert_eq!(json["repos"][0]["files"][0]["status"], json!("other_level"));
+        assert_eq!(json["repos"][0]["files"][1]["status"], json!("change"));
+        assert_eq!(json["repos"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn json_changes_only_drops_other_files_and_repos() {
+        let report = leveled().restrict(&[Level::Minor]);
+        let json = to_json_with(&report, &[Level::Minor], true);
+        assert_eq!(
+            json["repos"],
+            json!([
+                {"repo": "acme/api", "files": [
+                    {"path": "B.csproj", "current": "2.0.0", "status": "change"}
+                ]}
+            ])
+        );
+        assert_eq!(json["only"], json!(["minor"]));
     }
 }
