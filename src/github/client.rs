@@ -15,6 +15,25 @@ const API: &str = "https://api.github.com";
 
 const MAX_HOPS: usize = 5;
 
+pub const API_ENV: &str = "PIPETRAIN_API_URL";
+
+pub fn is_loopback(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    let authority = rest.split('/').next().unwrap_or_default();
+    let host = if authority.starts_with('[') {
+        authority.split(']').next().map(|h| format!("{h}]"))
+    } else {
+        authority.split(':').next().map(str::to_string)
+    };
+    matches!(host.as_deref(), Some("127.0.0.1" | "localhost" | "[::1]"))
+}
+
+fn api_override(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|url| is_loopback(url))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Download {
     Api(ApiError),
@@ -57,7 +76,9 @@ fn transport(error: ureq::Error, label: &str) -> ApiError {
 
 impl Client {
     pub fn new(token: String, cfg: &ApiConfig, verbose: bool) -> Self {
-        Self::with_base_url(token, cfg, verbose, API)
+        let env = std::env::var(API_ENV).ok();
+        let base = api_override(env.as_deref());
+        Self::with_base_url(token, cfg, verbose, base.unwrap_or(API))
     }
 
     #[doc(hidden)]
@@ -254,5 +275,33 @@ impl Client {
         Ok(reply
             .into_graphql(label)
             .map_err(|error| error.redacted(&self.token))?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_loopback_urls_override_the_api() {
+        for ok in [
+            "http://127.0.0.1:8080",
+            "http://localhost:1",
+            "http://[::1]:9/x",
+            " http://localhost ",
+        ] {
+            assert!(api_override(Some(ok)).is_some(), "{ok}");
+        }
+        for bad in [
+            "https://127.0.0.1:8080",
+            "http://example.com",
+            "http://localhost.evil.com",
+            "http://127.0.0.1.evil.com",
+            "http://evil.com/127.0.0.1",
+            "",
+        ] {
+            assert!(api_override(Some(bad)).is_none(), "{bad}");
+        }
+        assert!(api_override(None).is_none());
     }
 }

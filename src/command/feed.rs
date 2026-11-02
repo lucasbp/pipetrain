@@ -313,7 +313,7 @@ pub fn annotate(plan: &mut Plan, checker: &mut Checker) -> usize {
     total
 }
 
-fn lookup(opts: &FeedOptions) -> Result<Result<Report, i32>> {
+fn lookup(opts: &FeedOptions, notes: &mut Vec<String>) -> Result<Result<Report, i32>> {
     let ecosystem = opts
         .ecosystem
         .unwrap_or_else(|| Ecosystem::default_for(&opts.package));
@@ -321,11 +321,11 @@ fn lookup(opts: &FeedOptions) -> Result<Result<Report, i32>> {
     let fetched = fetch(&session, ecosystem, opts)?;
     match fetched {
         Fetched::Refused { had_token } => {
-            eprintln!("{}", feed::refused_message(had_token));
+            notes.push(feed::refused_message(had_token));
             Ok(Err(feed::EXIT_REFUSED))
         }
         Fetched::NotFound { feed } => {
-            eprintln!("{}", feed::not_found_message(&feed));
+            notes.push(feed::not_found_message(&feed));
             Ok(Err(feed::EXIT_NOT_PUBLISHED))
         }
         Fetched::Found { feed, versions } => Ok(Ok(Report::build(
@@ -338,12 +338,12 @@ fn lookup(opts: &FeedOptions) -> Result<Result<Report, i32>> {
     }
 }
 
-pub fn latest(opts: &FeedOptions) -> Result<Result<String, i32>> {
-    Ok(match lookup(opts)? {
+pub fn latest(opts: &FeedOptions, notes: &mut Vec<String>) -> Result<Result<String, i32>> {
+    Ok(match lookup(opts, notes)? {
         Ok(report) => match report.latest {
             Some(latest) => Ok(latest),
             None => {
-                eprintln!("{}", feed::not_found_message(&report.feed));
+                notes.push(feed::not_found_message(&report.feed));
                 Err(feed::EXIT_NOT_PUBLISHED)
             }
         },
@@ -473,19 +473,37 @@ fn print_wait(report: &Report, waited: &Waited, timed_out: bool, json: bool) -> 
     Ok(())
 }
 
-pub fn run(opts: FeedOptions) -> Result<i32> {
-    match lookup(&opts)? {
-        Err(code) => Ok(code),
-        Ok(report) => {
-            if opts.json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&feed::render_json(&report))?
-                );
+pub struct Rendered {
+    pub stdout: Option<String>,
+    pub exit: i32,
+}
+
+pub fn render(opts: &FeedOptions, notes: &mut Vec<String>) -> Result<Rendered> {
+    Ok(match lookup(opts, notes)? {
+        Err(code) => Rendered {
+            stdout: None,
+            exit: code,
+        },
+        Ok(report) => Rendered {
+            stdout: Some(if opts.json {
+                serde_json::to_string_pretty(&feed::render_json(&report))?
             } else {
-                println!("{}", feed::render_text(&report));
-            }
-            Ok(report.exit_code())
-        }
+                feed::render_text(&report)
+            }),
+            exit: report.exit_code(),
+        },
+    })
+}
+
+pub fn run(opts: FeedOptions) -> Result<i32> {
+    let mut notes = Vec::new();
+    let rendered = render(&opts, &mut notes);
+    for note in &notes {
+        eprintln!("{note}");
     }
+    let rendered = rendered?;
+    if let Some(text) = &rendered.stdout {
+        println!("{text}");
+    }
+    Ok(rendered.exit)
 }
