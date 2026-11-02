@@ -1,9 +1,12 @@
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::io::Write;
+use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+mod common;
+
+use common::read_head as read_request;
 use pipetrain::command::feed::{Checker, annotate};
 use pipetrain::config::{Config, Rules};
 use pipetrain::emit;
@@ -20,19 +23,6 @@ struct Server {
 impl Server {
     fn lines(&self) -> Vec<String> {
         self.seen.lock().unwrap().clone()
-    }
-}
-
-fn read_request(stream: &mut TcpStream) -> String {
-    let mut data = Vec::new();
-    let mut chunk = [0u8; 4096];
-    loop {
-        let read = stream.read(&mut chunk).unwrap();
-        data.extend_from_slice(&chunk[..read]);
-        let text = String::from_utf8_lossy(&data).to_string();
-        if read == 0 || text.contains("\r\n\r\n") {
-            return text;
-        }
     }
 }
 

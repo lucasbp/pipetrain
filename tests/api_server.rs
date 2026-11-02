@@ -1,82 +1,13 @@
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::thread::{self, JoinHandle};
+use std::net::TcpListener;
 
+mod common;
+
+use common::{Canned, canned, serve};
 use pipetrain::config::ApiConfig;
 use pipetrain::github::{ApiError, Client};
 use serde_json::json;
 
 const FAKE: &str = "ghp_FAKE0123456789";
-
-struct Canned {
-    status: &'static str,
-    headers: Vec<(&'static str, String)>,
-    body: String,
-}
-
-fn canned(status: &'static str, body: &str) -> Canned {
-    Canned {
-        status,
-        headers: Vec::new(),
-        body: body.to_string(),
-    }
-}
-
-fn serve(replies: Vec<Canned>) -> (String, JoinHandle<Vec<String>>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    let handle = thread::spawn(move || {
-        let mut seen = Vec::new();
-        for reply in replies {
-            let (mut stream, _) = listener.accept().unwrap();
-            seen.push(read_request(&mut stream));
-            stream.write_all(render(&reply).as_bytes()).unwrap();
-        }
-        seen
-    });
-    (base, handle)
-}
-
-fn read_request(stream: &mut TcpStream) -> String {
-    let mut data = Vec::new();
-    let mut chunk = [0u8; 4096];
-    loop {
-        let read = stream.read(&mut chunk).unwrap();
-        data.extend_from_slice(&chunk[..read]);
-        let text = String::from_utf8_lossy(&data).to_string();
-        if read == 0 || body_complete(&text) {
-            return text;
-        }
-    }
-}
-
-fn body_complete(text: &str) -> bool {
-    let Some((head, body)) = text.split_once("\r\n\r\n") else {
-        return false;
-    };
-    let wanted = head
-        .lines()
-        .find_map(|line| {
-            line.to_lowercase()
-                .strip_prefix("content-length:")
-                .map(str::to_string)
-        })
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(0);
-    body.len() >= wanted
-}
-
-fn render(reply: &Canned) -> String {
-    let mut text = format!("HTTP/1.1 {}\r\n", reply.status);
-    text.push_str("Content-Type: application/json\r\n");
-    for (name, value) in &reply.headers {
-        text.push_str(&format!("{name}: {value}\r\n"));
-    }
-    text.push_str(&format!("Content-Length: {}\r\n", reply.body.len()));
-    text.push_str("Connection: close\r\n\r\n");
-    text.push_str(&reply.body);
-    text
-}
 
 fn client(base: &str) -> Client {
     let cfg = ApiConfig {

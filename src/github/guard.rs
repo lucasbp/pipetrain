@@ -72,6 +72,7 @@ impl Guard {
         self.check_limits(resource)?;
         self.pace();
         self.total += 1;
+        crate::log::stats::request();
         if self.verbose {
             crate::progress::line(&format!("request {:>3}  {label}", self.total));
         }

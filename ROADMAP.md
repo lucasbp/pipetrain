@@ -50,6 +50,8 @@ pipetrain plans the merge order of pull requests across repos. This file says wh
 - `pipetrain update --check`: read-only, exits 10 when a newer release exists. A passive one-line notice on stderr, at most once every 24 hours, interactive terminals only and off with `--no-update-check` or `PIPETRAIN_NO_UPDATE_CHECK=1`. The in-place swap of the executable exists behind `--experimental-install` and is not ready.
 - A GitHub Action (`action.yml`, composite, read-only): installs the release binary for the runner, verifies it against `SHA256SUMS`, runs `plan` with `refs`, `all`, `profile`, `config` and `emit` (`json`, `queue`, `text`), and publishes `queue`, `json`, `text` and `exit-code` as outputs and in the step summary. Exit 3 only fails the step with `fail-on-questions`. See `docs/github-action.md`.
 
+- An opt-in local usage log (`log = true`, `PIPETRAIN_LOG=1`, off with `--no-log`): one JSON line per run with the command name, exit code, error type, duration, request count and cache hit, never tokens, names, arguments or paths, rotated at 1 MiB. `pipetrain log --summary` reads it. Nothing is sent anywhere.
+
 ## Next
 
 Small, well understood, in this order:

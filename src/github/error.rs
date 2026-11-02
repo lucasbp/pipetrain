@@ -71,6 +71,21 @@ fn graphql(label: &str, message: &str) -> String {
 }
 
 impl ApiError {
+    pub fn variant(&self) -> &'static str {
+        match self {
+            Self::NoToken => "NoToken",
+            Self::Unauthorized => "Unauthorized",
+            Self::RateLimited { .. } => "RateLimited",
+            Self::Sso { .. } => "Sso",
+            Self::Forbidden { .. } => "Forbidden",
+            Self::NotFound { .. } => "NotFound",
+            Self::Network => "Network",
+            Self::Graphql { .. } => "Graphql",
+            Self::Stopped { .. } => "Stopped",
+            Self::Other { .. } => "Other",
+        }
+    }
+
     fn text(&self) -> String {
         match self {
             Self::NoToken => hint::short_no_token(Os::current(), GhState::LoggedOut),

@@ -16,6 +16,7 @@ pub mod github;
 pub mod gomod;
 pub mod hint;
 pub mod live;
+pub mod log;
 pub mod manifest;
 pub mod model;
 pub mod plan;
