@@ -61,6 +61,8 @@ Small, well understood, in this order:
 1. Finish the in-place update (`update` without a flag): download, verify the SHA-256 and swap the executable, on top of the existing experimental path.
 2. `bump --apply`: an opt-in mode that opens one PR per repo with the new version, on top of the dry run.
 3. A deeper conflict report that simulates the merge, beyond files changed by more than one PR.
+4. `feed`, `bump` and `plan --check-feeds` for Cargo (crates.io), `pyproject.toml` (PyPI) and Go modules: today they only know NuGet and npm.
+5. `cargo audit` (and `cargo deny` if it fits) in the CI workflow, so advisories fail a PR instead of being checked by hand.
 
 ## Later
 
@@ -70,6 +72,7 @@ Bigger or riskier, no order yet:
 - Conflict resolution in steps: mechanical rules first (lockfiles, version bumps, append-only files), then proposed diffs for the rest that a human approves, then rebase on a throwaway branch that is always reversible.
 - An execution mode that performs the merges. Opt-in, resumable, with a report. Never the default.
 - Bump consumers automatically after a package release: wait for the new version to reach the feed, update the reference in the dependent repos, then release them. This writes to repos, so it ships as an opt-in mode.
+- Using `pipetrain mcp` from cloud sessions and Codex: a documented path that downloads the release with a SHA-256 check and registers the server, no hosted service and no token stored on a server.
 - Package detection for Maven and Gradle.
 - Other forges.
 - Optional encryption for local storage.
