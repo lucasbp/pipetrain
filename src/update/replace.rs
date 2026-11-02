@@ -25,7 +25,7 @@ pub fn discard_leftover(exe: &Path) {
 fn copy_mode(from: &Path, to: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let mode = fs::metadata(from).map_or(0o755, |meta| meta.permissions().mode() & 0o7777);
-    let _ = fs::set_permissions(to, fs::Permissions::from_mode(mode | 0o111));
+    let _ = fs::set_permissions(to, fs::Permissions::from_mode(mode | 0o100));
 }
 
 #[cfg(not(unix))]
