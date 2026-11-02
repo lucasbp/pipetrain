@@ -14,10 +14,12 @@ use pipetrain::command::init::{self, InitOptions};
 use pipetrain::command::order::{self, OrderOptions};
 use pipetrain::command::orgs::{self, OrgsOptions};
 use pipetrain::command::profiles::{self, ProfilesOptions};
+use pipetrain::command::update::{self, UpdateOptions};
 use pipetrain::command::{PlanOptions, plan};
 use pipetrain::doctor::{self, DoctorOptions};
 use pipetrain::emit::Emit;
 use pipetrain::feed::{DEFAULT_INTERVAL, DEFAULT_TIMEOUT, Ecosystem};
+use pipetrain::update::notice::{self, Suppress};
 
 #[derive(Parser)]
 #[command(
@@ -26,8 +28,33 @@ use pipetrain::feed::{DEFAULT_INTERVAL, DEFAULT_TIMEOUT, Ecosystem};
     about = "Plans the merge order of pull requests across repos"
 )]
 struct Cli {
+    #[arg(
+        long,
+        global = true,
+        help = "Do not look for a newer release or print the note about one (also PIPETRAIN_NO_UPDATE_CHECK=1)"
+    )]
+    no_update_check: bool,
+
     #[command(subcommand)]
     command: Command,
+}
+
+fn suppression(cli: &Cli) -> Suppress {
+    let (json, emit_queue, is_update) = match &cli.command {
+        Command::Plan(args) => (args.json, args.emit.is_some(), false),
+        Command::Bundle(args) => (args.json, false, false),
+        Command::Doctor(args) => (args.json, false, false),
+        Command::Feed(args) => (args.json, false, false),
+        Command::Bump(args) => (args.json, false, false),
+        Command::Update(_) => (false, false, true),
+        _ => (false, false, false),
+    };
+    Suppress {
+        flag: cli.no_update_check,
+        json,
+        emit_queue,
+        is_update,
+    }
 }
 
 #[derive(Subcommand)]
@@ -70,6 +97,39 @@ enum Command {
         about = "Read-only: shows which manifests would move to which version of a package; writes nothing"
     )]
     Bump(BumpArgs),
+
+    #[command(
+        about = "Updates this executable from the latest GitHub release; only runs when you call it, --check only reports"
+    )]
+    Update(UpdateArgs),
+}
+
+#[derive(clap::Args)]
+struct UpdateArgs {
+    #[arg(
+        long,
+        help = "Only report whether a newer release exists; exits 10 when there is one, 0 when not, and downloads nothing"
+    )]
+    check: bool,
+
+    #[arg(
+        long,
+        conflicts_with = "check",
+        help = "Download, verify and swap this executable (not ready, may change); without it `update` changes nothing"
+    )]
+    experimental_install: bool,
+
+    #[arg(long, help = "Print the result as JSON")]
+    json: bool,
+
+    #[arg(long, help = "Do not draw the progress indicator on stderr")]
+    no_progress: bool,
+
+    #[arg(long, hide = true)]
+    api_url: Option<String>,
+
+    #[arg(long, help = "Log every API request to stderr")]
+    verbose: bool,
 }
 
 #[derive(clap::Args)]
@@ -642,6 +702,14 @@ fn run_bump(args: BumpArgs) -> Result<i32> {
 fn run_command(command: Command) -> Result<i32> {
     match command {
         Command::Bump(args) => run_bump(args),
+        Command::Update(args) => update::run(UpdateOptions {
+            check: args.check,
+            install: args.experimental_install,
+            json: args.json,
+            progress: pipetrain::progress::detect(args.no_progress, args.json, false),
+            api_url: args.api_url,
+            verbose: args.verbose,
+        }),
         Command::Doctor(args) => run_doctor(args),
         Command::Plan(args) => run_plan(args),
         Command::Bundle(args) => run_bundle(args),
@@ -717,5 +785,9 @@ fn dispatch(command: Command) -> ExitCode {
 }
 
 fn main() -> ExitCode {
-    dispatch(Cli::parse().command)
+    let cli = Cli::parse();
+    let suppress = suppression(&cli);
+    let code = dispatch(cli.command);
+    notice::announce(suppress);
+    code
 }

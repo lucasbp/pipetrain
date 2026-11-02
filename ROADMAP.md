@@ -46,12 +46,16 @@ pipetrain plans the merge order of pull requests across repos. This file says wh
 - Package detection for `Cargo.toml`, `pyproject.toml` and `go.mod`, next to NuGet and npm: a repo that publishes a package and another that references it get the `dependency` edge, and a readable version bump in the manifest diff gives the `package` edge and the `# wait` line. `path`, `workspace` and `git` dependencies, compound ranges and Go pseudo-versions never become a version. `feed`, `bump` and `--check-feeds` still know only NuGet and npm.
 - `plan` and `bundle` accept `repo#12` without the org: the name is looked up in the orgs of the active profile (or `--org`), one `GET /repos` per org and distinct name, never cached. A name in two orgs is an error that lists them, and a name in none is an error with the next step. `org/repo#12` and `--json` and `--emit queue` are unchanged.
 
+- Prebuilt binaries: a tag `v*` triggers a workflow that builds Windows x86_64, Linux x86_64 and aarch64 (static musl) and macOS arm64 and x86_64, plus `.deb` and `.rpm` for Linux x86_64 and aarch64, and publishes them with `SHA256SUMS` and a build provenance attestation to a GitHub Release. `install.sh` and `install.ps1` install into a user folder and verify the SHA-256. Publishing the crate on crates.io is a separate manual step, documented in `docs/releasing.md`.
+- `pipetrain update --check`: read-only, exits 10 when a newer release exists. A passive one-line notice on stderr, at most once every 24 hours, interactive terminals only and off with `--no-update-check` or `PIPETRAIN_NO_UPDATE_CHECK=1`. The in-place swap of the executable exists behind `--experimental-install` and is not ready.
+
 ## Next
 
 Small, well understood, in this order:
 
-1. `bump --apply`: an opt-in mode that opens one PR per repo with the new version, on top of the dry run.
-2. A deeper conflict report that simulates the merge, beyond files changed by more than one PR.
+1. Finish the in-place update (`update` without a flag): download, verify the SHA-256 and swap the executable, on top of the existing experimental path.
+2. `bump --apply`: an opt-in mode that opens one PR per repo with the new version, on top of the dry run.
+3. A deeper conflict report that simulates the merge, beyond files changed by more than one PR.
 
 ## Later
 
