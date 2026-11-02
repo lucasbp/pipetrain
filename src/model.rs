@@ -45,6 +45,13 @@ impl PrKey {
     }
 }
 
+pub fn parse_bare(input: &str) -> Option<(String, u64)> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"^([A-Za-z0-9_.-]+)#(\d+)$").expect("valid regex"));
+    let caps = re.captures(input.trim())?;
+    Some((caps[1].to_string(), caps[2].parse().ok()?))
+}
+
 impl fmt::Display for PrKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}/{}#{}", self.org, self.repo, self.number)

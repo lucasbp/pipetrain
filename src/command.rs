@@ -28,6 +28,7 @@ pub mod bump;
 mod checklist;
 pub mod feed;
 pub mod init;
+pub mod names;
 pub mod order;
 pub mod orgs;
 pub mod profiles;
@@ -220,14 +221,8 @@ fn deploy_branch_for(cfg: &Config, date: Option<&str>) -> Result<String> {
     Ok(discovery::train_branch(cfg, date))
 }
 
-fn explicit_targets(raw_prs: &[String], cfg: &Config) -> Result<Vec<PrKey>> {
-    let mut explicit = Vec::new();
-    for raw in raw_prs {
-        match PrKey::parse(raw) {
-            Some(key) => explicit.push(key),
-            None => bail!("`{raw}` is not a PR reference; use org/repo#123"),
-        }
-    }
+fn explicit_targets(raw_prs: &[String], cfg: &Config) -> Result<Vec<names::Target>> {
+    let explicit = names::parse_targets(raw_prs)?;
     if explicit.is_empty() && cfg.orgs.is_empty() {
         bail!(
             "no orgs to look at: pass --org, name PRs as org/repo#123, or set `orgs` in pipetrain.toml"
@@ -236,7 +231,7 @@ fn explicit_targets(raw_prs: &[String], cfg: &Config) -> Result<Vec<PrKey>> {
     Ok(explicit)
 }
 
-fn train_label(explicit: &[PrKey], all: bool, deploy_branch: &str) -> String {
+fn train_label(explicit: &[names::Target], all: bool, deploy_branch: &str) -> String {
     if !explicit.is_empty() {
         "explicit PRs".to_string()
     } else if all {
@@ -342,6 +337,10 @@ pub(crate) fn build_plan(opts: &PlanOptions) -> Result<(Plan, Client)> {
     let mut client = Client::new(github::token()?, &cfg.api, opts.verbose)
         .with_cache(Cache::at_default(opts.cache));
     let progress = Progress::start(opts.progress);
+    if names::has_bare(&explicit) {
+        progress::phase("resolving repo names");
+    }
+    let explicit = names::resolve(&mut client, explicit, &cfg.orgs)?;
     progress::phase("discovering pull requests");
     let Discovered {
         ready,

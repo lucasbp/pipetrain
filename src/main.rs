@@ -324,7 +324,9 @@ struct InitArgs {
 
 #[derive(clap::Args)]
 struct PlanArgs {
-    #[arg(help = "PRs to plan as org/repo#123; without any, today's train is discovered")]
+    #[arg(
+        help = "PRs to plan as org/repo#123 or repo#123 (the org is searched in the profile's orgs); without any, today's train is discovered"
+    )]
     prs: Vec<String>,
 
     #[arg(
@@ -422,7 +424,9 @@ struct PlanArgs {
 
 #[derive(clap::Args)]
 struct BundleArgs {
-    #[arg(help = "PRs to bundle as org/repo#123; without any, today's train is discovered")]
+    #[arg(
+        help = "PRs to bundle as org/repo#123 or repo#123 (the org is searched in the profile's orgs); without any, today's train is discovered"
+    )]
     prs: Vec<String>,
 
     #[arg(

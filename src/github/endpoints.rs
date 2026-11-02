@@ -91,6 +91,21 @@ impl Client {
             .and_then(parse_pr))
     }
 
+    pub fn repo_in_org(&mut self, org: &str, repo: &str) -> Result<Option<String>> {
+        let path = format!("/repos/{org}/{repo}");
+        let reply = self.get(&path)?;
+        if reply.status == 404 {
+            return Ok(None);
+        }
+        let body = reply.into_body(&path).map_err(|error| self.redact(error))?;
+        let owner = body.pointer("/owner/login").and_then(|v| v.as_str());
+        let name = body.get("name").and_then(|v| v.as_str());
+        Ok(Some(match (owner, name) {
+            (Some(owner), Some(name)) => format!("{owner}/{name}"),
+            _ => format!("{org}/{repo}"),
+        }))
+    }
+
     pub fn dep_state(&mut self, key: &PrKey) -> Result<DepState> {
         Ok(match self.pr(key)? {
             None => DepState::Missing,

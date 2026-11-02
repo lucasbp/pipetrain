@@ -131,6 +131,7 @@ pipetrain plan [OPTIONS] [PRS]...
 |---|---|
 | `pipetrain plan` | Discovers today's train in the configured orgs and plans it. |
 | `pipetrain plan acme/orders-api#12 acme/billing-api#3` | Plans exactly these PRs, no discovery. |
+| `pipetrain plan orders-api#12 billing-api#3` | Same, with the org left out: each repo name is searched in the orgs of the active profile. See [Repo names without the org](#repo-names-without-the-org). |
 | `pipetrain plan --all` | Plans every approved open PR in the configured orgs, whatever its branch. For any day, not only the train day. Cannot be combined with explicit PRs. |
 | `pipetrain plan --json` | Prints the plan as JSON instead of text (contract in `docs/plan-json.md`). |
 | `pipetrain plan --emit queue` | Prints only a queue of `merge:org/repo#N` lines for a runner (contract in `docs/queue-output.md`). Cannot be combined with `--json`. |
@@ -161,7 +162,18 @@ pipetrain plan [OPTIONS] [PRS]...
 | `--yes` | Only on `bundle`, and only together with `--apply`. Skips the confirmation prompt. Required when stdin is not a terminal. |
 | `--color auto\|always\|never` | On `plan` and `bundle`. Colors in the text output. `auto` (the default) colors only on a terminal and honors `NO_COLOR`. `always` colors even when piped, `never` never does. `--json` is never colored. |
 
-PR references are written as `org/repo#123`. A PR that cannot be found stops the run.
+PR references are written as `org/repo#123`, as a PR URL, or as `repo#123` without the org. A PR that cannot be found stops the run.
+
+### Repo names without the org
+
+`pipetrain plan api#12 web#3` looks for each repo name in the orgs of the active profile, or in the orgs given with `--org`, which override the profile. Details in [docs/repo-names.md](docs/repo-names.md).
+
+- The repo is found in exactly one org: that org is used, and the repo is spelled the way GitHub spells it.
+- The repo is in more than one org: the run stops with an error that lists the candidates (`acme/api, globex/api`). pipetrain never picks one. Write `org/repo#123` for the one you mean.
+- The repo is in none of the orgs: the run stops with an error that names the orgs searched and the next step (write `org/repo#123`, or pass `--org`). A token that cannot see private repos gets the same answer.
+- `org/repo#123` and PR URLs work as before and cost no extra request.
+- Cost: one `GET /repos/{org}/{repo}` per org for each distinct name, counted by the [API budget](#api-budget). The same name on several PRs is looked up once. The answer is not cached, because whether a repo exists is not immutable.
+- Read-only. `--json` (schema 1) and `--emit queue` are unchanged and always carry the full `org/repo#N`.
 
 ## How the queue is discovered
 
@@ -408,7 +420,7 @@ orgs = ["acme-labs"]
 The profile is chosen by the first rule that applies:
 
 1. `--profile <name>`.
-2. The orgs of the `org/repo#N` arguments, when exactly one profile lists all of them.
+2. The orgs of the `org/repo#N` arguments, when exactly one profile lists all of them. Arguments written as `repo#N` carry no org and take no part in this choice; they are searched in the orgs of the profile that the other rules pick.
 3. The current folder, when it is inside the `folders` of a profile; the deepest matching folder wins.
 4. `default_profile`.
 5. The only profile, when there is just one.
@@ -645,6 +657,7 @@ pipetrain does not merge, push, approve, comment, label or re-run checks, and no
 - [docs/planner.md](docs/planner.md): the rules, in the order they apply, and every question the planner can raise.
 - [docs/plan-json.md](docs/plan-json.md): the `--json` contract.
 - [docs/queue-output.md](docs/queue-output.md): the `--emit queue` contract.
+- [docs/repo-names.md](docs/repo-names.md): how `repo#123` is resolved to an org, and what it costs.
 - [docs/saving-pipelines.md](docs/saving-pipelines.md): why the plan checks "already in the base", why it suggests a deploy branch, and how to apply it by hand.
 - [pipetrain.example.toml](pipetrain.example.toml): the config, annotated.
 

@@ -44,6 +44,7 @@ pipetrain plans the merge order of pull requests across repos. This file says wh
 - `pipetrain feed <package> --version <v> --wait [--interval <s>] [--timeout <s>]`: blocks until the version is published, with exit codes a runner can use (0 published, 1 timeout, 2 refused, 3 persistent error). Progress goes to stderr, the result to stdout once, and `--json` gains `waited`, `attempts`, `elapsed_seconds` and `timed_out` with schema 1 intact.
 
 - Package detection for `Cargo.toml`, `pyproject.toml` and `go.mod`, next to NuGet and npm: a repo that publishes a package and another that references it get the `dependency` edge, and a readable version bump in the manifest diff gives the `package` edge and the `# wait` line. `path`, `workspace` and `git` dependencies, compound ranges and Go pseudo-versions never become a version. `feed`, `bump` and `--check-feeds` still know only NuGet and npm.
+- `plan` and `bundle` accept `repo#12` without the org: the name is looked up in the orgs of the active profile (or `--org`), one `GET /repos` per org and distinct name, never cached. A name in two orgs is an error that lists them, and a name in none is an error with the next step. `org/repo#12` and `--json` and `--emit queue` are unchanged.
 
 ## Next
 
@@ -56,7 +57,6 @@ Small, well understood, in this order:
 
 Bigger or riskier, no order yet:
 
-- Resolve repo names without the org (`repo#12`) by indexing the repos of the known profiles.
 - Discover orgs and repos from local clones, and use the token Git already stores as a last-resort credential.
 - Conflict resolution in steps: mechanical rules first (lockfiles, version bumps, append-only files), then proposed diffs for the rest that a human approves, then rebase on a throwaway branch that is always reversible.
 - An execution mode that performs the merges. Opt-in, resumable, with a report. Never the default.
