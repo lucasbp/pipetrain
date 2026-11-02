@@ -1,10 +1,9 @@
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
-use std::thread;
 
+mod common;
+
+use common::{Server, serve_handler as serve};
 use pipetrain::command::apply::{Kind, Outcome, Status, apply_plan, render};
 use pipetrain::config::{ApiConfig, Config, Rules};
 use pipetrain::discovery::{Scope, Skipped};
@@ -314,11 +313,6 @@ fn bundle_flags_conflict_too() {
     assert_eq!(out.status.code(), Some(2));
 }
 
-struct Server {
-    base: String,
-    seen: Arc<Mutex<Vec<String>>>,
-}
-
 impl Server {
     fn lines(&self) -> Vec<String> {
         self.seen
@@ -331,63 +325,6 @@ impl Server {
             })
             .collect()
     }
-}
-
-fn serve(handler: impl Fn(&str) -> (u16, Value) + Send + 'static) -> Server {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let record = Arc::clone(&seen);
-    thread::spawn(move || {
-        for stream in listener.incoming() {
-            let mut stream = stream.unwrap();
-            let request = read_request(&mut stream);
-            let line = request
-                .lines()
-                .next()
-                .unwrap_or_default()
-                .trim_end_matches(" HTTP/1.1")
-                .to_string();
-            let (status, body) = handler(&line);
-            record.lock().unwrap().push(request);
-            let body = body.to_string();
-            let reply = format!(
-                "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            stream.write_all(reply.as_bytes()).unwrap();
-        }
-    });
-    Server { base, seen }
-}
-
-fn read_request(stream: &mut TcpStream) -> String {
-    let mut data = Vec::new();
-    let mut chunk = [0u8; 4096];
-    loop {
-        let read = stream.read(&mut chunk).unwrap();
-        data.extend_from_slice(&chunk[..read]);
-        let text = String::from_utf8_lossy(&data).to_string();
-        if read == 0 || body_complete(&text) {
-            return text;
-        }
-    }
-}
-
-fn body_complete(text: &str) -> bool {
-    let Some((head, body)) = text.split_once("\r\n\r\n") else {
-        return false;
-    };
-    let wanted = head
-        .lines()
-        .find_map(|line| {
-            line.to_lowercase()
-                .strip_prefix("content-length:")
-                .map(str::to_string)
-        })
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(0);
-    body.len() >= wanted
 }
 
 fn happy(line: &str) -> (u16, Value) {
