@@ -1,0 +1,254 @@
+name: pipetrain plan
+description: Plan the merge order of pull requests across repos with pipetrain. Read-only, installs a verified release binary.
+author: Lucas Passos
+branding:
+  icon: git-merge
+  color: blue
+
+inputs:
+  version:
+    description: >-
+      pipetrain release to install, such as 0.2.0 or v0.2.0. Empty uses the release tag this action
+      was referenced by (uses lucasbp/pipetrain@v0.2.0) and falls back to the latest full release
+      when the reference is a branch or a commit SHA.
+    required: false
+    default: ""
+  refs:
+    description: >-
+      PRs to plan, separated by spaces, commas or new lines, as org/repo#n or repo#n.
+      Empty with all=false plans the day's train from the config.
+    required: false
+    default: ""
+  all:
+    description: Plan every approved open PR in the configured orgs. Cannot be combined with refs.
+    required: false
+    default: "false"
+  profile:
+    description: Profile to use, as in pipetrain --profile.
+    required: false
+    default: ""
+  config:
+    description: Path to the pipetrain.toml, relative to the workspace. Needs a checkout before this step.
+    required: false
+    default: ""
+  emit:
+    description: "Output format: json, queue or text. Only the output with this name is filled."
+    required: false
+    default: queue
+  fail-on-questions:
+    description: Fail the step when the plan ends with open questions (exit code 3, only with emit queue).
+    required: false
+    default: "false"
+  github-token:
+    description: >-
+      Token pipetrain reads GitHub with. The default only sees the repo the workflow runs in;
+      use a read-only fine-grained token to plan other repos.
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  queue:
+    description: The merge queue, when emit is queue.
+    value: ${{ steps.plan.outputs.queue }}
+  json:
+    description: The plan as JSON (docs/plan-json.md), when emit is json.
+    value: ${{ steps.plan.outputs.json }}
+  text:
+    description: The plan as text, when emit is text.
+    value: ${{ steps.plan.outputs.text }}
+  exit-code:
+    description: Exit code of pipetrain plan. 0 is a plan, 3 is a queue with open questions, anything else is an error.
+    value: ${{ steps.plan.outputs.exit-code }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install pipetrain
+      shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+        ACTION_REF: ${{ github.action_ref }}
+      run: |
+        set -euo pipefail
+
+        repo="lucasbp/pipetrain"
+        base="https://github.com/$repo/releases"
+
+        fail() {
+          printf 'error: %s\n' "$1" >&2
+          exit 1
+        }
+
+        version="$INPUT_VERSION"
+        if [ -z "$version" ]; then
+          version="$ACTION_REF"
+        fi
+        if [ -z "$version" ] || ! printf '%s' "$version" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+          if [ -n "$INPUT_VERSION" ]; then
+            fail "version must look like 0.2.0 or v0.2.0"
+          fi
+          version=$(curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --output /dev/null --write-out '%{url_effective}' "$base/latest" | sed 's|.*/||')
+          printf 'No release tag to follow, using the latest release %s\n' "$version"
+        fi
+        case "$version" in v*) tag="$version" ;; *) tag="v$version" ;; esac
+        printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' || fail "could not resolve a release tag"
+
+        case "$RUNNER_OS-$RUNNER_ARCH" in
+          Linux-X64) target=x86_64-unknown-linux-musl; ext=tar.gz; exe=pipetrain ;;
+          Linux-ARM64) target=aarch64-unknown-linux-musl; ext=tar.gz; exe=pipetrain ;;
+          macOS-ARM64) target=aarch64-apple-darwin; ext=tar.gz; exe=pipetrain ;;
+          macOS-X64) target=x86_64-apple-darwin; ext=tar.gz; exe=pipetrain ;;
+          Windows-X64) target=x86_64-pc-windows-msvc; ext=zip; exe=pipetrain.exe ;;
+          *) fail "no pipetrain release for $RUNNER_OS $RUNNER_ARCH" ;;
+        esac
+
+        asset="pipetrain-$tag-$target.$ext"
+
+        to_unix() {
+          if command -v cygpath >/dev/null 2>&1; then cygpath -u "$1"; else printf '%s' "$1"; fi
+        }
+        to_native() {
+          if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi
+        }
+
+        work=$(mktemp -d)
+        trap 'rm -rf "$work"' EXIT
+        bin_dir="$(to_unix "$RUNNER_TEMP")/pipetrain-bin"
+        mkdir -p "$bin_dir"
+
+        printf 'Downloading %s\n' "$asset"
+        curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --output "$work/$asset" "$base/download/$tag/$asset" || fail "could not download $asset"
+        curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --output "$work/SHA256SUMS" "$base/download/$tag/SHA256SUMS" || fail "could not download SHA256SUMS for $tag"
+
+        expected=$(awk -v name="$asset" '{ f = $2; sub(/^\*/, "", f); if (f == name) { print $1; exit } }' "$work/SHA256SUMS")
+        [ -n "$expected" ] || fail "SHA256SUMS does not list $asset; nothing was installed"
+        if command -v sha256sum >/dev/null 2>&1; then
+          actual=$(sha256sum "$work/$asset" | cut -d ' ' -f 1)
+        else
+          actual=$(shasum -a 256 "$work/$asset" | cut -d ' ' -f 1)
+        fi
+        [ "$expected" = "$actual" ] || fail "SHA-256 mismatch for $asset; nothing was installed"
+        printf 'SHA-256 verified: %s\n' "$actual"
+
+        mkdir "$work/extract"
+        if [ "$ext" = tar.gz ]; then
+          tar -xzf "$work/$asset" -C "$work/extract" "$exe"
+        elif command -v unzip >/dev/null 2>&1; then
+          unzip -q "$work/$asset" "$exe" -d "$work/extract"
+        elif command -v 7z >/dev/null 2>&1; then
+          7z x -y -o"$work/extract" "$work/$asset" "$exe" >/dev/null
+        else
+          pwsh -NoProfile -Command 'Expand-Archive -LiteralPath $args[0] -DestinationPath $args[1]' "$(to_native "$work/$asset")" "$(to_native "$work/extract")"
+        fi
+        [ -f "$work/extract/$exe" ] || fail "the archive has no $exe"
+
+        cp "$work/extract/$exe" "$bin_dir/$exe"
+        chmod 755 "$bin_dir/$exe"
+        to_native "$bin_dir" >> "$GITHUB_PATH"
+        "$bin_dir/$exe" --version
+
+    - name: Plan
+      id: plan
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        INPUT_REFS: ${{ inputs.refs }}
+        INPUT_ALL: ${{ inputs.all }}
+        INPUT_PROFILE: ${{ inputs.profile }}
+        INPUT_CONFIG: ${{ inputs.config }}
+        INPUT_EMIT: ${{ inputs.emit }}
+        INPUT_FAIL_ON_QUESTIONS: ${{ inputs.fail-on-questions }}
+      run: |
+        set -euo pipefail
+
+        fail() {
+          printf 'error: %s\n' "$1" >&2
+          exit 1
+        }
+
+        case "$INPUT_EMIT" in json | queue | text) ;; *) fail "emit must be json, queue or text" ;; esac
+        case "$INPUT_ALL" in true | false) ;; *) fail "all must be true or false" ;; esac
+        case "$INPUT_FAIL_ON_QUESTIONS" in true | false) ;; *) fail "fail-on-questions must be true or false" ;; esac
+
+        args=(plan --no-progress --color never)
+        case "$INPUT_EMIT" in
+          json) args+=(--json) ;;
+          queue) args+=(--emit queue) ;;
+        esac
+
+        if [ -n "$INPUT_PROFILE" ]; then
+          printf '%s' "$INPUT_PROFILE" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9_.-]*$' || fail "profile has characters a profile name cannot have"
+          args+=(--profile "$INPUT_PROFILE")
+        fi
+        if [ -n "$INPUT_CONFIG" ]; then
+          case "$INPUT_CONFIG" in -*) fail "config must be a path, not an option" ;; esac
+          [ -f "$INPUT_CONFIG" ] || fail "config file $INPUT_CONFIG was not found; run actions/checkout before this step"
+          args+=(--config "$INPUT_CONFIG")
+        fi
+
+        refs=()
+        if [ -n "$INPUT_REFS" ]; then
+          for ref in $(printf '%s' "$INPUT_REFS" | tr ',' ' '); do
+            printf '%s' "$ref" | grep -Eq '^([A-Za-z0-9_.-]+/)?[A-Za-z0-9_.-]+#[0-9]+$' || fail "refs entries must be org/repo#n or repo#n"
+            refs+=("$ref")
+          done
+        fi
+        if [ "$INPUT_ALL" = true ]; then
+          [ "${#refs[@]}" -eq 0 ] || fail "all cannot be combined with refs"
+          args+=(--all)
+        fi
+        if [ "${#refs[@]}" -gt 0 ]; then
+          args+=("${refs[@]}")
+        fi
+
+        out="$RUNNER_TEMP/pipetrain-plan.out"
+        err="$RUNNER_TEMP/pipetrain-plan.err"
+        set +e
+        pipetrain "${args[@]}" >"$out" 2>"$err"
+        code=$?
+        set -e
+
+        stop=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+        printf '::stop-commands::%s\n' "$stop"
+        cat "$out"
+        if [ -s "$err" ]; then
+          printf '%s\n' '--- stderr ---'
+          cat "$err"
+        fi
+        printf '::%s::\n' "$stop"
+
+        delimiter="ghadelim_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+        {
+          printf 'exit-code=%s\n' "$code"
+          printf '%s<<%s\n' "$INPUT_EMIT" "$delimiter"
+          cat "$out"
+          printf '\n%s\n' "$delimiter"
+        } >> "$GITHUB_OUTPUT"
+
+        if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+          {
+            printf '### pipetrain plan\n\n'
+            printf 'Exit code: `%s`\n\n' "$code"
+            if [ -s "$out" ]; then
+              printf '`````\n'
+              head -c 60000 "$out"
+              if [ "$(wc -c < "$out")" -gt 60000 ]; then
+                printf '\n... truncated, the full output is in the step log and in the step output\n'
+              fi
+              printf '\n`````\n\n'
+            else
+              printf 'No output on stdout.\n\n'
+            fi
+            if [ -s "$err" ]; then
+              printf 'stderr:\n\n`````\n'
+              head -c 20000 "$err"
+              printf '\n`````\n'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+        if [ "$code" -eq 3 ] && [ "$INPUT_FAIL_ON_QUESTIONS" != true ]; then
+          printf 'The plan has open questions (exit 3). Not failing the step: fail-on-questions is false.\n'
+          exit 0
+        fi
+        exit "$code"

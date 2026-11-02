@@ -1,0 +1,29 @@
+name: Merge order
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Plan this PR
+        id: plan
+        uses: lucasbp/pipetrain@v0.2.0
+        with:
+          refs: acme/api#${{ github.event.pull_request.number }}
+          config: pipetrain.toml
+          emit: queue
+          fail-on-questions: "true"
+
+      - name: Use the queue
+        env:
+          QUEUE: ${{ steps.plan.outputs.queue }}
+        run: |
+          printf '%s\n' "$QUEUE" | grep '^merge:' || echo "nothing ready to merge"

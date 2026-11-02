@@ -48,6 +48,7 @@ pipetrain plans the merge order of pull requests across repos. This file says wh
 
 - Prebuilt binaries: a tag `v*` triggers a workflow that builds Windows x86_64, Linux x86_64 and aarch64 (static musl) and macOS arm64 and x86_64, plus `.deb` and `.rpm` for Linux x86_64 and aarch64, and publishes them with `SHA256SUMS` and a build provenance attestation to a GitHub Release. `install.sh` and `install.ps1` install into a user folder and verify the SHA-256. Publishing the crate on crates.io is a separate manual step, documented in `docs/releasing.md`.
 - `pipetrain update --check`: read-only, exits 10 when a newer release exists. A passive one-line notice on stderr, at most once every 24 hours, interactive terminals only and off with `--no-update-check` or `PIPETRAIN_NO_UPDATE_CHECK=1`. The in-place swap of the executable exists behind `--experimental-install` and is not ready.
+- A GitHub Action (`action.yml`, composite, read-only): installs the release binary for the runner, verifies it against `SHA256SUMS`, runs `plan` with `refs`, `all`, `profile`, `config` and `emit` (`json`, `queue`, `text`), and publishes `queue`, `json`, `text` and `exit-code` as outputs and in the step summary. Exit 3 only fails the step with `fail-on-questions`. See `docs/github-action.md`.
 
 - An opt-in local usage log (`log = true`, `PIPETRAIN_LOG=1`, off with `--no-log`): one JSON line per run with the command name, exit code, error type, duration, request count and cache hit, never tokens, names, arguments or paths, rotated at 1 MiB. `pipetrain log --summary` reads it. Nothing is sent anywhere.
 
@@ -68,7 +69,6 @@ Bigger or riskier, no order yet:
 - Discover orgs and repos from local clones, and use the token Git already stores as a last-resort credential.
 - Conflict resolution in steps: mechanical rules first (lockfiles, version bumps, append-only files), then proposed diffs for the rest that a human approves, then rebase on a throwaway branch that is always reversible.
 - An execution mode that performs the merges. Opt-in, resumable, with a report. Never the default.
-- A GitHub Action on top of `--json`, so automation can ask what is safe to merge and in what order.
 - Bump consumers automatically after a package release: wait for the new version to reach the feed, update the reference in the dependent repos, then release them. This writes to repos, so it ships as an opt-in mode.
 - Package detection for Maven and Gradle.
 - Other forges.

@@ -447,6 +447,19 @@ $items = pipetrain plan --all --emit queue | Where-Object { $_ -notmatch '^#' };
 
 The example drops the comment lines, so it does not stop at the pause. Split the queue at the `# pause` line when the runner has to wait there. The format is documented in [docs/queue-output.md](docs/queue-output.md).
 
+## GitHub Action
+
+`action.yml` is a read-only composite action that installs a release binary, checks its SHA-256 against `SHA256SUMS` and runs `pipetrain plan` in your workflow:
+
+```yaml
+- uses: lucasbp/pipetrain@v0.2.0
+  with:
+    refs: acme/api#12 acme/web#3
+    emit: queue
+```
+
+Inputs: `version`, `refs`, `all`, `profile`, `config`, `emit` (`json`, `queue` or `text`), `fail-on-questions` and `github-token`. Outputs: `queue`, `json`, `text` and `exit-code`, plus the step summary. Exit 3 (open questions) does not fail the step unless `fail-on-questions` is `true`. No step writes to the repo or to GitHub, and the default `github.token` only sees the repo the workflow runs in. The tag in the example must be a release that contains `action.yml`. Details in [docs/github-action.md](docs/github-action.md), a full workflow in [docs/examples/pipetrain-plan.yml](docs/examples/pipetrain-plan.yml).
+
 ## Configuration
 
 pipetrain looks for a config file in this order and uses the first one it finds:
@@ -748,6 +761,7 @@ pipetrain does not merge, push, approve, comment, label or re-run checks, and no
 - [docs/planner.md](docs/planner.md): the rules, in the order they apply, and every question the planner can raise.
 - [docs/plan-json.md](docs/plan-json.md): the `--json` contract.
 - [docs/queue-output.md](docs/queue-output.md): the `--emit queue` contract.
+- [docs/github-action.md](docs/github-action.md): the GitHub Action, its inputs, outputs and exit codes.
 - [docs/log.md](docs/log.md): the opt-in local usage log, what a line holds and what never enters it.
 - [docs/mcp.md](docs/mcp.md): the MCP server, its five read-only tools, results, errors and the protocol choice.
 - [docs/releasing.md](docs/releasing.md): how a release is cut, what the workflow builds and the optional crates.io step.
