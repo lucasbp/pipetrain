@@ -1,7 +1,6 @@
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::thread::{self, JoinHandle};
+mod common;
 
+use common::{Canned, serve};
 use pipetrain::command::order::graph::{Analysis, Chain, Edge, analyze};
 use pipetrain::command::order::{names_of, suggest};
 use pipetrain::config::ApiConfig;
@@ -84,69 +83,8 @@ fn no_edges_means_no_chains_and_no_cycles() {
     assert_eq!(analyze(&Pairs::new()), Analysis::default());
 }
 
-struct Canned {
-    status: &'static str,
-    body: String,
-}
-
 fn canned(body: Value) -> Canned {
-    Canned {
-        status: "200 OK",
-        body: body.to_string(),
-    }
-}
-
-fn serve(replies: Vec<Canned>) -> (String, JoinHandle<Vec<String>>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    let handle = thread::spawn(move || {
-        let mut seen = Vec::new();
-        for reply in replies {
-            let (mut stream, _) = listener.accept().unwrap();
-            seen.push(read_request(&mut stream));
-            stream.write_all(render(&reply).as_bytes()).unwrap();
-        }
-        seen
-    });
-    (base, handle)
-}
-
-fn read_request(stream: &mut TcpStream) -> String {
-    let mut data = Vec::new();
-    let mut chunk = [0u8; 4096];
-    loop {
-        let read = stream.read(&mut chunk).unwrap();
-        data.extend_from_slice(&chunk[..read]);
-        let text = String::from_utf8_lossy(&data).to_string();
-        if read == 0 || body_complete(&text) {
-            return text;
-        }
-    }
-}
-
-fn body_complete(text: &str) -> bool {
-    let Some((head, body)) = text.split_once("\r\n\r\n") else {
-        return false;
-    };
-    let wanted = head
-        .lines()
-        .find_map(|line| {
-            line.to_lowercase()
-                .strip_prefix("content-length:")
-                .map(str::to_string)
-        })
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(0);
-    body.len() >= wanted
-}
-
-fn render(reply: &Canned) -> String {
-    format!(
-        "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        reply.status,
-        reply.body.len(),
-        reply.body
-    )
+    common::canned("200 OK", &body.to_string())
 }
 
 fn repo_replies(csproj: &str, text: &str) -> Vec<Canned> {
@@ -163,10 +101,7 @@ fn repo_replies(csproj: &str, text: &str) -> Vec<Canned> {
 }
 
 fn failure(status: &'static str, body: Value) -> Canned {
-    Canned {
-        status,
-        body: body.to_string(),
-    }
+    common::canned(status, &body.to_string())
 }
 
 fn missing_repo() -> Canned {

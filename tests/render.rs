@@ -1,35 +1,13 @@
 use std::collections::BTreeMap;
 
+mod common;
+
+use common::pr;
 use pipetrain::config::{Config, Rules};
-use pipetrain::model::{ChangedFile, Checks, Pr, PrKey, PrState, Review};
+use pipetrain::model::ChangedFile;
 use pipetrain::plan::{self, Gathered};
 use pipetrain::publishers::Publishers;
 use pipetrain::render;
-
-fn pr(slug: &str, number: u64, head: &str, base: &str) -> Pr {
-    let (org, repo) = slug.split_once('/').unwrap();
-    Pr {
-        key: PrKey::new(org, repo, number),
-        state: PrState::Open,
-        title: format!("change {number}"),
-        url: format!("https://github.com/{slug}/pull/{number}"),
-        body: String::new(),
-        head_ref: head.to_string(),
-        base_ref: base.to_string(),
-        head_sha: format!("{number:040x}"),
-        base_sha: String::new(),
-        is_draft: false,
-        review: Review::Approved,
-        checks: Checks::Success,
-        conflicting: false,
-        author: String::new(),
-        failed_checks: Vec::new(),
-        mergeable_unknown: false,
-        files: Vec::new(),
-        files_complete: true,
-        labels: Vec::new(),
-    }
-}
 
 fn sample() -> String {
     sample_with(0)

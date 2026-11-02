@@ -1,9 +1,9 @@
 use std::fs;
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::thread::{self, JoinHandle};
 
+mod common;
+
+use common::{closed_base, serve_bodies as serve};
 use pipetrain::cache::{Cache, CacheMode};
 use pipetrain::config::ApiConfig;
 use pipetrain::github::Client;
@@ -15,66 +15,6 @@ const HEAD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const BASE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const OTHER: &str = "cccccccccccccccccccccccccccccccccccccccc";
 const SLUG: &str = "acme/api";
-
-fn serve(bodies: Vec<String>) -> (String, JoinHandle<Vec<String>>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    let handle = thread::spawn(move || {
-        let mut seen = Vec::new();
-        for body in bodies {
-            let (mut stream, _) = listener.accept().unwrap();
-            seen.push(read_request(&mut stream));
-            stream.write_all(render(&body).as_bytes()).unwrap();
-        }
-        seen
-    });
-    (base, handle)
-}
-
-fn closed_base() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    drop(listener);
-    base
-}
-
-fn read_request(stream: &mut TcpStream) -> String {
-    let mut data = Vec::new();
-    let mut chunk = [0u8; 4096];
-    loop {
-        let read = stream.read(&mut chunk).unwrap();
-        data.extend_from_slice(&chunk[..read]);
-        let text = String::from_utf8_lossy(&data).to_string();
-        if read == 0 || body_complete(&text) {
-            return text;
-        }
-    }
-}
-
-fn body_complete(text: &str) -> bool {
-    let Some((head, body)) = text.split_once("\r\n\r\n") else {
-        return false;
-    };
-    let wanted = head
-        .lines()
-        .find_map(|line| {
-            line.to_lowercase()
-                .strip_prefix("content-length:")
-                .map(str::to_string)
-        })
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(0);
-    body.len() >= wanted
-}
-
-fn render(body: &str) -> String {
-    let mut text = String::from("HTTP/1.1 200 OK\r\n");
-    text.push_str("Content-Type: application/json\r\n");
-    text.push_str(&format!("Content-Length: {}\r\n", body.len()));
-    text.push_str("Connection: close\r\n\r\n");
-    text.push_str(body);
-    text
-}
 
 fn temp(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(

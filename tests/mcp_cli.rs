@@ -1,11 +1,10 @@
+mod common;
+
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
-use std::thread;
 
 use serde_json::{Value, json};
 
@@ -23,45 +22,7 @@ fn scratch(label: &str) -> PathBuf {
     dir
 }
 
-struct Fake {
-    base: String,
-    seen: Arc<Mutex<Vec<String>>>,
-}
-
-impl Fake {
-    fn requests(&self) -> Vec<String> {
-        self.seen.lock().unwrap().clone()
-    }
-}
-
-fn read_request(stream: &mut TcpStream) -> String {
-    let mut data = Vec::new();
-    let mut chunk = [0u8; 4096];
-    loop {
-        let read = stream.read(&mut chunk).unwrap();
-        data.extend_from_slice(&chunk[..read]);
-        let text = String::from_utf8_lossy(&data).to_string();
-        if read == 0 || body_complete(&text) {
-            return text;
-        }
-    }
-}
-
-fn body_complete(text: &str) -> bool {
-    let Some((head, body)) = text.split_once("\r\n\r\n") else {
-        return false;
-    };
-    let wanted = head
-        .lines()
-        .find_map(|line| {
-            line.to_lowercase()
-                .strip_prefix("content-length:")
-                .map(str::to_string)
-        })
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(0);
-    body.len() >= wanted
-}
+type Fake = common::Server;
 
 fn pr_node() -> Value {
     json!({
@@ -121,29 +82,11 @@ fn answer(line: &str, body: &str) -> (u16, Value) {
 }
 
 fn serve() -> Fake {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let record = Arc::clone(&seen);
-    thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else {
-                continue;
-            };
-            let request = read_request(&mut stream);
-            let line = request.lines().next().unwrap_or_default().to_string();
-            let body = request.split_once("\r\n\r\n").map_or("", |(_, rest)| rest);
-            let (status, reply) = answer(&line, body);
-            record.lock().unwrap().push(request.clone());
-            let text = reply.to_string();
-            let wire = format!(
-                "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
-                text.len()
-            );
-            let _ = stream.write_all(wire.as_bytes());
-        }
-    });
-    Fake { base, seen }
+    common::serve_requests(answer)
+}
+
+fn requests(fake: &Fake) -> Vec<String> {
+    fake.seen.lock().unwrap().clone()
 }
 
 struct Session {
@@ -322,7 +265,7 @@ fn plan_returns_the_schema_1_json_for_an_explicit_pr() {
     let items = plan["items"].as_array().unwrap();
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["id"], "acme/api#7");
-    for request in fake.requests() {
+    for request in requests(&fake) {
         assert!(!request.contains("mutation"));
         assert!(request.starts_with("GET ") || request.starts_with("POST /graphql"));
     }
@@ -336,7 +279,7 @@ fn plan_rejects_all_together_with_prs_as_a_tool_error() {
     let answer = session.tool("plan", json!({ "prs": ["acme/api#7"], "all": true }));
     assert_eq!(answer["result"]["isError"], true);
     assert!(first_text(&answer).contains("invalid arguments"));
-    assert!(fake.requests().is_empty());
+    assert!(requests(&fake).is_empty());
 }
 
 #[test]
@@ -412,7 +355,7 @@ fn the_token_never_appears_in_any_answer() {
         assert!(!line.contains(FAKE), "{line}");
     }
     assert!(
-        fake.requests().iter().any(|request| request.contains(FAKE)),
+        requests(&fake).iter().any(|request| request.contains(FAKE)),
         "the fake API never saw the token, so the check above proves nothing"
     );
 }
@@ -427,7 +370,7 @@ fn bump_failures_are_tool_errors_and_nothing_is_written() {
         json!({ "package": "@acme/ui", "to": "1.2.0", "repos": ["acme/api"] }),
     );
     assert_eq!(answer["result"]["isError"], true, "{answer}");
-    for request in fake.requests() {
+    for request in requests(&fake) {
         assert!(request.starts_with("GET ") || request.starts_with("POST /graphql"));
     }
 }

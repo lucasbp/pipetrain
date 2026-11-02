@@ -1,7 +1,10 @@
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::io::Write;
+use std::net::TcpListener;
 use std::thread::{self, JoinHandle};
 
+mod common;
+
+use common::read_request;
 use pipetrain::config::{ApiConfig, Config};
 use pipetrain::discovery::{self, Discovered};
 use pipetrain::github::{self, Client};
@@ -261,35 +264,6 @@ fn parsing_reads_the_label_names() {
     assert!(!prs[0].has_label("release"));
     assert!(prs[1].labels.is_empty());
     assert!(prs[2].labels.is_empty());
-}
-
-fn read_request(stream: &mut TcpStream) -> String {
-    let mut data = Vec::new();
-    let mut chunk = [0u8; 4096];
-    loop {
-        let read = stream.read(&mut chunk).unwrap();
-        data.extend_from_slice(&chunk[..read]);
-        let text = String::from_utf8_lossy(&data).to_string();
-        if read == 0 || body_complete(&text) {
-            return text;
-        }
-    }
-}
-
-fn body_complete(text: &str) -> bool {
-    let Some((head, body)) = text.split_once("\r\n\r\n") else {
-        return false;
-    };
-    let wanted = head
-        .lines()
-        .find_map(|line| {
-            line.to_lowercase()
-                .strip_prefix("content-length:")
-                .map(str::to_string)
-        })
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(0);
-    body.len() >= wanted
 }
 
 fn serve_once(body: String) -> (String, JoinHandle<String>) {
