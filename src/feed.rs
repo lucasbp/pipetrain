@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::time::Duration;
 
 use clap::ValueEnum;
 use serde_json::{Value, json};
@@ -9,6 +10,9 @@ pub const NUGET_GITHUB: &str = "https://nuget.pkg.github.com";
 pub const RECENT: usize = 5;
 pub const EXIT_NOT_PUBLISHED: i32 = 1;
 pub const EXIT_REFUSED: i32 = 2;
+pub const EXIT_ERROR: i32 = 3;
+pub const DEFAULT_INTERVAL: u64 = 10;
+pub const DEFAULT_TIMEOUT: u64 = 600;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Ecosystem {
@@ -278,6 +282,128 @@ pub fn render_json(report: &Report) -> Value {
         "latest": report.latest,
         "versions": report.versions,
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WaitPlan {
+    pub interval: Duration,
+    pub timeout: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Attempt {
+    Published(Report),
+    Pending(Report),
+    Failed(String),
+    Refused { had_token: bool },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WaitEnd {
+    Published(Report),
+    Refused {
+        had_token: bool,
+    },
+    TimedOut {
+        last: Option<Report>,
+        error: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Waited {
+    pub end: WaitEnd,
+    pub attempts: u32,
+    pub elapsed: Duration,
+}
+
+impl Waited {
+    pub fn exit_code(&self) -> i32 {
+        match &self.end {
+            WaitEnd::Published(_) => 0,
+            WaitEnd::Refused { .. } => EXIT_REFUSED,
+            WaitEnd::TimedOut { error: Some(_), .. } => EXIT_ERROR,
+            WaitEnd::TimedOut { error: None, .. } => EXIT_NOT_PUBLISHED,
+        }
+    }
+
+    pub fn elapsed_seconds(&self) -> u64 {
+        whole_seconds(self.elapsed)
+    }
+}
+
+fn whole_seconds(duration: Duration) -> u64 {
+    duration.as_secs() + u64::from(duration.subsec_millis() >= 500)
+}
+
+pub fn wait_loop(
+    plan: WaitPlan,
+    mut attempt: impl FnMut() -> Attempt,
+    mut pause: impl FnMut(u32, Duration, Option<&str>),
+    mut now: impl FnMut() -> Duration,
+) -> Waited {
+    let mut attempts: u32 = 0;
+    let mut last: Option<Report> = None;
+    let mut error: Option<String>;
+    loop {
+        attempts = attempts.saturating_add(1);
+        match attempt() {
+            Attempt::Published(report) => {
+                return Waited {
+                    end: WaitEnd::Published(report),
+                    attempts,
+                    elapsed: now(),
+                };
+            }
+            Attempt::Refused { had_token } => {
+                return Waited {
+                    end: WaitEnd::Refused { had_token },
+                    attempts,
+                    elapsed: now(),
+                };
+            }
+            Attempt::Pending(report) => {
+                last = Some(report);
+                error = None;
+            }
+            Attempt::Failed(message) => error = Some(message),
+        }
+        let elapsed = now();
+        if elapsed >= plan.timeout {
+            return Waited {
+                end: WaitEnd::TimedOut { last, error },
+                attempts,
+                elapsed,
+            };
+        }
+        let delay = plan.interval.min(plan.timeout - elapsed);
+        pause(attempts, delay, error.as_deref());
+    }
+}
+
+pub fn render_timeout_text(report: &Report, elapsed_seconds: u64) -> String {
+    let package = &report.package;
+    let version = report.version.as_deref().unwrap_or_default();
+    match &report.latest {
+        Some(latest) => {
+            format!("{package} {version}: not published after {elapsed_seconds}s (latest {latest})")
+        }
+        None => format!("{package} {version}: not published after {elapsed_seconds}s"),
+    }
+}
+
+pub fn render_wait_json(report: &Report, waited: &Waited, timed_out: bool) -> Value {
+    let mut value = render_json(report);
+    if let Some(object) = value.as_object_mut() {
+        object.insert("waited".to_string(), json!(true));
+        object.insert("attempts".to_string(), json!(waited.attempts));
+        object.insert(
+            "elapsed_seconds".to_string(),
+            json!(waited.elapsed_seconds()),
+        );
+        object.insert("timed_out".to_string(), json!(timed_out));
+    }
+    value
 }
 
 pub const NUGET_USER: &str = "pipetrain";
@@ -593,5 +719,264 @@ mod tests {
             not_found_message("https://r"),
             "package not found in https://r"
         );
+    }
+
+    fn pending_report() -> Report {
+        Report::build(
+            "left-pad",
+            Ecosystem::Npm,
+            "https://r",
+            Some("2.0.0"),
+            &strings(&["1.0.0"]),
+        )
+    }
+
+    fn published_report() -> Report {
+        Report::build(
+            "left-pad",
+            Ecosystem::Npm,
+            "https://r",
+            Some("2.0.0"),
+            &strings(&["2.0.0", "1.0.0"]),
+        )
+    }
+
+    fn seconds(value: u64) -> Duration {
+        Duration::from_secs(value)
+    }
+
+    struct Run {
+        waited: Waited,
+        pauses: Vec<(u32, Duration, Option<String>)>,
+    }
+
+    fn drive(plan: WaitPlan, script: Vec<Attempt>) -> Run {
+        use std::cell::{Cell, RefCell};
+        let clock = Cell::new(Duration::ZERO);
+        let pauses = RefCell::new(Vec::new());
+        let queue = RefCell::new(script.into_iter());
+        let waited = wait_loop(
+            plan,
+            || {
+                queue
+                    .borrow_mut()
+                    .next()
+                    .unwrap_or(Attempt::Pending(pending_report()))
+            },
+            |attempts, delay, error| {
+                pauses
+                    .borrow_mut()
+                    .push((attempts, delay, error.map(str::to_string)));
+                clock.set(clock.get() + delay);
+            },
+            || clock.get(),
+        );
+        Run {
+            waited,
+            pauses: pauses.into_inner(),
+        }
+    }
+
+    fn plan(interval: u64, timeout: u64) -> WaitPlan {
+        WaitPlan {
+            interval: seconds(interval),
+            timeout: seconds(timeout),
+        }
+    }
+
+    #[test]
+    fn wait_returns_at_once_when_already_published() {
+        let run = drive(plan(10, 600), vec![Attempt::Published(published_report())]);
+        assert_eq!(run.waited.attempts, 1);
+        assert_eq!(run.waited.exit_code(), 0);
+        assert!(run.pauses.is_empty());
+        assert!(matches!(run.waited.end, WaitEnd::Published(_)));
+    }
+
+    #[test]
+    fn wait_polls_until_the_version_appears() {
+        let run = drive(
+            plan(10, 600),
+            vec![
+                Attempt::Pending(pending_report()),
+                Attempt::Pending(pending_report()),
+                Attempt::Published(published_report()),
+            ],
+        );
+        assert_eq!(run.waited.attempts, 3);
+        assert_eq!(run.waited.exit_code(), 0);
+        assert_eq!(run.waited.elapsed, seconds(20));
+        assert_eq!(
+            run.pauses,
+            vec![(1, seconds(10), None), (2, seconds(10), None)]
+        );
+    }
+
+    #[test]
+    fn wait_times_out_while_pending_with_exit_one() {
+        let run = drive(plan(10, 25), vec![]);
+        assert_eq!(run.waited.exit_code(), EXIT_NOT_PUBLISHED);
+        assert_eq!(run.waited.attempts, 4);
+        assert_eq!(run.waited.elapsed, seconds(25));
+        match run.waited.end {
+            WaitEnd::TimedOut { last, error } => {
+                assert_eq!(last, Some(pending_report()));
+                assert_eq!(error, None);
+            }
+            other => panic!("unexpected end: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wait_caps_the_pause_at_the_remaining_time() {
+        let run = drive(plan(10, 25), vec![]);
+        let delays: Vec<Duration> = run.pauses.iter().map(|pause| pause.1).collect();
+        assert_eq!(delays, vec![seconds(10), seconds(10), seconds(5)]);
+    }
+
+    #[test]
+    fn wait_with_timeout_zero_checks_once() {
+        let run = drive(plan(10, 0), vec![]);
+        assert_eq!(run.waited.attempts, 1);
+        assert!(run.pauses.is_empty());
+        assert_eq!(run.waited.exit_code(), EXIT_NOT_PUBLISHED);
+    }
+
+    #[test]
+    fn wait_with_timeout_zero_still_reports_a_published_version() {
+        let run = drive(plan(10, 0), vec![Attempt::Published(published_report())]);
+        assert_eq!(run.waited.attempts, 1);
+        assert_eq!(run.waited.exit_code(), 0);
+    }
+
+    #[test]
+    fn wait_retries_errors_and_exits_three_at_the_timeout() {
+        let failed = || Attempt::Failed("connection refused".to_string());
+        let run = drive(plan(10, 20), vec![failed(), failed(), failed()]);
+        assert_eq!(run.waited.exit_code(), EXIT_ERROR);
+        assert_eq!(run.waited.attempts, 3);
+        assert_eq!(run.pauses[0].2.as_deref(), Some("connection refused"));
+        match run.waited.end {
+            WaitEnd::TimedOut { last, error } => {
+                assert_eq!(last, None);
+                assert_eq!(error.as_deref(), Some("connection refused"));
+            }
+            other => panic!("unexpected end: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wait_recovers_from_an_error_and_then_times_out_as_not_published() {
+        let run = drive(
+            plan(10, 20),
+            vec![
+                Attempt::Failed("timed out".to_string()),
+                Attempt::Pending(pending_report()),
+                Attempt::Pending(pending_report()),
+            ],
+        );
+        assert_eq!(run.waited.exit_code(), EXIT_NOT_PUBLISHED);
+        assert_eq!(run.pauses[0].2.as_deref(), Some("timed out"));
+        assert_eq!(run.pauses[1].2, None);
+    }
+
+    #[test]
+    fn wait_ends_on_error_after_pending_when_the_last_attempt_failed() {
+        let run = drive(
+            plan(10, 20),
+            vec![
+                Attempt::Pending(pending_report()),
+                Attempt::Failed("http 500".to_string()),
+                Attempt::Failed("http 500".to_string()),
+            ],
+        );
+        assert_eq!(run.waited.exit_code(), EXIT_ERROR);
+    }
+
+    #[test]
+    fn wait_can_publish_after_an_error() {
+        let run = drive(
+            plan(10, 600),
+            vec![
+                Attempt::Failed("http 502".to_string()),
+                Attempt::Published(published_report()),
+            ],
+        );
+        assert_eq!(run.waited.exit_code(), 0);
+        assert_eq!(run.waited.attempts, 2);
+    }
+
+    #[test]
+    fn wait_aborts_at_once_when_refused() {
+        let run = drive(
+            plan(10, 600),
+            vec![
+                Attempt::Pending(pending_report()),
+                Attempt::Refused { had_token: true },
+            ],
+        );
+        assert_eq!(run.waited.exit_code(), EXIT_REFUSED);
+        assert_eq!(run.waited.attempts, 2);
+        assert_eq!(run.pauses.len(), 1);
+        assert_eq!(run.waited.end, WaitEnd::Refused { had_token: true });
+    }
+
+    #[test]
+    fn exit_codes_are_distinct() {
+        let codes = [0, EXIT_NOT_PUBLISHED, EXIT_REFUSED, EXIT_ERROR];
+        assert_eq!(codes, [0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn elapsed_seconds_rounds_to_the_nearest_second() {
+        let waited = |elapsed| Waited {
+            end: WaitEnd::Refused { had_token: false },
+            attempts: 1,
+            elapsed,
+        };
+        assert_eq!(waited(Duration::from_millis(1400)).elapsed_seconds(), 1);
+        assert_eq!(waited(Duration::from_millis(1500)).elapsed_seconds(), 2);
+        assert_eq!(waited(Duration::ZERO).elapsed_seconds(), 0);
+    }
+
+    #[test]
+    fn timeout_text_names_the_latest_version_when_there_is_one() {
+        assert_eq!(
+            render_timeout_text(&pending_report(), 600),
+            "left-pad 2.0.0: not published after 600s (latest 1.0.0)"
+        );
+    }
+
+    #[test]
+    fn timeout_text_omits_latest_when_there_are_no_versions() {
+        let empty = Report::build("left-pad", Ecosystem::Npm, "https://r", Some("2.0.0"), &[]);
+        assert_eq!(
+            render_timeout_text(&empty, 30),
+            "left-pad 2.0.0: not published after 30s"
+        );
+    }
+
+    #[test]
+    fn wait_json_adds_fields_and_keeps_schema_one() {
+        let waited = Waited {
+            end: WaitEnd::TimedOut {
+                last: Some(pending_report()),
+                error: None,
+            },
+            attempts: 4,
+            elapsed: Duration::from_millis(30_200),
+        };
+        let value = render_wait_json(&pending_report(), &waited, true);
+        assert_eq!(value["schema"], 1);
+        assert_eq!(value["published"], false);
+        assert_eq!(value["waited"], true);
+        assert_eq!(value["attempts"], 4);
+        assert_eq!(value["elapsed_seconds"], 30);
+        assert_eq!(value["timed_out"], true);
+        let mut base = value.clone();
+        for key in ["waited", "attempts", "elapsed_seconds", "timed_out"] {
+            base.as_object_mut().unwrap().remove(key);
+        }
+        assert_eq!(base, render_json(&pending_report()));
     }
 }

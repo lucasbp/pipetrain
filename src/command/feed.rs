@@ -1,12 +1,12 @@
 use std::cell::OnceCell;
 use std::collections::BTreeMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use serde_json::Value;
 use ureq::Agent;
 
-use crate::feed::{self, Ecosystem, Report};
+use crate::feed::{self, Attempt, Ecosystem, Report, WaitEnd, WaitPlan, Waited};
 use crate::github;
 use crate::hint;
 use crate::plan::Plan;
@@ -349,6 +349,128 @@ pub fn latest(opts: &FeedOptions) -> Result<Result<String, i32>> {
         },
         Err(code) => Err(code),
     })
+}
+
+pub struct WaitOptions {
+    pub interval: Duration,
+    pub timeout: Duration,
+    pub progress: bool,
+}
+
+fn attempt(session: &Session, ecosystem: Ecosystem, opts: &FeedOptions) -> Attempt {
+    let pending = |feed: &str, versions: &[String]| {
+        Report::build(
+            &opts.package,
+            ecosystem,
+            feed,
+            opts.version.as_deref(),
+            versions,
+        )
+    };
+    match fetch(session, ecosystem, opts) {
+        Err(error) => Attempt::Failed(short_reason(&error)),
+        Ok(Fetched::Refused { had_token }) => Attempt::Refused { had_token },
+        Ok(Fetched::NotFound { feed }) => Attempt::Pending(pending(&feed, &[])),
+        Ok(Fetched::Found { feed, versions }) => {
+            let report = pending(&feed, &versions);
+            if report.published == Some(true) {
+                Attempt::Published(report)
+            } else {
+                Attempt::Pending(report)
+            }
+        }
+    }
+}
+
+fn wait_message(
+    package: &str,
+    version: &str,
+    attempts: u32,
+    delay: Duration,
+    error: Option<&str>,
+) -> String {
+    let next = crate::elapsed::format(delay);
+    match error {
+        Some(reason) => format!(
+            "{package} {version}: attempt {attempts} failed ({reason}); trying again in {next}"
+        ),
+        None => format!(
+            "{package} {version}: not published yet (attempt {attempts}); checking again in {next}"
+        ),
+    }
+}
+
+pub fn run_wait(opts: FeedOptions, wait: WaitOptions) -> Result<i32> {
+    let Some(version) = opts.version.clone() else {
+        bail!("--wait requires --version");
+    };
+    if wait.interval.is_zero() {
+        bail!("--interval must be at least 1 second");
+    }
+    let ecosystem = opts
+        .ecosystem
+        .unwrap_or_else(|| Ecosystem::default_for(&opts.package));
+    if ecosystem == Ecosystem::Nuget
+        && feed::nuget_index_url(opts.org.as_deref(), opts.registry.as_deref()).is_none()
+    {
+        bail!("--org is required for nuget unless --registry is given");
+    }
+    let session = Session::new();
+    let started = Instant::now();
+    let package = opts.package.clone();
+    let progress = progress::Progress::start(wait.progress);
+    progress::phase(&format!("waiting for {package} {version}"));
+    let waited = feed::wait_loop(
+        WaitPlan {
+            interval: wait.interval,
+            timeout: wait.timeout,
+        },
+        || attempt(&session, ecosystem, &opts),
+        |attempts, delay, error| {
+            progress::line(&wait_message(&package, &version, attempts, delay, error));
+            std::thread::sleep(delay);
+        },
+        || started.elapsed(),
+    );
+    drop(progress);
+    let code = waited.exit_code();
+    match &waited.end {
+        WaitEnd::Published(report) => print_wait(report, &waited, false, opts.json)?,
+        WaitEnd::Refused { had_token } => eprintln!("{}", feed::refused_message(*had_token)),
+        WaitEnd::TimedOut {
+            error: Some(reason),
+            ..
+        } => eprintln!(
+            "{package} {version}: gave up after {}s: {reason}",
+            waited.elapsed_seconds()
+        ),
+        WaitEnd::TimedOut {
+            last: Some(report),
+            error: None,
+        } => print_wait(report, &waited, true, opts.json)?,
+        WaitEnd::TimedOut {
+            last: None,
+            error: None,
+        } => {}
+    }
+    Ok(code)
+}
+
+fn print_wait(report: &Report, waited: &Waited, timed_out: bool, json: bool) -> Result<()> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&feed::render_wait_json(report, waited, timed_out))?
+        );
+    } else if timed_out {
+        println!(
+            "{}",
+            feed::render_timeout_text(report, waited.elapsed_seconds())
+        );
+    } else {
+        println!("{}", feed::render_text(report));
+    }
+    Ok(())
 }
 
 pub fn run(opts: FeedOptions) -> Result<i32> {

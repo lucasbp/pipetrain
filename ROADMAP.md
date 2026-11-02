@@ -40,6 +40,7 @@ pipetrain plans the merge order of pull requests across repos. This file says wh
 - `pipetrain bump <package> [--to <v>]`: a dry run of the consumer bump, built on `feed`. It reads the manifests of the chosen repos (or the exact repos of the profile) and reports each as `change`, `up_to_date`, `ahead` or `range`, with `--json`. It writes nothing and has no `--apply`.
 - `plan --check-feeds`: an opt-in flag that appends `(published)`, `(not yet)` or `(feed check failed: ...)` to each `# wait` comment that names a version, using the `feed` lookup. Informational only, with `published` and `feed_error` on `after[]` in `--json`.
 - A train label in addition to the branch name: `train_label` in the config (and in a profile) marks the PRs of the train by label, next to `train_branch`. A PR that matches either one is in the train.
+- `pipetrain feed <package> --version <v> --wait [--interval <s>] [--timeout <s>]`: blocks until the version is published, with exit codes a runner can use (0 published, 1 timeout, 2 refused, 3 persistent error). Progress goes to stderr, the result to stdout once, and `--json` gains `waited`, `attempts`, `elapsed_seconds` and `timed_out` with schema 1 intact.
 
 ## Next
 
@@ -59,7 +60,6 @@ Bigger or riskier, no order yet:
 - An execution mode that performs the merges. Opt-in, resumable, with a report. Never the default.
 - A GitHub Action and an MCP server on top of `--json`, so automation and AI agents can ask what is safe to merge and in what order.
 - Bump consumers automatically after a package release: wait for the new version to reach the feed, update the reference in the dependent repos, then release them. This writes to repos, so it ships as an opt-in mode.
-- Block until a version appears in the feed (a polling mode on top of `pipetrain feed`).
 - Package detection for Go, Maven and Gradle.
 - Other forges.
 - Optional encryption for local storage.

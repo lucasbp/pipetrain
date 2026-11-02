@@ -1,14 +1,15 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 
 use pipetrain::cache::CacheMode;
 use pipetrain::command::apply::{self, ApplyOptions};
 use pipetrain::command::authors::AuthorFilter;
 use pipetrain::command::bump::{self, BumpOptions};
-use pipetrain::command::feed::{self, FeedOptions};
+use pipetrain::command::feed::{self, FeedOptions, WaitOptions};
 use pipetrain::command::init::{self, InitOptions};
 use pipetrain::command::order::{self, OrderOptions};
 use pipetrain::command::orgs::{self, OrgsOptions};
@@ -16,7 +17,7 @@ use pipetrain::command::profiles::{self, ProfilesOptions};
 use pipetrain::command::{PlanOptions, plan};
 use pipetrain::doctor::{self, DoctorOptions};
 use pipetrain::emit::Emit;
-use pipetrain::feed::Ecosystem;
+use pipetrain::feed::{DEFAULT_INTERVAL, DEFAULT_TIMEOUT, Ecosystem};
 
 #[derive(Parser)]
 #[command(
@@ -183,6 +184,32 @@ struct FeedArgs {
 
     #[arg(long, help = "Print the result as JSON")]
     json: bool,
+
+    #[arg(
+        long,
+        help = "Keep checking until --version is published or --timeout runs out; exits 0 published, 1 timed out, 2 refused (401/403), 3 feed errors until the timeout"
+    )]
+    wait: bool,
+
+    #[arg(
+        long,
+        value_name = "SECONDS",
+        help = "With --wait: seconds between checks, at least 1 (default 10)"
+    )]
+    interval: Option<u64>,
+
+    #[arg(
+        long,
+        value_name = "SECONDS",
+        help = "With --wait: give up after this many seconds, 0 checks once (default 600)"
+    )]
+    timeout: Option<u64>,
+
+    #[arg(
+        long,
+        help = "With --wait: do not draw the progress indicator on stderr"
+    )]
+    no_progress: bool,
 }
 
 #[derive(clap::Args)]
@@ -603,20 +630,40 @@ fn run_command(command: Command) -> Result<i32> {
             verbose: args.verbose,
         }),
         Command::Order(args) => run_order(args),
-        Command::Feed(args) => feed::run(FeedOptions {
-            package: args.package,
-            version: args.version,
-            ecosystem: args.ecosystem,
-            org: args.org,
-            registry: args.registry,
-            json: args.json,
-        }),
+        Command::Feed(args) => run_feed(args),
         Command::Init(args) => init::run(InitOptions {
             write: args.write,
             force: args.force,
             verbose: args.verbose,
         }),
     }
+}
+
+fn run_feed(args: FeedArgs) -> Result<i32> {
+    let wait = args.wait;
+    if !wait && (args.interval.is_some() || args.timeout.is_some() || args.no_progress) {
+        bail!("--interval, --timeout and --no-progress need --wait");
+    }
+    let progress = pipetrain::progress::detect(args.no_progress, args.json, false);
+    let options = FeedOptions {
+        package: args.package,
+        version: args.version,
+        ecosystem: args.ecosystem,
+        org: args.org,
+        registry: args.registry,
+        json: args.json,
+    };
+    if !wait {
+        return feed::run(options);
+    }
+    feed::run_wait(
+        options,
+        WaitOptions {
+            interval: Duration::from_secs(args.interval.unwrap_or(DEFAULT_INTERVAL)),
+            timeout: Duration::from_secs(args.timeout.unwrap_or(DEFAULT_TIMEOUT)),
+            progress,
+        },
+    )
 }
 
 fn run_order(args: OrderArgs) -> Result<i32> {

@@ -136,7 +136,7 @@ pipetrain plan [OPTIONS] [PRS]...
 | `pipetrain plan --emit queue` | Prints only a queue of `merge:org/repo#N` lines for a runner (contract in `docs/queue-output.md`). Cannot be combined with `--json`. |
 | `pipetrain bundle` | Dry run of the bundle suggestion: shows the branch it would create and the PRs it would retarget. Writes nothing. Takes the same PR arguments and options as `plan`. |
 | `pipetrain bundle --apply` | Creates the deploy branch and retargets the bundled PRs. Asks for confirmation unless `--yes` is given. See [Applying the bundle suggestion](#applying-the-bundle-suggestion). |
-| `pipetrain feed <PACKAGE> [--version <V>]` | Read-only: tells whether a package version is published in its NuGet or npm feed. See [Checking a package feed](#checking-a-package-feed). |
+| `pipetrain feed <PACKAGE> [--version <V>]` | Read-only: tells whether a package version is published in its NuGet or npm feed; `--wait` blocks until it is. See [Checking a package feed](#checking-a-package-feed). |
 | `pipetrain bump <PACKAGE> [--to <V>]` | Dry run only: shows which manifests of the scanned repos would move to a version of a package. Writes nothing and has no `--apply`. See [Bumping a package](#bumping-a-package-dry-run). |
 | `pipetrain profiles` | Read-only: lists the profiles, their orgs and folders, and which one applies from the current folder. |
 | `pipetrain orgs` | Read-only: lists the GitHub orgs your token can see and which profile lists each one. |
@@ -494,7 +494,7 @@ Where it lives: the `pipetrain` folder inside your user cache directory (`%LOCAL
 ## Checking a package feed
 
 ```
-pipetrain feed <PACKAGE> [--version <V>] [--ecosystem nuget|npm] [--org <ORG>] [--registry <URL>] [--json]
+pipetrain feed <PACKAGE> [--version <V>] [--ecosystem nuget|npm] [--org <ORG>] [--registry <URL>] [--json] [--wait [--interval <S>] [--timeout <S>]]
 ```
 
 `feed` answers one question: is this package, at this version, published in its feed? It is read-only: it only sends `GET` requests, writes nothing and stores nothing. It does not read a config file or call the GitHub API.
@@ -522,6 +522,49 @@ Token: GitHub Packages needs one, even for public packages. pipetrain uses the s
 | 0 | The version is published, or no `--version` was asked. |
 | 1 | The version is not published, the package is not in the feed (`package not found in <feed>`), or an error such as a network failure (`error: ...` on stderr). |
 | 2 | The feed answered 401 or 403: the token is missing or lacks `read:packages`. |
+
+### Waiting for a version: `feed --wait`
+
+```
+pipetrain feed <PACKAGE> --version <V> --wait [--interval <S>] [--timeout <S>] [--no-progress] [--json]
+```
+
+`--wait` keeps checking the feed until the version is published or the time runs out. It is the same read-only lookup as `feed`, repeated: it sends `GET` requests only and writes nothing.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--wait` | off | Poll instead of checking once. Needs `--version`. |
+| `--interval <S>` | 10 | Whole seconds between checks, at least 1. The last pause is shortened so the wait never goes past the timeout. |
+| `--timeout <S>` | 600 | Whole seconds to wait in total. `0` checks once and does not wait. |
+| `--no-progress` | off | No spinner. The spinner is drawn only on a terminal, and never with `--json` or `CI=true`. |
+
+`--interval`, `--timeout` and `--no-progress` without `--wait` are an error (exit 1), and so is `--wait` without `--version`.
+
+stdout carries the final result, once. Progress and retry messages go to stderr:
+
+```
+Acme.Util 2.0.0: published
+Acme.Util 2.0.0: not published after 600s (latest 1.2610.2314.49)
+```
+
+The second line has no `(latest ...)` when the feed lists no versions. With `--json` the output is the `feed` object plus `"waited": true`, `"attempts"`, `"elapsed_seconds"` and `"timed_out"`. Schema stays 1, and those four fields appear only with `--wait`.
+
+| Code | Meaning |
+|---|---|
+| 0 | The version is published. It returns as soon as it appears. |
+| 1 | The timeout passed and the version is still not published, or `--wait` was used wrongly. A package that does not exist yet counts as not yet published and keeps being retried. |
+| 2 | The feed answered 401 or 403. It stops at once with no retry: waiting does not fix a missing `read:packages` scope. |
+| 3 | At the timeout the last attempt still failed with a network error, an HTTP error or an invalid answer. Nothing is printed on stdout. |
+
+A network or server error in the middle of the wait is retried until the timeout, so a short outage does not fail the run. If a later attempt reaches the feed and the version is still missing, the result is 1, not 3.
+
+In a runner:
+
+```
+pipetrain feed Acme.Util --org acme --version 2.0.0 --wait --timeout 900 --no-progress
+```
+
+The step passes when the version is published and fails on any other code, so the next job starts only once the package is available. See [docs/feed-wait.md](docs/feed-wait.md).
 
 ### In the plan: `plan --check-feeds`
 
