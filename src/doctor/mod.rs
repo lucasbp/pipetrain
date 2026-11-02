@@ -165,14 +165,20 @@ pub fn gather_with(
     checks
 }
 
+pub fn json_report(opts: &DoctorOptions) -> (String, i32) {
+    let checks = gather_with(opts.config.as_deref(), opts.profile.as_deref(), &opts.orgs);
+    (report::json(&checks), report::exit_code(&checks))
+}
+
 pub fn run(opts: DoctorOptions) -> Result<i32> {
+    if opts.json {
+        let (text, code) = json_report(&opts);
+        println!("{text}");
+        return Ok(code);
+    }
     let started = Instant::now();
     let checks = gather_with(opts.config.as_deref(), opts.profile.as_deref(), &opts.orgs);
-    if opts.json {
-        println!("{}", report::json(&checks));
-    } else {
-        anstream::print!("{}", report::text(&checks));
-        anstream::println!("{}  {}", dim("time"), elapsed::format(started.elapsed()));
-    }
+    anstream::print!("{}", report::text(&checks));
+    anstream::println!("{}  {}", dim("time"), elapsed::format(started.elapsed()));
     Ok(report::exit_code(&checks))
 }

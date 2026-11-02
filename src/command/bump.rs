@@ -373,8 +373,29 @@ pub fn to_json_with(report: &Report, only: &[Level], changes_only: bool) -> Valu
     out
 }
 
-pub fn run(opts: BumpOptions) -> Result<i32> {
+pub struct Outcome {
+    pub report: Option<Report>,
+    pub before: Vec<String>,
+    pub after: Vec<String>,
+    pub exit: i32,
+    pub elapsed: Duration,
+}
+
+impl Outcome {
+    fn stop(before: Vec<String>, exit: i32, started: Instant) -> Self {
+        Self {
+            report: None,
+            before,
+            after: Vec::new(),
+            exit,
+            elapsed: started.elapsed(),
+        }
+    }
+}
+
+pub fn execute(opts: &BumpOptions) -> Result<Outcome> {
     let started = Instant::now();
+    let mut before = Vec::new();
     let (cfg, _) = resolve::load(opts.config.as_deref(), opts.profile.as_deref(), &[], &[])?;
     let (exact, globs) = configured(&cfg);
     let from_config = opts.repos.is_empty();
@@ -387,7 +408,10 @@ pub fn run(opts: BumpOptions) -> Result<i32> {
         bail!("no repos given and the profile has no exact repo names in [[layer]] or [[order]]");
     }
     if from_config && !globs.is_empty() {
-        eprintln!("warning: ignored names with a glob: {}", globs.join(", "));
+        before.push(format!(
+            "warning: ignored names with a glob: {}",
+            globs.join(", ")
+        ));
     }
     let ecosystem = opts
         .ecosystem
@@ -400,9 +424,11 @@ pub fn run(opts: BumpOptions) -> Result<i32> {
         registry: opts.registry.clone(),
         json: false,
     };
-    let target = match target_version(opts.to.as_deref(), || feed_command::latest(&feed_options))? {
+    let target = match target_version(opts.to.as_deref(), || {
+        feed_command::latest(&feed_options, &mut before)
+    })? {
         Ok(target) => target,
-        Err(code) => return Ok(code),
+        Err(code) => return Ok(Outcome::stop(before, code, started)),
     };
     if target.is_empty() {
         bail!("--to needs a version");
@@ -412,34 +438,66 @@ pub fn run(opts: BumpOptions) -> Result<i32> {
     let progress = Progress::start(opts.progress);
     let scanned = scan(&mut client, &names, &opts.package, ecosystem)?;
     drop(progress);
-    for warning in &scanned.warnings {
-        eprintln!("{warning}");
-    }
+    before.extend(scanned.warnings.iter().cloned());
     if scanned.repos.is_empty() {
-        eprintln!("{} is not referenced in any scanned manifest", opts.package);
-        return Ok(1);
+        before.push(format!(
+            "{} is not referenced in any scanned manifest",
+            opts.package
+        ));
+        return Ok(Outcome::stop(before, 1, started));
     }
     let report =
         Report::build(&opts.package, ecosystem, &target, &scanned.repos).restrict(&opts.only);
-    if opts.json {
-        let json = to_json_with(&report, &opts.only, opts.changes_only);
-        println!("{}", serde_json::to_string_pretty(&json)?);
-    } else {
-        anstream::print!(
-            "{}",
-            render_rows(&report, true, Some(started.elapsed()), opts.changes_only)
-        );
-    }
-    eprintln!(
-        "{}",
-        requests_line(client.requests(), client.cache_hits(), started.elapsed())
-    );
+    let elapsed = started.elapsed();
+    let mut after = vec![requests_line(
+        client.requests(),
+        client.cache_hits(),
+        elapsed,
+    )];
     let pending = report.count(Status::Change);
+    let mut exit = 0;
     if opts.check && pending > 0 {
-        eprintln!("--check: {pending} would change");
-        return Ok(1);
+        after.push(format!("--check: {pending} would change"));
+        exit = 1;
     }
-    Ok(0)
+    Ok(Outcome {
+        report: Some(report),
+        before,
+        after,
+        exit,
+        elapsed,
+    })
+}
+
+pub fn json_text(outcome: &Outcome, opts: &BumpOptions) -> Result<Option<String>> {
+    let Some(report) = &outcome.report else {
+        return Ok(None);
+    };
+    let json = to_json_with(report, &opts.only, opts.changes_only);
+    Ok(Some(serde_json::to_string_pretty(&json)?))
+}
+
+pub fn run(opts: BumpOptions) -> Result<i32> {
+    let outcome = execute(&opts)?;
+    for note in &outcome.before {
+        eprintln!("{note}");
+    }
+    if let Some(report) = &outcome.report {
+        if opts.json {
+            if let Some(text) = json_text(&outcome, &opts)? {
+                println!("{text}");
+            }
+        } else {
+            anstream::print!(
+                "{}",
+                render_rows(report, true, Some(outcome.elapsed), opts.changes_only)
+            );
+        }
+    }
+    for note in &outcome.after {
+        eprintln!("{note}");
+    }
+    Ok(outcome.exit)
 }
 
 #[cfg(test)]

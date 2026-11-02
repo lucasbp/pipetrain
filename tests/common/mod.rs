@@ -108,6 +108,10 @@ pub struct Server {
 }
 
 pub fn serve_handler(handler: impl Fn(&str) -> (u16, Value) + Send + 'static) -> Server {
+    serve_requests(move |line, _| handler(line))
+}
+
+pub fn serve_requests(handler: impl Fn(&str, &str) -> (u16, Value) + Send + 'static) -> Server {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -122,8 +126,9 @@ pub fn serve_handler(handler: impl Fn(&str) -> (u16, Value) + Send + 'static) ->
                 .unwrap_or_default()
                 .trim_end_matches(" HTTP/1.1")
                 .to_string();
-            let (status, body) = handler(&line);
-            record.lock().unwrap().push(request);
+            let payload = request.split_once("\r\n\r\n").map_or("", |(_, rest)| rest);
+            let (status, body) = handler(&line, payload);
+            record.lock().unwrap().push(request.clone());
             let body = body.to_string();
             let reply = format!(
                 "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",

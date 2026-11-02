@@ -12,6 +12,7 @@ pipetrain is a read-only Rust CLI that plans the merge order of pull requests ac
 - `src/planner.rs`, `src/planner/`: the graph and the ordering rules. The rules are documented in `docs/planner.md`.
 - `src/github/`: GitHub API client. `src/config/`, `src/profile/`: config and profiles.
 - `src/doctor/`: the `pipetrain doctor` checks. `src/cache/`: local cache.
+- `src/mcp/`: the read-only MCP server (`pipetrain mcp`). It calls the same functions as the commands, so keep a command's output in a function that returns it and print in `run`. Documented in `docs/mcp.md`.
 - `src/detect.rs`, `src/cargo.rs`, `src/gomod.rs`, `src/pyproject.rs`, `src/manifest.rs`: package detection from manifests.
 - `docs/`: the output contracts (`plan-json.md`, `queue-output.md`) and design notes.
 - `tests/`: integration tests, one file per feature.

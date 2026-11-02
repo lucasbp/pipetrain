@@ -115,6 +115,20 @@ enum Command {
         about = "Read-only: summarizes the local usage log, which is off unless you turn it on"
     )]
     Log(LogArgs),
+
+    #[command(
+        about = "Read-only: serves plan, feed, bump (dry run), doctor and order_suggest as MCP tools over stdin and stdout"
+    )]
+    Mcp(McpArgs),
+}
+
+#[derive(clap::Args)]
+struct McpArgs {
+    #[arg(
+        long,
+        help = "Config file for every tool call (default: ./pipetrain.toml, then the user config dir)"
+    )]
+    config: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]
@@ -736,6 +750,7 @@ fn run_command(command: Command) -> Result<i32> {
             summary: args.summary,
             json: args.json,
         }),
+        Command::Mcp(args) => pipetrain::mcp::serve(args.config),
         Command::Doctor(args) => run_doctor(args),
         Command::Plan(args) => run_plan(args),
         Command::Bundle(args) => run_bundle(args),
@@ -811,7 +826,7 @@ fn command_name(command: &Command) -> Option<&'static str> {
         Command::Feed(_) => "feed",
         Command::Bump(_) => "bump",
         Command::Update(_) => "update",
-        Command::Log(_) => return None,
+        Command::Log(_) | Command::Mcp(_) => return None,
     })
 }
 
