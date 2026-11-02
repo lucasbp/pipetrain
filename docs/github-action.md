@@ -8,7 +8,7 @@
     refs: acme/api#12 acme/web#3
 ```
 
-The action only works from a tag that contains `action.yml`. Replace `v0.2.0` with the first release that ships it. Until then, pin a commit SHA of `main` and set `version` too, because a SHA names no release.
+The action only works from a tag that contains `action.yml`. `v0.2.0` is the first. To follow `main` instead, pin a commit SHA and set `version` too, because a SHA names no release.
 
 A full workflow is in [examples/pipetrain-plan.yml](examples/pipetrain-plan.yml).
 
