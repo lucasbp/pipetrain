@@ -72,12 +72,19 @@ repos = ["acme/shared-*", "acme/api-*"]
 # default_profile = "acme"
 #
 # [profile.acme]
+# aliases = ["a"]
 # folders = ["/work/acme"]
 # orgs = ["acme"]
 #
 # [profile.sandbox]
 # folders = ["/work/sandbox"]
 # orgs = ["acme-labs"]
+#
+# Short names for real orgs, accepted in --org and in org/repo#N arguments.
+# Reports and caches keep the real name.
+#
+# [org_alias]
+# lab = "acme-labs"
 
 [deploy]
 # A PR touching these paths is a DDL gate.

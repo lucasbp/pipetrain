@@ -13,7 +13,7 @@ use crate::config::{ApiConfig, Config};
 use crate::elapsed;
 use crate::github::{ApiError, Client, probe_gh, resolve};
 use crate::hint::Os;
-use crate::profile::{self, Inputs, ProfileSet};
+use crate::profile::{self, Inputs, OrgAliases, ProfileSet};
 use crate::style::dim;
 use check::{Check, ConfigState, ProfileState};
 
@@ -31,6 +31,7 @@ struct Loaded {
     state: ConfigState,
     profile: ProfileState,
     orgs: Vec<String>,
+    aliases: OrgAliases,
 }
 
 fn flat_listing(set: &ProfileSet) -> String {
@@ -75,17 +76,20 @@ fn load_config(path: Option<&Path>, flag: Option<&str>) -> Loaded {
                 state: ConfigState::Found(found),
                 profile,
                 orgs,
+                aliases: set.org_aliases,
             }
         }
         Ok((_, None)) => Loaded {
             state: ConfigState::NotFound,
             profile: ProfileState::Unknown,
             orgs: Vec::new(),
+            aliases: OrgAliases::default(),
         },
         Err(err) => Loaded {
             state: ConfigState::Invalid(format!("{err:#}")),
             profile: ProfileState::Unknown,
             orgs: Vec::new(),
+            aliases: OrgAliases::default(),
         },
     }
 }
@@ -144,7 +148,7 @@ pub fn gather_with(
     let orgs = if extra_orgs.is_empty() {
         loaded.orgs.clone()
     } else {
-        extra_orgs.to_vec()
+        loaded.aliases.resolve_all(extra_orgs)
     };
     let gh = probe_gh();
     let gh_state = gh.state();

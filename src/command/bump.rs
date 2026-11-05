@@ -396,13 +396,14 @@ impl Outcome {
 pub fn execute(opts: &BumpOptions) -> Result<Outcome> {
     let started = Instant::now();
     let mut before = Vec::new();
-    let (cfg, _) = resolve::load(opts.config.as_deref(), opts.profile.as_deref(), &[], &[])?;
+    let resolved = resolve::load(opts.config.as_deref(), opts.profile.as_deref(), &[], &[])?;
+    let cfg = resolved.cfg;
     let (exact, globs) = configured(&cfg);
     let from_config = opts.repos.is_empty();
     let names = if from_config {
         names_of(exact)
     } else {
-        names_of(opts.repos.clone())
+        names_of(resolved.aliases.resolve_refs(&opts.repos))
     };
     if names.is_empty() {
         bail!("no repos given and the profile has no exact repo names in [[layer]] or [[order]]");
@@ -420,7 +421,7 @@ pub fn execute(opts: &BumpOptions) -> Result<Outcome> {
         package: opts.package.clone(),
         version: None,
         ecosystem: Some(ecosystem),
-        org: opts.org.clone(),
+        org: opts.org.as_deref().map(|org| resolved.aliases.resolve(org)),
         registry: opts.registry.clone(),
         json: false,
     };

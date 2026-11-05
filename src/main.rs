@@ -21,6 +21,7 @@ use pipetrain::command::{PlanOptions, plan};
 use pipetrain::doctor::{self, DoctorOptions};
 use pipetrain::emit::Emit;
 use pipetrain::feed::{DEFAULT_INTERVAL, DEFAULT_TIMEOUT, Ecosystem};
+use pipetrain::profile::ProfileSet;
 use pipetrain::update::notice::{self, Suppress};
 
 #[derive(Parser)]
@@ -958,6 +959,10 @@ fn run_command(command: Command) -> Result<i32> {
     }
 }
 
+fn real_org(org: &str) -> String {
+    ProfileSet::load(None).map_or_else(|_| org.to_string(), |(set, _)| set.org_aliases.resolve(org))
+}
+
 fn run_feed(args: FeedArgs) -> Result<i32> {
     let wait = args.wait;
     if !wait && (args.interval.is_some() || args.timeout.is_some() || args.no_progress) {
@@ -968,7 +973,7 @@ fn run_feed(args: FeedArgs) -> Result<i32> {
         package: args.package,
         version: args.version,
         ecosystem: args.ecosystem,
-        org: args.org,
+        org: args.org.map(|org| real_org(&org)),
         registry: args.registry,
         json: args.json,
     };

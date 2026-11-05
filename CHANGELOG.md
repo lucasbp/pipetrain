@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.0
+
+### Added
+
+- Profile `aliases`: a `[profile.NAME]` table may list short names (`aliases = ["a", "ac"]`). An alias is accepted by `--profile` and by `default_profile`, case-insensitively, and the profile that comes out is always the real one. `pipetrain profiles` adds an `ALIASES` column only when some profile has aliases, and `doctor` and the unknown profile and no profile chosen errors list them as `aliases: a, ac`. An alias that repeats the profile's own name, is listed twice, or equals another profile's name or alias is refused when the config is read, and `aliases` outside a `[profile.NAME]` table is an error.
+- `[org_alias]` table: short names for real orgs (`lab = "acme-labs"`). The alias is replaced before anything else reads it, in `--org` (`plan`, `bundle`, `merge`, `bump`, `feed`, `doctor`), in `org/repo#N` and PR URL arguments, in the `org/repo` arguments of `bump` and `order suggest`, and in the profile rule that reads the orgs of the arguments. `pipetrain profiles` prints an `org aliases:` line. An alias that differs from another only by case, points to another alias or to itself, or equals an org of any profile (or of a flat config) is refused when the config is read.
+
+Plans, caches and every output keep the real org and profile names, so the `--json` and `--emit queue` contracts are unchanged. See [docs/aliases.md](docs/aliases.md).
+
 ## 0.4.0
 
 ### Changed

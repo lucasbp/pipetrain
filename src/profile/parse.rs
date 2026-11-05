@@ -4,38 +4,53 @@ use anyhow::{Context, Result, bail};
 use toml::{Table, Value};
 
 use super::select::components;
-use super::{IMPLICIT, Profile, ProfileSet};
+use super::{IMPLICIT, OrgAliases, Profile, ProfileSet};
 use crate::config::{Config, validate_date_format, validate_train_label};
 
 pub fn parse(text: &str) -> Result<ProfileSet> {
     let mut shared: Table = text.parse().context("invalid config")?;
     let default_profile = take_default(&mut shared)?;
+    let org_aliases = OrgAliases::parse(&mut shared)?;
     let tables = take_profiles(&mut shared)?;
     if tables.is_empty() {
-        return flat(shared, default_profile);
+        return flat(shared, default_profile, org_aliases);
     }
-    if shared.contains_key("folders") {
-        bail!("`folders` is only allowed inside a [profile.NAME] table");
+    for key in ["folders", "aliases"] {
+        if shared.contains_key(key) {
+            bail!("`{key}` is only allowed inside a [profile.NAME] table");
+        }
     }
     let mut profiles = Vec::new();
     for (name, own) in tables {
         profiles.push(build(&name, &shared, own)?);
     }
     reject_shared_folders(&profiles)?;
+    reject_alias_collisions(&profiles)?;
+    org_aliases.check_profiles(&profiles)?;
     let set = ProfileSet {
         profiles,
         default_profile,
+        org_aliases,
     };
     check_default(&set)?;
     Ok(set)
 }
 
-fn flat(shared: Table, default_profile: Option<String>) -> Result<ProfileSet> {
+fn flat(
+    shared: Table,
+    default_profile: Option<String>,
+    org_aliases: OrgAliases,
+) -> Result<ProfileSet> {
+    if shared.contains_key("aliases") {
+        bail!("`aliases` is only allowed inside a [profile.NAME] table");
+    }
     let config: Config = shared.try_into().context("invalid config")?;
     validate_date_format(&config.train_date_format)?;
     validate_train_label(config.train_label.as_deref())?;
     let mut set = ProfileSet::single(config);
     set.default_profile = default_profile;
+    set.org_aliases = org_aliases;
+    set.org_aliases.check_profiles(&set.profiles)?;
     check_default(&set)?;
     Ok(set)
 }
@@ -74,6 +89,7 @@ fn take_profiles(shared: &mut Table) -> Result<Vec<(String, Table)>> {
 
 fn build(name: &str, shared: &Table, mut own: Table) -> Result<Profile> {
     let folders = take_folders(name, &mut own)?;
+    let aliases = take_aliases(name, &mut own)?;
     let mut merged = shared.clone();
     merged.extend(own);
     let config: Config = merged
@@ -85,9 +101,58 @@ fn build(name: &str, shared: &Table, mut own: Table) -> Result<Profile> {
         .with_context(|| format!("invalid config in profile `{name}`"))?;
     Ok(Profile {
         name: name.to_string(),
+        aliases,
         folders,
         config,
     })
+}
+
+fn take_aliases(name: &str, own: &mut Table) -> Result<Vec<String>> {
+    let Some(value) = own.remove("aliases") else {
+        return Ok(Vec::new());
+    };
+    let Value::Array(items) = value else {
+        bail!("`profile.{name}.aliases` must be a list of names");
+    };
+    let mut aliases = Vec::new();
+    for item in items {
+        match item {
+            Value::String(alias) if !alias.trim().is_empty() => aliases.push(alias),
+            _ => bail!("`profile.{name}.aliases` must hold non-empty names"),
+        }
+    }
+    Ok(aliases)
+}
+
+fn reject_alias_collisions(profiles: &[Profile]) -> Result<()> {
+    let mut owners: Vec<(String, &str, bool)> = profiles
+        .iter()
+        .map(|p| (p.name.to_lowercase(), p.name.as_str(), false))
+        .collect();
+    for profile in profiles {
+        for alias in &profile.aliases {
+            let key = alias.to_lowercase();
+            if let Some((_, owner, is_alias)) = owners.iter().find(|(k, _, _)| *k == key) {
+                if !is_alias && *owner == profile.name {
+                    bail!("alias `{alias}` in profile `{owner}` repeats the profile's own name");
+                }
+                if *is_alias && *owner == profile.name {
+                    bail!("alias `{alias}` is listed twice in profile `{owner}`");
+                }
+                let what = if *is_alias {
+                    "an alias of"
+                } else {
+                    "the name of"
+                };
+                bail!(
+                    "alias `{alias}` in profile `{}` is already {what} profile `{owner}`",
+                    profile.name
+                );
+            }
+            owners.push((key, &profile.name, true));
+        }
+    }
+    Ok(())
 }
 
 fn take_folders(name: &str, own: &mut Table) -> Result<Vec<String>> {
