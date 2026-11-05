@@ -515,6 +515,31 @@ The profile is chosen by the first rule that applies:
 
 `folders` is only allowed inside a profile, paths are absolute and not expanded (no `~`), and the same folder cannot be listed in two profiles. Profiles are never merged. `--org` replaces the `orgs` of the selected profile. The text report starts with a line such as `profile acme (from the working folder)`, and `--json` carries `profile {name, source}` with `source` one of `flag`, `args`, `folder`, `default` or `only`.
 
+#### Aliases
+
+A profile can have short names, and the file can have short names for real orgs.
+
+```toml
+default_profile = "gx"
+
+[org_alias]
+gx = "globex"
+lab = "acme-labs"
+
+[profile.acme]
+aliases = ["a"]
+orgs = ["acme", "acme-labs"]
+
+[profile.globex]
+aliases = ["gx"]
+orgs = ["globex"]
+```
+
+- `aliases` is a list inside `[profile.<name>]`. `--profile a` selects `acme`, and `default_profile` can be an alias. Profile names and aliases are matched without regard to case. The report and `--json` always carry the real profile name.
+- `[org_alias]` maps `alias = "real-org"`. The alias works in `--org lab`, in `lab/repo#1` and in `https://github.com/lab/repo/pull/1`, and it counts when the orgs of the arguments choose the profile. Plans, `--json` and the cache always carry the real org name.
+- An alias is an error, with the names in the message, when it equals a profile name or an alias of another profile, is listed twice, repeats the profile's own name, or sits outside `[profile.<name>]`. An org alias is an error when it is defined twice (case-insensitive), points to itself or to another alias, or equals an org that a profile lists.
+- `pipetrain profiles` adds an `ALIASES` column and an `org aliases:` line only when the config has them, the same listing appears in the error that asks for a profile, and `pipetrain doctor` resolves the extra `--org` through the aliases.
+
 `pipetrain profiles` shows what applies from the current folder, `pipetrain orgs` lists the orgs your token can see and which profile has each, and `pipetrain init` prints a proposed config with one profile per visible org. `init --write` creates the file only when it does not exist yet, unless `--force` is given.
 
 ### Only your PRs

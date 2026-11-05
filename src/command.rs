@@ -340,7 +340,12 @@ pub(crate) fn build_plan(opts: &PlanOptions) -> Result<(Plan, Client)> {
 
 pub(crate) fn build_plan_with_config(opts: &PlanOptions) -> Result<(Plan, Client, Config)> {
     let started = Instant::now();
-    let (cfg, profile) = resolve::load(
+    let resolve::Resolved {
+        cfg,
+        info: profile,
+        prs,
+        ..
+    } = resolve::load(
         opts.config.as_deref(),
         opts.profile.as_deref(),
         &opts.prs,
@@ -348,7 +353,7 @@ pub(crate) fn build_plan_with_config(opts: &PlanOptions) -> Result<(Plan, Client
     )?;
     let rules = Rules::new(&cfg)?;
     let deploy_branch = deploy_branch_for(&cfg, opts.date.as_deref())?;
-    let explicit = explicit_targets(&opts.prs, &cfg)?;
+    let explicit = explicit_targets(&prs, &cfg)?;
     let train = train_label(&explicit, opts.all, &deploy_branch);
 
     let mut client = Client::new(github::token()?, &cfg.api, opts.verbose)

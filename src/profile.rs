@@ -5,9 +5,11 @@ use anyhow::{Context, Result, bail};
 
 use crate::config::Config;
 
+mod alias;
 mod parse;
 mod select;
 
+pub use alias::OrgAliases;
 pub use select::{Inputs, ProfileSource, Selection, folder_depth, select};
 
 pub const IMPLICIT: &str = "default";
@@ -15,6 +17,7 @@ pub const IMPLICIT: &str = "default";
 #[derive(Debug, Clone)]
 pub struct Profile {
     pub name: String,
+    pub aliases: Vec<String>,
     pub folders: Vec<String>,
     pub config: Config,
 }
@@ -23,6 +26,7 @@ pub struct Profile {
 pub struct ProfileSet {
     pub profiles: Vec<Profile>,
     pub default_profile: Option<String>,
+    pub org_aliases: OrgAliases,
 }
 
 impl ProfileSet {
@@ -34,10 +38,12 @@ impl ProfileSet {
         Self {
             profiles: vec![Profile {
                 name: IMPLICIT.to_string(),
+                aliases: Vec::new(),
                 folders: Vec::new(),
                 config,
             }],
             default_profile: None,
+            org_aliases: OrgAliases::default(),
         }
     }
 
@@ -63,14 +69,31 @@ impl ProfileSet {
         self.profiles
             .iter()
             .find(|p| p.name.eq_ignore_ascii_case(name))
+            .or_else(|| {
+                self.profiles
+                    .iter()
+                    .find(|p| p.aliases.iter().any(|a| a.eq_ignore_ascii_case(name)))
+            })
     }
 
     pub fn listing(&self) -> String {
-        self.profiles
+        let profiles = self
+            .profiles
             .iter()
-            .map(|p| format!("  {}  orgs: {}", p.name, orgs_text(&p.config.orgs)))
+            .map(|p| {
+                let aliases = if p.aliases.is_empty() {
+                    String::new()
+                } else {
+                    format!("  aliases: {}", p.aliases.join(", "))
+                };
+                format!("  {}  orgs: {}{aliases}", p.name, orgs_text(&p.config.orgs))
+            })
             .collect::<Vec<_>>()
-            .join("\n")
+            .join("\n");
+        match self.org_aliases.listing() {
+            Some(orgs) => format!("{profiles}\n  org aliases: {orgs}"),
+            None => profiles,
+        }
     }
 
     pub fn into_single_config(self) -> Result<Config> {

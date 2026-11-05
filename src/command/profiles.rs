@@ -27,42 +27,75 @@ fn pad(text: &str, width: usize) -> String {
     format!("{text:<width$}")
 }
 
+fn aliases_text(aliases: &[String]) -> String {
+    if aliases.is_empty() {
+        "(none)".to_string()
+    } else {
+        aliases.join(", ")
+    }
+}
+
+fn line(mark: &str, cells: &[String], widths: &[usize]) -> String {
+    let last = cells.len() - 1;
+    let joined: Vec<String> = cells
+        .iter()
+        .enumerate()
+        .map(|(i, cell)| {
+            if i == last {
+                cell.clone()
+            } else {
+                pad(cell, widths[i])
+            }
+        })
+        .collect();
+    format!("{mark} {}", joined.join("  "))
+}
+
 pub fn table(set: &ProfileSet, picked: Option<&(String, ProfileSource)>) -> String {
-    let rows: Vec<[String; 3]> = set
+    let with_aliases = set.profiles.iter().any(|p| !p.aliases.is_empty());
+    let titles: Vec<String> = if with_aliases {
+        ["NAME", "ALIASES", "ORGS", "FOLDERS"]
+    } else {
+        ["NAME", "", "ORGS", "FOLDERS"]
+    }
+    .iter()
+    .filter(|title| !title.is_empty())
+    .map(|title| (*title).to_string())
+    .collect();
+    let rows: Vec<Vec<String>> = set
         .profiles
         .iter()
         .map(|p| {
-            [
-                p.name.clone(),
-                orgs_text(&p.config.orgs),
-                folders_text(&p.folders),
-            ]
+            let mut cells = vec![p.name.clone()];
+            if with_aliases {
+                cells.push(aliases_text(&p.aliases));
+            }
+            cells.push(orgs_text(&p.config.orgs));
+            cells.push(folders_text(&p.folders));
+            cells
         })
         .collect();
-    let width = |column: usize, title: &str| {
-        rows.iter()
-            .map(|row| row[column].chars().count())
-            .chain([title.chars().count()])
-            .max()
-            .unwrap_or(0)
-    };
-    let (w0, w1) = (width(0, "NAME"), width(1, "ORGS"));
-    let mut lines = vec![format!(
-        "  {}  {}  FOLDERS",
-        pad("NAME", w0),
-        pad("ORGS", w1)
-    )];
+    let widths: Vec<usize> = titles
+        .iter()
+        .enumerate()
+        .map(|(column, title)| {
+            rows.iter()
+                .map(|row| row[column].chars().count())
+                .chain([title.chars().count()])
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    let mut lines = vec![line(" ", &titles, &widths)];
     for row in &rows {
         let mark = match picked {
             Some((name, _)) if name == &row[0] => "*",
             _ => " ",
         };
-        lines.push(format!(
-            "{mark} {}  {}  {}",
-            pad(&row[0], w0),
-            pad(&row[1], w1),
-            row[2]
-        ));
+        lines.push(line(mark, row, &widths));
+    }
+    if let Some(orgs) = set.org_aliases.listing() {
+        lines.push(format!("org aliases: {orgs}"));
     }
     lines.join("\n")
 }

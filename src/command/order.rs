@@ -179,13 +179,14 @@ pub struct Suggested {
 
 pub fn execute(opts: &OrderOptions) -> Result<Suggested> {
     let started = Instant::now();
-    let (cfg, _) = resolve::load(opts.config.as_deref(), opts.profile.as_deref(), &[], &[])?;
+    let resolved = resolve::load(opts.config.as_deref(), opts.profile.as_deref(), &[], &[])?;
+    let cfg = resolved.cfg;
     let (exact, globs) = configured(&cfg);
     let from_config = opts.repos.is_empty();
     let names = if from_config {
         names_of(exact)
     } else {
-        names_of(opts.repos.clone())
+        names_of(resolved.aliases.resolve_refs(&opts.repos))
     };
     if names.is_empty() {
         bail!("no repos given and the profile has no exact repo names in [[layer]] or [[order]]");

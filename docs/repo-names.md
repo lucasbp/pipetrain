@@ -12,7 +12,7 @@ A reference that fits none of them, such as `api`, `#12`, `api#x` or `a/b/c#1`, 
 
 ## How a bare name is resolved
 
-1. The orgs to search are the `orgs` of the active profile. `--org` replaces them, as it does everywhere else.
+1. The orgs to search are the `orgs` of the active profile. `--org` replaces them, as it does everywhere else. An org alias (see [aliases.md](aliases.md)) is replaced by its real org before the search, so the lookup and the plan use the real name.
 2. For each distinct name, in the order of the orgs, pipetrain asks `GET /repos/{org}/{repo}`. A `404` means the org does not have that repo. Any other failure, including a bad token (`401`), a refusal (`403`) or a rate limit, stops the run as it does anywhere else; it is never read as "not found".
 3. The result decides the outcome:
 
