@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- `pipetrain update` without a flag now installs: it downloads the latest release, checks its SHA-256 against `SHA256SUMS` and replaces the running executable, wherever it lives. It no longer exits 1 with a "not ready" message. `--check` is unchanged. `--experimental-install` is still accepted, hidden, and does nothing extra.
+- On Windows the old executable is renamed to `pipetrain.exe.old` and deleted on the next start; on Linux and macOS the new file is renamed over the old one.
+
+### Added
+
+- `pipetrain update --dry-run` shows the current and new version, the asset and the executable it would replace, without downloading or writing. `--json` gains `dry_run`.
+- `pipetrain update` checks that the folder of the executable is writable before downloading and names the path when it is not.
+
 ## 0.5.0
 
 ### Added
