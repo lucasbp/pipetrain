@@ -10,7 +10,7 @@ use super::checklist::Checklist;
 use super::order::requests_line;
 use super::{PlanOptions, build_plan};
 use crate::bundle::Bundle;
-use crate::github::{BranchWrite, Client};
+use crate::github::{BranchWrite, Client, PrWrite};
 use crate::live::{Row, State};
 use crate::plan::Plan;
 use crate::planner::Item;
@@ -23,6 +23,7 @@ const STOPPED: &str = "stopped after an earlier failure";
 pub enum Kind {
     CreateBranch,
     Retarget,
+    OpenPr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -47,6 +48,12 @@ enum Step {
         number: u64,
         branch: String,
         current: String,
+    },
+    OpenPr {
+        slug: String,
+        base: String,
+        branch: String,
+        body: String,
     },
 }
 
@@ -88,6 +95,7 @@ pub struct ApplyOptions {
     pub plan: PlanOptions,
     pub apply: bool,
     pub yes: bool,
+    pub open_pr: bool,
 }
 
 fn short(sha: &str) -> String {
@@ -114,6 +122,12 @@ impl Action {
                 tint(color, bold, &self.target),
                 tint(color, cyan, current),
                 tint(color, cyan, branch)
+            ),
+            Step::OpenPr { base, branch, .. } => format!(
+                "{} {} -> {}",
+                tint(color, yellow, "open PR"),
+                tint(color, cyan, branch),
+                tint(color, cyan, base)
             ),
         }
     }
@@ -268,11 +282,80 @@ fn per_base_note(plan: &Plan, bundle: &Bundle) -> Option<String> {
     })
 }
 
+fn wrong_base(repo: &str, branch: &str, base: &str, base_sha: &str) -> anyhow::Error {
+    anyhow!(
+        "refusing to reuse the branch `{branch}` in {repo}: it already exists and does not contain the tip of `{base}` ({}), so it was created from another base; delete it or bundle on another day with --date",
+        short(base_sha)
+    )
+}
+
+fn confirm_base(
+    client: &mut Client,
+    repo: &str,
+    branch: &str,
+    base: &str,
+    base_sha: &str,
+) -> Result<()> {
+    match client.branch_tip(repo, branch)? {
+        Some(tip) => check_tip(client, repo, branch, base, base_sha, &tip),
+        None => Ok(()),
+    }
+}
+
+fn check_tip(
+    client: &mut Client,
+    repo: &str,
+    branch: &str,
+    base: &str,
+    base_sha: &str,
+    tip: &str,
+) -> Result<()> {
+    if client.contains_commit(repo, tip, base_sha)? {
+        Ok(())
+    } else {
+        Err(wrong_base(repo, branch, base, base_sha))
+    }
+}
+
+pub(crate) fn deploy_pr_body(base: &str, targets: &[&str]) -> String {
+    let mut body = format!("Deploy of {} PRs into `{base}`:\n\n", targets.len());
+    for target in targets {
+        body.push_str(&format!("- {target}\n"));
+    }
+    body
+}
+
+fn open_pr_action(bundle: &Bundle, targets: &[&str], client: &mut Client) -> Result<Action> {
+    let (status, detail) = match &bundle.existing_train_pr {
+        Some(pr) => (Status::Skipped, format!("deploy PR already open: {pr}")),
+        None => match client.open_pr_from(&bundle.repo, &bundle.branch, &bundle.base)? {
+            Some(number) => (
+                Status::Skipped,
+                format!("deploy PR already open: {}#{number}", bundle.repo),
+            ),
+            None => (Status::Planned, String::new()),
+        },
+    };
+    Ok(Action {
+        kind: Kind::OpenPr,
+        target: bundle.branch.clone(),
+        status,
+        detail,
+        step: Step::OpenPr {
+            slug: bundle.repo.clone(),
+            base: bundle.base.clone(),
+            branch: bundle.branch.clone(),
+            body: deploy_pr_body(&bundle.base, targets),
+        },
+    })
+}
+
 fn assemble(
     bundle: &Bundle,
     found: Retargets,
     client: &mut Client,
     per_base: Option<String>,
+    open_pr: bool,
 ) -> Result<BundleReport> {
     let mut actions = Vec::new();
     let mut notes: Vec<String> = per_base.into_iter().collect();
@@ -285,11 +368,31 @@ fn assemble(
         }
         None => {
             let sha = client.branch_sha(&bundle.repo, &bundle.base)?;
+            let tip = client.branch_tip(&bundle.repo, &bundle.branch)?;
+            let exists = tip.is_some();
+            if let Some(tip) = &tip {
+                check_tip(
+                    client,
+                    &bundle.repo,
+                    &bundle.branch,
+                    &bundle.base,
+                    &sha,
+                    tip,
+                )?;
+            }
             actions.push(Action {
                 kind: Kind::CreateBranch,
                 target: bundle.branch.clone(),
-                status: Status::Planned,
-                detail: String::new(),
+                status: if exists {
+                    Status::Skipped
+                } else {
+                    Status::Planned
+                },
+                detail: if exists {
+                    "branch already exists".to_string()
+                } else {
+                    String::new()
+                },
                 step: Step::Create {
                     slug: bundle.repo.clone(),
                     base: bundle.base.clone(),
@@ -299,7 +402,18 @@ fn assemble(
             });
         }
     }
+    let targets: Vec<&str> = found
+        .actions
+        .iter()
+        .map(|action| action.target.as_str())
+        .collect();
+    let opening = if open_pr {
+        Some(open_pr_action(bundle, &targets, client)?)
+    } else {
+        None
+    };
     actions.extend(found.actions);
+    actions.extend(opening);
     notes.extend(left_alone_note(&found.left_alone));
     Ok(BundleReport {
         repo: bundle.repo.clone(),
@@ -314,7 +428,7 @@ fn assemble(
     })
 }
 
-fn prepare(plan: &Plan, client: &mut Client) -> Result<Report> {
+fn prepare(plan: &Plan, client: &mut Client, open_pr: bool) -> Result<Report> {
     reject_collisions(plan)?;
     let mut drafts = Vec::new();
     for bundle in &plan.bundles {
@@ -335,6 +449,7 @@ fn prepare(plan: &Plan, client: &mut Client) -> Result<Report> {
             found,
             client,
             per_base_note(plan, bundle),
+            open_pr,
         )?);
     }
     Ok(Report {
@@ -345,14 +460,19 @@ fn prepare(plan: &Plan, client: &mut Client) -> Result<Report> {
 }
 
 fn run_step(action: &mut Action, client: &mut Client) {
-    let result = match &action.step {
+    let result: Result<(Status, String)> = match &action.step {
         Step::Create {
-            slug, branch, sha, ..
+            slug,
+            base,
+            branch,
+            sha,
         } => client
             .create_branch(slug, branch, sha)
-            .map(|written| match written {
-                BranchWrite::Created => (Status::Done, String::new()),
-                BranchWrite::AlreadyExists => (Status::Skipped, "branch already exists".into()),
+            .map_err(anyhow::Error::from)
+            .and_then(|written| match written {
+                BranchWrite::Created => Ok((Status::Done, String::new())),
+                BranchWrite::AlreadyExists => confirm_base(client, slug, branch, base, sha)
+                    .map(|()| (Status::Skipped, "branch already exists".to_string())),
             }),
         Step::Retarget {
             slug,
@@ -361,7 +481,20 @@ fn run_step(action: &mut Action, client: &mut Client) {
             ..
         } => client
             .retarget_pr(slug, *number, branch)
-            .map(|()| (Status::Done, String::new())),
+            .map(|()| (Status::Done, String::new()))
+            .map_err(anyhow::Error::from),
+        Step::OpenPr {
+            slug,
+            base,
+            branch,
+            body,
+        } => client
+            .create_pr(slug, branch, branch, base, body)
+            .map(|written| match written {
+                PrWrite::Created => (Status::Done, String::new()),
+                PrWrite::AlreadyExists => (Status::Skipped, "deploy PR already open".to_string()),
+            })
+            .map_err(anyhow::Error::from),
     };
     match result {
         Ok((status, detail)) => {
@@ -423,7 +556,18 @@ pub fn apply_plan(
     confirm: &mut dyn FnMut(&str) -> bool,
     observe: &mut dyn FnMut(&Report, Running),
 ) -> Result<Outcome> {
-    let mut report = prepare(plan, client)?;
+    apply_plan_with(plan, client, apply, false, confirm, observe)
+}
+
+pub fn apply_plan_with(
+    plan: &Plan,
+    client: &mut Client,
+    apply: bool,
+    open_pr: bool,
+    confirm: &mut dyn FnMut(&str) -> bool,
+    observe: &mut dyn FnMut(&Report, Running),
+) -> Result<Outcome> {
+    let mut report = prepare(plan, client, open_pr)?;
     if !apply {
         return Ok(Outcome {
             report,
@@ -671,7 +815,14 @@ pub fn run(opts: ApplyOptions) -> Result<i32> {
             }
         }
     };
-    let outcome = apply_plan(&built, &mut client, opts.apply, &mut confirm, &mut observe)?;
+    let outcome = apply_plan_with(
+        &built,
+        &mut client,
+        opts.apply,
+        opts.open_pr,
+        &mut confirm,
+        &mut observe,
+    )?;
     let applying = apply_started.get().elapsed();
     let shown = checklist.take().map(Checklist::finish).is_some();
     if outcome.aborted {

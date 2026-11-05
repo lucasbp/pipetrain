@@ -94,7 +94,9 @@ fn without_gate(mut plan: Plan) -> Plan {
 fn without_waits(lines: Vec<String>) -> Vec<String> {
     lines
         .into_iter()
-        .filter(|l| !l.starts_with("# wait"))
+        .filter(|l| {
+            !l.starts_with("# wait") && !l.starts_with("# step") && !l.starts_with("# lane")
+        })
         .collect()
 }
 
@@ -219,7 +221,9 @@ fn an_empty_plan_has_no_queue_lines() {
 fn a_gate_alone_has_no_trailing_pause() {
     let mut plan = build();
     plan.items.retain(|i| i.id == GATE);
-    assert_eq!(emit::queue_lines(&plan), vec![format!("merge:{GATE}")]);
+    let lines = emit::queue_lines(&plan);
+    assert_eq!(items_only(&lines), vec![&format!("merge:{GATE}")]);
+    assert!(lines.iter().all(|l| !l.starts_with("# pause")));
 }
 
 fn synthetic(gate: bool, specs: &[(&str, u64, Option<usize>, usize)]) -> Plan {
@@ -329,14 +333,24 @@ fn the_gate_segment_is_first_and_uses_the_same_order() {
     );
     plan.items.append(&mut rest.items);
     let lines = emit::queue_lines(&plan);
+    let step = "# step 1".to_string();
+    let lines: Vec<String> = lines
+        .into_iter()
+        .filter(|l| !l.starts_with("# lane"))
+        .collect();
     assert_eq!(
         lines,
         vec![
+            step.clone(),
             "merge:acme/lib-g#30".to_string(),
+            step.clone(),
             "merge:acme/svc-g#7".to_string(),
+            step.clone(),
             "merge:acme/bff-g#4".to_string(),
             PAUSE_LINE.to_string(),
+            step.clone(),
             "merge:acme/lib-r#9".to_string(),
+            step.clone(),
             "merge:acme/front-r#1".to_string(),
         ]
     );
@@ -413,6 +427,7 @@ fn late_pr(slug: &str, number: u64, head: &str) -> Pr {
         author: String::new(),
         failed_checks: Vec::new(),
         mergeable_unknown: false,
+        behind: false,
         files: Vec::new(),
         files_complete: true,
         labels: Vec::new(),
@@ -496,11 +511,12 @@ fn a_late_gate_waits_for_its_package_predecessor_and_pauses_right_before_it() {
         "# gate: acme/web#5 waits for acme/kit#6 (package: @acme/kit)"
     );
     assert_eq!(lines[at("# gate:") + 1], PAUSE_LINE);
+    assert!(lines[at("# gate:") + 2].starts_with("# step "));
     assert_eq!(
-        lines[at("# gate:") + 2],
+        lines[at("# gate:") + 3],
         "# wait: package @acme/kit 1.1.0 from acme/kit#6 must be published before acme/web#5"
     );
-    assert_eq!(lines[at("# gate:") + 3], "merge:acme/web#5");
+    assert_eq!(lines[at("# gate:") + 4], "merge:acme/web#5");
     assert!(at("merge:acme/kit#6") < at("# gate:"));
     assert!(at("merge:acme/other#7") < at("# gate:"));
     assert_eq!(lines.iter().filter(|l| *l == PAUSE_LINE).count(), 1);
@@ -532,8 +548,9 @@ fn an_early_gate_and_a_late_gate_never_print_two_pauses_in_a_row() {
     ]);
     assert!(built.questions.is_empty(), "{:?}", built.questions);
     let lines = emit::queue_lines(&built);
-    assert_eq!(lines[0], "merge:acme/db#1");
-    assert_eq!(lines[1], PAUSE_LINE);
+    assert!(lines[0].starts_with("# step "));
+    assert_eq!(lines[1], "merge:acme/db#1");
+    assert_eq!(lines[2], PAUSE_LINE);
     for pair in lines.windows(2) {
         assert!(
             !(pair[0] == PAUSE_LINE && pair[1] == PAUSE_LINE),

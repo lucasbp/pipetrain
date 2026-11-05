@@ -27,6 +27,7 @@ fn pr(slug: &str, number: u64, head: &str) -> Pr {
         author: String::new(),
         failed_checks: Vec::new(),
         mergeable_unknown: false,
+        behind: false,
         files: Vec::new(),
         files_complete: true,
         labels: Vec::new(),
@@ -93,7 +94,9 @@ fn planned(extra: &str, prs: Vec<Pr>, manifests: &[Manifest]) -> plan::Plan {
 fn without_waits(lines: &[String]) -> Vec<String> {
     lines
         .iter()
-        .filter(|l| !l.starts_with("# wait"))
+        .filter(|l| {
+            !l.starts_with("# wait") && !l.starts_with("# step") && !l.starts_with("# lane")
+        })
         .cloned()
         .collect()
 }
@@ -149,7 +152,10 @@ fn a_dependency_edge_does_not_put_a_wait() {
     let prs = vec![pr("acme/sdk", 1, "feat/a"), pr("acme/util", 2, "feat/b")];
     let lines = queue("", prs, &util_and_sdk());
     assert!(waits(&lines).is_empty());
-    assert_eq!(lines, vec!["merge:acme/util#2", "merge:acme/sdk#1"]);
+    assert_eq!(
+        without_waits(&lines),
+        vec!["merge:acme/util#2", "merge:acme/sdk#1"]
+    );
 }
 
 #[test]
@@ -181,7 +187,10 @@ fn without_package_edges_the_queue_has_no_wait() {
         pr("acme/web", 2, "feat/b"),
     ];
     let lines = queue("", prs, &[]);
-    assert_eq!(lines, vec!["merge:acme/api-core#1", "merge:acme/web#2"]);
+    assert_eq!(
+        without_waits(&lines),
+        vec!["merge:acme/api-core#1", "merge:acme/web#2"]
+    );
     assert!(waits(&lines).is_empty());
 }
 

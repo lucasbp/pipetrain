@@ -9,7 +9,7 @@ mod retry;
 mod token;
 
 pub use client::{Client, Download, origin};
-pub use endpoints::{BranchWrite, LivePr, Run};
+pub use endpoints::{BranchWrite, LivePr, PrWrite, Run};
 pub use error::{ApiError, describe_reset};
 pub use parse::{parse_files, parse_pr, parse_search};
 pub use reply::{Rate, Reply};

@@ -1,17 +1,19 @@
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 
-use super::apply::{Gate, gate, tint};
+use super::apply::{Gate, deploy_pr_body, gate, tint};
 use super::build_plan_with_config;
 use super::order::requests_line;
-use crate::bundle::is_stacked;
+use crate::bundle::{base_suffix, is_stacked, is_train_branch};
 use crate::command::PlanOptions;
 use crate::config::Config;
 use crate::emit;
-use crate::github::{Client, LivePr};
+use crate::github::{Client, LivePr, PrWrite};
 use crate::merge::{
     Kind, NotMerging, Pending, Report, SCHEMA, STOPPED, State, Status, Step, StepReport, Store,
     Verdict, default_state_path, judge, steps, wait_is_published,
@@ -20,6 +22,7 @@ use crate::model::{PrKey, PrState};
 use crate::plan::Plan;
 use crate::planner::Item;
 use crate::style::{bold, dim, green, red, yellow};
+use crate::workflows::{self, PushRuns};
 
 const MERGEABILITY_TRIES: usize = 3;
 const MERGEABILITY_PAUSE: Duration = Duration::from_secs(2);
@@ -34,6 +37,7 @@ pub struct MergeOptions {
     pub method: Option<String>,
     pub timeout_minutes: Option<u64>,
     pub state: Option<PathBuf>,
+    pub open_pr: bool,
 }
 
 pub struct Settings {
@@ -42,6 +46,7 @@ pub struct Settings {
     pub allow_questions: bool,
     pub method: Option<String>,
     pub timeout: Option<Duration>,
+    pub open_pr: bool,
 }
 
 pub struct Hooks<'a> {
@@ -62,6 +67,27 @@ struct Env<'a> {
     cfg: &'a Config,
     settings: &'a Settings,
     method: &'a str,
+    readings: RefCell<BTreeMap<(String, String), Result<PushRuns, String>>>,
+}
+
+impl Env<'_> {
+    fn push_reading(
+        &self,
+        client: &mut Client,
+        slug: &str,
+        branch: &str,
+        sha: &str,
+    ) -> Result<PushRuns, String> {
+        let key = (slug.to_lowercase(), branch.to_lowercase());
+        if let Some(known) = self.readings.borrow().get(&key) {
+            return known.clone();
+        }
+        let reading = workflows::read(client, slug, sha)
+            .map_err(|error| format!("{error:#}"))
+            .and_then(|files| workflows::push_runs(&files, branch));
+        self.readings.borrow_mut().insert(key, reading.clone());
+        reading
+    }
 }
 
 struct Limits {
@@ -237,19 +263,33 @@ fn deploy_phase(
     base: &str,
     sha: &str,
 ) -> (Status, String) {
-    if is_stacked(base, &env.cfg.train_prefix) {
-        return (
-            Status::Done,
-            "not waited: the base is a train branch, the deploy runs when the train PR merges"
-                .to_string(),
-        );
-    }
     if !env.cfg.merge.waits_for_deploy(slug) {
         return (
             Status::Done,
             "not waited: the repo is listed in merge.no_deploy_repos".to_string(),
         );
     }
+    let mut note: Option<String> = None;
+    if is_stacked(base, &env.cfg.train_prefix) {
+        match env.push_reading(client, slug, base, sha) {
+            Ok(PushRuns::No) => {
+                return (
+                    Status::Done,
+                    format!("not waited: workflows read, none runs on push to {base}"),
+                );
+            }
+            Ok(PushRuns::Yes(file)) => {
+                note = Some(format!("workflow {file} runs on push to {base}"));
+            }
+            Err(reason) => {
+                note = Some(format!("could not read the workflows ({reason})"));
+            }
+        }
+    }
+    let said = |text: String| match &note {
+        Some(note) => format!("{note}; {text}"),
+        None => text,
+    };
     let timeout = env
         .settings
         .timeout
@@ -262,26 +302,28 @@ fn deploy_phase(
     match wait_for_deploy(client, slug, sha, &limits, &mut *hooks.sleep) {
         Deploy::Passed(count) => (
             Status::Done,
-            format!("deploy passed ({count} workflow runs)"),
+            said(format!("deploy passed ({count} workflow runs)")),
         ),
-        Deploy::Failed(text) => (Status::Failed, format!("deploy failed: {text}")),
+        Deploy::Failed(text) => (Status::Failed, said(format!("deploy failed: {text}"))),
         Deploy::TimedOut(last) => (
             Status::Stopped,
-            format!(
+            said(format!(
                 "still deploying after {} minutes ({last}); run again to keep waiting",
                 timeout.as_secs() / 60
-            ),
+            )),
         ),
         Deploy::NoRun(grace) => (
             Status::Stopped,
-            format!(
+            said(format!(
                 "no workflow run appeared for the push in {}s; if this repo deploys without GitHub Actions, list it in merge.no_deploy_repos; run again to check once more",
                 grace.as_secs()
-            ),
+            )),
         ),
         Deploy::Unreadable(error) => (
             Status::Stopped,
-            format!("could not read the workflow runs ({error}); run again to resume"),
+            said(format!(
+                "could not read the workflow runs ({error}); run again to resume"
+            )),
         ),
     }
 }
@@ -384,6 +426,18 @@ fn merge_one(
             report,
             format!(
                 "merged {}, but the merge state could not be saved: {error:#}",
+                short(&merge_sha)
+            ),
+        );
+    }
+    if env.settings.open_pr
+        && is_stacked(&item.base, &env.cfg.train_prefix)
+        && let Err(error) = store.add_deploy_pr(&slug, &item.base, &item.id)
+    {
+        return stop(
+            report,
+            format!(
+                "merged {}, but the deploy PR could not be recorded: {error:#}",
                 short(&merge_sha)
             ),
         );
@@ -502,6 +556,221 @@ fn gate_step(env: &Env, hooks: &mut Hooks, report: &mut StepReport) {
     }
 }
 
+struct Bundled {
+    slug: String,
+    branch: String,
+    ids: Vec<String>,
+}
+
+fn open_target(slug: &str, branch: &str) -> String {
+    format!("{slug}:{branch}")
+}
+
+fn arrange(
+    report: &mut Report,
+    plan: &Plan,
+    store: &Store,
+    settings: &Settings,
+) -> BTreeMap<String, Bundled> {
+    report.steps.splice(0..0, resume_steps(&store.state));
+    let mut groups: BTreeMap<String, Bundled> = BTreeMap::new();
+    if !settings.open_pr {
+        return groups;
+    }
+    let mut last: BTreeMap<String, usize> = BTreeMap::new();
+    for (index, step) in report.steps.iter().enumerate() {
+        let member = match step.kind {
+            Kind::Merge => plan
+                .items
+                .iter()
+                .find(|item| item.id == step.target)
+                .map(|item| (format!("{}/{}", item.org, item.repo), item.base.clone())),
+            Kind::Resume => store
+                .state
+                .pending
+                .iter()
+                .find(|pending| pending.id == step.target)
+                .map(|pending| (pending.repo.clone(), pending.base.clone())),
+            _ => None,
+        };
+        let Some((slug, branch)) = member else {
+            continue;
+        };
+        if !is_train_branch(&branch, &plan.deploy_branch) {
+            continue;
+        }
+        let target = open_target(&slug, &branch);
+        groups
+            .entry(target.clone())
+            .or_insert_with(|| Bundled {
+                slug,
+                branch,
+                ids: Vec::new(),
+            })
+            .ids
+            .push(step.target.clone());
+        last.insert(target, index);
+    }
+    let steps = std::mem::take(&mut report.steps);
+    for (index, step) in steps.into_iter().enumerate() {
+        report.steps.push(step);
+        for (target, at) in &last {
+            if *at == index {
+                report.steps.push(StepReport::new(
+                    Kind::OpenPr,
+                    target,
+                    Status::Planned,
+                    "once the last PR of the bundle is merged",
+                ));
+            }
+        }
+    }
+    for recorded in &store.state.deploy_prs {
+        let target = open_target(&recorded.slug, &recorded.branch);
+        if let Some(group) = groups.get_mut(&target) {
+            for id in &recorded.ids {
+                if !group.ids.contains(id) {
+                    group.ids.push(id.clone());
+                }
+            }
+            continue;
+        }
+        report.steps.push(StepReport::new(
+            Kind::OpenPr,
+            &target,
+            Status::Planned,
+            "the last PR of the bundle was merged by an earlier run",
+        ));
+        groups.insert(
+            target,
+            Bundled {
+                slug: recorded.slug.clone(),
+                branch: recorded.branch.clone(),
+                ids: recorded.ids.clone(),
+            },
+        );
+    }
+    groups
+}
+
+fn resolve_base(env: &Env, plan: &Plan, bundled: &Bundled, client: &mut Client) -> Result<String> {
+    let prefix = format!("{}-", plan.deploy_branch.to_lowercase());
+    let lowered = bundled.branch.to_lowercase();
+    let Some(suffix) = lowered.strip_prefix(&prefix) else {
+        bail!(
+            "cannot tell the base of {} from its name: open the PR by hand",
+            bundled.branch
+        );
+    };
+    let mut found: Vec<String> = client
+        .branch_names(&bundled.slug)?
+        .into_iter()
+        .filter(|name| !is_stacked(name, &env.cfg.train_prefix) && base_suffix(name) == suffix)
+        .collect();
+    match found.len() {
+        1 => Ok(found.remove(0)),
+        0 => Err(anyhow!(
+            "no branch of {} matches the base `{suffix}` of {}: open the PR by hand",
+            bundled.slug,
+            bundled.branch
+        )),
+        _ => Err(anyhow!(
+            "several branches of {} match the base `{suffix}` of {} ({}): open the PR by hand",
+            bundled.slug,
+            bundled.branch,
+            found.join(", ")
+        )),
+    }
+}
+
+fn open_deploy_pr(
+    env: &Env,
+    plan: &Plan,
+    bundled: &Bundled,
+    client: &mut Client,
+    report: &mut StepReport,
+) -> bool {
+    let queued = plan.items.iter().find(|item| {
+        item.head == bundled.branch
+            && format!("{}/{}", item.org, item.repo).eq_ignore_ascii_case(&bundled.slug)
+    });
+    if let Some(item) = queued {
+        report.status = Status::Skipped;
+        report.detail = format!("the deploy PR {} is already in the queue", item.id);
+        return true;
+    }
+    match client.branch_tip(&bundled.slug, &bundled.branch) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            report.status = Status::Skipped;
+            report.detail = format!("the branch {} no longer exists", bundled.branch);
+            return true;
+        }
+        Err(error) => {
+            fail(report, format!("{error:#}"));
+            return false;
+        }
+    }
+    match client.open_pr_into(&bundled.slug, &bundled.branch) {
+        Ok(Some(number)) => {
+            report.status = Status::Skipped;
+            report.detail = format!(
+                "{}#{number} still targets {}: merge or retarget it first",
+                bundled.slug, bundled.branch
+            );
+            return false;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            fail(report, format!("{error:#}"));
+            return false;
+        }
+    }
+    let base = match resolve_base(env, plan, bundled, client) {
+        Ok(base) => base,
+        Err(error) => {
+            fail(report, format!("{error:#}"));
+            return false;
+        }
+    };
+    match client.open_pr_from(&bundled.slug, &bundled.branch, &base) {
+        Ok(Some(number)) => {
+            report.status = Status::Skipped;
+            report.detail = format!("deploy PR already open: {}#{number}", bundled.slug);
+            return true;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            fail(report, format!("{error:#}"));
+            return false;
+        }
+    }
+    let ids: Vec<&str> = bundled.ids.iter().map(String::as_str).collect();
+    let body = deploy_pr_body(&base, &ids);
+    match client.create_pr(
+        &bundled.slug,
+        &bundled.branch,
+        &bundled.branch,
+        &base,
+        &body,
+    ) {
+        Ok(PrWrite::Created) => {
+            report.status = Status::Done;
+            report.detail = format!("opened {} into {base}", bundled.branch);
+            true
+        }
+        Ok(PrWrite::AlreadyExists) => {
+            report.status = Status::Skipped;
+            report.detail = "deploy PR already open".to_string();
+            true
+        }
+        Err(error) => {
+            fail(report, error.to_string());
+            false
+        }
+    }
+}
+
 pub fn merge_plan(
     plan: &Plan,
     cfg: &Config,
@@ -515,6 +784,7 @@ pub fn merge_plan(
         cfg,
         settings,
         method: &method,
+        readings: RefCell::new(BTreeMap::new()),
     };
     let mut report = Report {
         schema: SCHEMA,
@@ -525,7 +795,7 @@ pub fn merge_plan(
         questions: emit::question_lines(plan),
     };
     if !settings.apply {
-        report.steps.splice(0..0, resume_steps(&store.state));
+        arrange(&mut report, plan, store, settings);
         return Ok(Outcome {
             report,
             aborted: false,
@@ -541,7 +811,7 @@ pub fn merge_plan(
             code: emit::EXIT_QUESTIONS,
         });
     }
-    report.steps.splice(0..0, resume_steps(&store.state));
+    let bundles = arrange(&mut report, plan, store, settings);
     if report.steps.is_empty() {
         return Ok(Outcome {
             report,
@@ -584,6 +854,21 @@ pub fn merge_plan(
                     None => fail(&mut step, "it is not in the plan"),
                 },
                 Kind::Gate | Kind::Wait => gate_step(&env, hooks, &mut step),
+                Kind::OpenPr => match bundles.get(&step.target) {
+                    Some(bundled) => {
+                        let settled = open_deploy_pr(&env, plan, bundled, client, &mut step);
+                        if settled
+                            && let Err(error) =
+                                store.remove_deploy_pr(&bundled.slug, &bundled.branch)
+                        {
+                            stop(
+                                &mut step,
+                                format!("cannot update the merge state: {error:#}"),
+                            );
+                        }
+                    }
+                    None => fail(&mut step, "the bundle is not in this run"),
+                },
             }
             halted = matches!(step.status, Status::Failed | Status::Stopped);
         }
@@ -604,6 +889,7 @@ fn step_text(step: &StepReport, color: bool) -> String {
         Kind::Merge => format!("merge {}", step.target),
         Kind::Gate => format!("gate: {}", step.target),
         Kind::Wait => format!("wait: {}", step.target),
+        Kind::OpenPr => format!("open the deploy PR {}", step.target),
     };
     let what = if step.kind == Kind::Merge {
         tint(color, bold, &what)
@@ -702,6 +988,7 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
         timeout: opts
             .timeout_minutes
             .map(|minutes| Duration::from_secs(minutes.saturating_mul(60))),
+        open_pr: opts.open_pr,
     };
     let (apply, yes) = (opts.apply, opts.yes);
     let mut confirm = |text: &str| {

@@ -27,6 +27,7 @@ fn pr(slug: &str, number: u64, head: &str, base: &str) -> Pr {
         author: String::new(),
         failed_checks: Vec::new(),
         mergeable_unknown: false,
+        behind: false,
         files: Vec::new(),
         files_complete: true,
         labels: Vec::new(),
@@ -94,7 +95,8 @@ fn a_bundle_line_comes_before_the_first_merge_and_merges_are_unchanged() {
     );
     assert_eq!(bundles(&with).len(), 1);
     let first_merge = with.iter().position(|l| l.starts_with("merge:")).unwrap();
-    assert_eq!(first_merge, 1);
+    assert_eq!(with[1], "# step 1");
+    assert_eq!(first_merge, 3);
     assert_eq!(merges(&with), merges(&plain));
     assert_eq!(with[1..], plain[..]);
 }
@@ -112,8 +114,8 @@ fn without_a_bundle_the_queue_is_identical() {
     let lines = emit::queue_lines(&plan);
     assert_eq!(lines, emit::queue_lines(&without_bundles(build(prs()))));
     assert!(bundles(&lines).is_empty());
-    assert_eq!(lines.len(), 2);
-    assert!(lines.iter().all(|l| l.starts_with("merge:")));
+    assert_eq!(merges(&lines).len(), 2);
+    assert!(lines.iter().all(|l| !l.starts_with("# bundle")));
 }
 
 #[test]

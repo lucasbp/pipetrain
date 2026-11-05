@@ -36,12 +36,47 @@ Right before each merge it reads the PR again, because the earlier merges can ch
 
 After a merge it takes the merge commit sha and polls `GET /repos/{repo}/actions/runs?head_sha={sha}&event=push`. The deploy is finished when there is at least one workflow run, all of them are `completed`, and two polls in a row saw the same number of runs. A run that ended as anything but `success`, `skipped` or `neutral` (`failure`, `cancelled`, `timed_out`, `action_required`) fails the step, even while other runs are still going.
 
+A run that ended `cancelled` is ignored, not failed, when a newer run (a higher run id) of the same workflow exists for the same commit: CI that cancels in-progress runs leaves such runs behind, and the newer run is the one that counts, so it is still waited for and judged. A cancelled run that nothing replaced, or a newer run that was cancelled too, fails the step.
+
+The two polls in a row exist to catch a workflow chained with `workflow_run`: when the first workflow finishes, the chained one may take a moment to appear, and one poll alone would call the deploy finished before it. The second poll is not to be shortened or dropped without measuring how long a chain really takes to show up in the API.
+
 The wait is skipped, and the step is `done` with a note, when:
 
-- the base of the PR is a train branch (it starts with `train_prefix`): the deploy happens when the train PR is merged into the real base;
-- the repo matches `merge.no_deploy_repos`.
+- the repo matches `merge.no_deploy_repos`;
+- the base of the PR is a train branch (it starts with `train_prefix`) and the workflows of the repo were read and none of them runs on a push to that branch.
+
+For a train branch pipetrain reads the workflow files at the merge commit (`.github/workflows/*.yml` and `*.yaml`, once per repo and branch in a run) and looks at `on: push`:
+
+| `on` | Runs on a push to the branch? |
+|---|---|
+| `push` with no filter, or `[push, ...]` | yes |
+| `push.branches` | yes when a pattern matches (`*` does not cross `/`, `**` does, a leading `!` takes a branch back out) |
+| `push.branches-ignore` | yes unless a pattern matches |
+| `push.tags` or `push.tags-ignore` alone | no |
+| `push.paths` or `paths-ignore` | counted as yes, because it depends on the files |
+| no `push` | no |
+
+When a workflow runs on the push, or the files cannot be read or understood (no access, a tree too large to list, invalid YAML, a pattern with `?`, `+`, `[` or `\`), the step waits for the deploy like for any other base and says why: `workflow ci.yml runs on push to deploy/05-11-2026-main` or `could not read the workflows (...)`. Assuming that a push to a train branch deploys nothing is wrong for repos that deploy on `deploy/**`, so it is never assumed.
 
 If no run appears within `merge.no_run_grace_seconds`, the step is `stopped`, not `done`: pipetrain cannot tell "no deploy exists" from "the deploy has not started". List the repo in `merge.no_deploy_repos` if it really has none.
+
+## Opening the deploy PR
+
+```
+pipetrain merge --apply --open-pr
+```
+
+When the PRs of a bundle were retargeted to `deploy/<date>-<base>` (see `bundle --apply`), the plan merges them into that branch one by one. With `--open-pr`, after the last PR of each such bundle is merged and its wait is over, one more step opens the PR `deploy/<date>-<base>` into the base, with the branch name as title and the merged PRs in the body. It never merges that PR. The step is listed as planned in a dry run.
+
+- It only runs when every step before it ended `done` or `skipped`. A failed or stopped step halts the run, and the open step is `skipped` with `stopped after an earlier failure`.
+- It does not duplicate: when an open PR from that branch into the base exists, or GitHub answers that one already exists, the step is `skipped`. When the deploy PR is itself in the queue, it is not opened either.
+- The base is not in the PR the bundle left behind, so it is found by name: the one branch of the repo whose name, written the way `bundle` writes a suffix, equals the suffix of the deploy branch. None or several matches, or an old unsuffixed `deploy/<date>` with no PR, fail the step with `open the PR by hand`.
+- It survives an interrupted run. With `--open-pr`, every PR merged into a train branch is recorded in the state file under its repo and branch. The record is removed once the step is settled: the PR was opened, one already existed, the deploy PR is in the queue, or the branch no longer exists. A run that ended after the last merge and before the step leaves the record, and the next `merge --apply --open-pr` plans the step again at the end of the queue, even when nothing is left to merge. A record that is left because the step failed stays too, so the next run tries again.
+- It is conservative about when to open. It never opens when the branch does not exist, when an open PR from the branch into the base already exists, or when an open PR still targets the train branch (a PR of the bundle that was not ready or was not merged). In that last case the step is `skipped` with the number of that PR, the record stays, and a later run opens the PR once nothing targets the branch. The base is found with the date of the run, so a branch of another day needs `--date` or the PR opened by hand.
+- Without `--open-pr` nothing is recorded and a record from an earlier run is ignored.
+- It needs Pull requests: write.
+
+`bundle --apply --open-pr` opens the same PR right after the retargets, before anything is merged, so every merge into the branch then runs the PR's checks. `merge --open-pr` is the one to use for the whole flow.
 
 ## Confirmation and gates
 
@@ -108,12 +143,12 @@ The state file is `pipetrain/merge-state.json` in the user state directory (the 
 | `not_merging` | `{id, reasons[]}[]` | PRs the plan left out and why. |
 | `questions` | string[] | The `? ...` lines of the plan. |
 
-A step is `{kind, target, status, detail}` plus `merge_sha` and `deploy` when they apply. `kind` is `resume`, `merge`, `gate` or `wait`. `status` is `planned`, `done`, `skipped`, `failed` or `stopped`; after a stop or a failure the steps that did not run are `skipped` with the detail `stopped after an earlier failure`.
+A step is `{kind, target, status, detail}` plus `merge_sha` and `deploy` when they apply. `kind` is `resume`, `merge`, `gate`, `wait` or `open-pr`. `status` is `planned`, `done`, `skipped`, `failed` or `stopped`; after a stop or a failure the steps that did not run are `skipped` with the detail `stopped after an earlier failure`.
 
 ## Not part of it
 
 - It is not in the MCP server: [docs/mcp.md](mcp.md) lists only read-only tools.
-- It never approves, never updates a branch, never re-runs a workflow, never reverts, never deletes a branch and never opens a PR.
+- It never approves, never updates a branch, never re-runs a workflow, never reverts, never deletes a branch and opens a PR only with `--open-pr`.
 - It does not know whether two PRs are safe together. The order and the gates are the plan's; the rest is your call.
 
 ## Design questions left open

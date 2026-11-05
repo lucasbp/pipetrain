@@ -54,7 +54,7 @@ fn a_repo_with_two_bases_names_each_branch_after_its_base() {
 }
 
 #[test]
-fn a_repo_with_one_base_keeps_the_plain_branch_next_to_a_split_repo() {
+fn a_repo_with_one_base_is_also_named_after_its_base() {
     let bundles = suggest(vec![
         pr("acme/api-core", 1, "feat/a", "master"),
         pr("acme/api-core", 2, "feat/b", "master"),
@@ -64,13 +64,16 @@ fn a_repo_with_one_base_keeps_the_plain_branch_next_to_a_split_repo() {
         pr("acme/web", 2, "feat/b", "main"),
     ]);
     assert_eq!(bundles.len(), 3);
-    assert_eq!(of(&bundles, "acme/web", "main").branch, DEPLOY);
+    assert_eq!(
+        of(&bundles, "acme/web", "main").branch,
+        "deploy/05-11-2026-main"
+    );
     assert_ne!(of(&bundles, "acme/api-core", "master").branch, DEPLOY);
     assert_ne!(of(&bundles, "acme/api-core", "feature-x").branch, DEPLOY);
 }
 
 #[test]
-fn a_group_of_one_pr_does_not_force_a_suffix() {
+fn a_group_of_one_pr_does_not_make_a_bundle() {
     let bundles = suggest(vec![
         pr("acme/api-core", 1, "feat/a", "master"),
         pr("acme/api-core", 2, "feat/b", "master"),
@@ -78,7 +81,7 @@ fn a_group_of_one_pr_does_not_force_a_suffix() {
     ]);
     assert_eq!(bundles.len(), 1);
     assert_eq!(bundles[0].base, "master");
-    assert_eq!(bundles[0].branch, DEPLOY);
+    assert_eq!(bundles[0].branch, "deploy/05-11-2026-master");
 }
 
 #[test]
@@ -120,7 +123,7 @@ fn an_open_pr_from_the_suffixed_branch_is_the_existing_train_pr() {
 }
 
 #[test]
-fn a_pr_from_the_plain_train_branch_is_not_the_train_pr_of_a_split_repo() {
+fn an_open_pr_from_the_unsuffixed_branch_of_an_older_bundle_stays_the_train_pr() {
     let bundles = suggest(vec![
         pr("acme/api-core", 1, "feat/a", "master"),
         pr("acme/api-core", 2, "feat/b", "master"),
@@ -129,9 +132,10 @@ fn a_pr_from_the_plain_train_branch_is_not_the_train_pr_of_a_split_repo() {
         pr("acme/api-core", 5, DEPLOY, "master"),
     ]);
     let master = of(&bundles, "acme/api-core", "master");
-    assert_eq!(master.branch, "deploy/05-11-2026-master");
-    assert_eq!(master.existing_train_pr, None);
-    assert_eq!(master.retarget.len(), 3);
+    assert_eq!(master.branch, DEPLOY);
+    assert_eq!(master.existing_train_pr.as_deref(), Some("acme/api-core#5"));
+    assert_eq!(master.retarget.len(), 2);
+    assert!(!master.retarget.contains(&"acme/api-core#5".to_string()));
 }
 
 #[test]

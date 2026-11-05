@@ -26,6 +26,14 @@ struct Script {
     put_merges: bool,
     merged: BTreeSet<u64>,
     runs: Vec<Value>,
+    workflows: Vec<(String, String)>,
+    tree_status: u16,
+    branches: Vec<String>,
+    open_prs: Vec<Value>,
+    into_train: Vec<Value>,
+    branch_missing: bool,
+    post_status: u16,
+    post_message: String,
 }
 
 fn merge_sha(number: u64) -> String {
@@ -57,7 +65,33 @@ impl Script {
             put_merges: true,
             merged: BTreeSet::new(),
             runs: green(),
+            workflows: Vec::new(),
+            tree_status: 200,
+            branches: vec!["main".to_string(), "feat/x".to_string()],
+            open_prs: Vec::new(),
+            into_train: Vec::new(),
+            branch_missing: false,
+            post_status: 201,
+            post_message: String::new(),
         }
+    }
+
+    fn tree(&self) -> Value {
+        let mut entries: Vec<Value> = self
+            .workflows
+            .iter()
+            .map(|(name, _)| json!({"type": "blob", "path": format!(".github/workflows/{name}")}))
+            .collect();
+        entries.push(json!({"type": "blob", "path": "README.md"}));
+        json!({"tree": entries, "truncated": false})
+    }
+
+    fn blobs(&self) -> Value {
+        let mut repository = serde_json::Map::new();
+        for (index, (_, text)) in self.workflows.iter().enumerate() {
+            repository.insert(format!("f{index}"), json!({"text": text}));
+        }
+        json!({"data": {"repository": repository}})
     }
 
     fn node(&self, number: u64) -> Value {
@@ -113,6 +147,9 @@ fn respond(script: &Mutex<Script>, line: &str, payload: &str) -> (u16, Value) {
     let mut script = script.lock().unwrap();
     if line == "POST /graphql" {
         let body: Value = serde_json::from_str(payload).unwrap();
+        if body.pointer("/variables/e0").is_some() {
+            return (200, script.blobs());
+        }
         let number = body
             .pointer("/variables/n")
             .and_then(Value::as_u64)
@@ -132,6 +169,38 @@ fn respond(script: &Mutex<Script>, line: &str, payload: &str) -> (u16, Value) {
             .clone()
             .unwrap_or_else(|| json!({"sha": merge_sha(number), "merged": true}));
         return (script.put_status, body);
+    }
+    if line.starts_with("GET /repos/acme/api/git/trees/") {
+        if script.tree_status != 200 {
+            return (script.tree_status, json!({"message": "unavailable"}));
+        }
+        return (200, script.tree());
+    }
+    if line.starts_with("GET /repos/acme/api/branches") {
+        let names: Vec<Value> = script
+            .branches
+            .iter()
+            .map(|name| json!({"name": name}))
+            .collect();
+        return (200, Value::Array(names));
+    }
+    if line.starts_with("GET /repos/acme/api/git/ref/heads/") {
+        if script.branch_missing {
+            return (404, json!({"message": "Not Found"}));
+        }
+        return (200, json!({"object": {"sha": "c".repeat(40)}}));
+    }
+    if line.starts_with("GET /repos/acme/api/pulls?") {
+        if line.contains("&head=") {
+            return (200, Value::Array(script.open_prs.clone()));
+        }
+        return (200, Value::Array(script.into_train.clone()));
+    }
+    if line == "POST /repos/acme/api/pulls" {
+        return (
+            script.post_status,
+            json!({"message": script.post_message, "number": 99}),
+        );
     }
     if let Some(rest) = line.strip_prefix("GET /repos/acme/api/pulls/") {
         return (200, script.live(rest.parse().unwrap()));
@@ -307,6 +376,7 @@ fn applied() -> Settings {
         allow_questions: false,
         method: None,
         timeout: None,
+        open_pr: false,
     }
 }
 
@@ -608,6 +678,7 @@ fn a_deploy_that_never_ends_stops_and_the_next_run_resumes_without_merging_again
     rig.script().runs = vec![run_json("deploy", "in_progress", None)];
     let settings = Settings {
         timeout: Some(Duration::from_secs(5)),
+        open_pr: false,
         ..applied()
     };
 
@@ -678,20 +749,436 @@ fn a_repo_listed_in_no_deploy_repos_is_not_waited_for() {
     assert!(rig.store.state.pending.is_empty());
 }
 
-#[test]
-fn a_pr_based_on_the_train_branch_does_not_wait_for_a_deploy() {
-    let mut rig = Rig::new("");
-    rig.script().base = TRAIN.to_string();
+const BUNDLE: &str = "deploy/05-11-2026-main";
+const PULLS: &str = "POST /repos/acme/api/pulls";
+
+fn bundle_rig(extra: &str) -> (Rig, Plan) {
+    let rig = Rig::new(extra);
+    rig.script().base = BUNDLE.to_string();
     rig.script().runs = Vec::new();
-    let plan = plan_of(prs(&[1], TRAIN), Vec::new());
+    (rig, plan_of(prs(&[1, 2], BUNDLE), Vec::new()))
+}
+
+fn pushing(branches: &str) -> (String, String) {
+    (
+        "deploy.yml".to_string(),
+        format!("on:\n  push:\n    branches: [{branches}]\n"),
+    )
+}
+
+fn open_pr_settings() -> Settings {
+    Settings {
+        open_pr: true,
+        ..applied()
+    }
+}
+
+#[test]
+fn a_train_branch_is_not_waited_for_when_no_workflow_runs_on_a_push_to_it() {
+    let (mut rig, plan) = bundle_rig("");
+    rig.script().workflows = vec![pushing("main")];
+
+    let run = rig.go(&plan);
+
+    assert_eq!(run.statuses(), vec![Status::Done, Status::Done]);
+    assert!(
+        run.said(0)
+            .contains("not waited: workflows read, none runs on push to deploy/05-11-2026-main"),
+        "{}",
+        run.said(0)
+    );
+    assert_eq!(rig.polls(), 0);
+    assert_eq!(rig.puts().len(), 2);
+}
+
+#[test]
+fn a_repo_without_workflow_files_is_not_waited_for_on_a_train_branch() {
+    let (mut rig, plan) = bundle_rig("");
+
+    let run = rig.go(&plan);
+
+    assert_eq!(run.statuses(), vec![Status::Done, Status::Done]);
+    assert!(run.said(0).contains("none runs on push"), "{}", run.said(0));
+    assert_eq!(rig.polls(), 0);
+}
+
+#[test]
+fn the_workflows_are_read_once_per_repo_and_branch_in_a_run() {
+    let (mut rig, plan) = bundle_rig("");
+
+    rig.go(&plan);
+
+    let trees = rig
+        .lines()
+        .iter()
+        .filter(|line| line.starts_with("GET /repos/acme/api/git/trees/"))
+        .count();
+    assert_eq!(trees, 1);
+}
+
+#[test]
+fn a_train_branch_is_waited_for_when_a_workflow_runs_on_a_push_to_it() {
+    let (mut rig, plan) = bundle_rig("");
+    rig.script().workflows = vec![pushing("'deploy/**'")];
+    rig.script().runs = green();
+
+    let run = rig.go(&plan);
+
+    assert_eq!(run.statuses(), vec![Status::Done, Status::Done]);
+    assert!(
+        run.said(0)
+            .contains("workflow deploy.yml runs on push to deploy/05-11-2026-main"),
+        "{}",
+        run.said(0)
+    );
+    assert!(run.said(0).contains("deploy passed"), "{}", run.said(0));
+    assert!(rig.polls() > 0);
+}
+
+#[test]
+fn a_train_branch_whose_workflows_cannot_be_read_is_waited_for() {
+    let (mut rig, plan) = bundle_rig("");
+    rig.script().tree_status = 403;
+    rig.script().runs = green();
+
+    let run = rig.go(&plan);
+
+    assert_eq!(run.statuses(), vec![Status::Done, Status::Done]);
+    assert!(
+        run.said(0).contains("could not read the workflows"),
+        "{}",
+        run.said(0)
+    );
+    assert!(rig.polls() > 0);
+}
+
+#[test]
+fn a_train_branch_with_a_workflow_that_is_not_valid_yaml_is_waited_for() {
+    let (mut rig, plan) = bundle_rig("");
+    rig.script().workflows = vec![("ci.yml".to_string(), "on: [".to_string())];
+    rig.script().runs = green();
+
+    let run = rig.go(&plan);
+
+    assert!(
+        run.said(0).contains("could not read the workflows"),
+        "{}",
+        run.said(0)
+    );
+    assert!(rig.polls() > 0);
+}
+
+fn run_with(id: u64, workflow: u64, status: &str, conclusion: Option<&str>) -> Value {
+    let mut run = run_json("ci", status, conclusion);
+    run["id"] = json!(id);
+    run["workflow_id"] = json!(workflow);
+    run
+}
+
+#[test]
+fn a_cancelled_run_replaced_by_a_newer_one_does_not_fail_the_deploy() {
+    let mut rig = Rig::new("");
+    let plan = plan_on(&[1]);
+    rig.script().runs = vec![
+        run_with(10, 7, "completed", Some("cancelled")),
+        run_with(11, 7, "completed", Some("success")),
+    ];
 
     let run = rig.go(&plan);
 
     assert_eq!(run.statuses(), vec![Status::Done]);
-    assert!(run.said(0).contains("not waited"), "{}", run.said(0));
-    assert!(run.said(0).contains("train"), "{}", run.said(0));
-    assert_eq!(rig.polls(), 0);
-    assert_eq!(rig.puts().len(), 1);
+    assert!(
+        run.said(0).contains("deploy passed (1 workflow runs)"),
+        "{}",
+        run.said(0)
+    );
+}
+
+#[test]
+fn a_cancelled_run_with_no_newer_run_of_its_workflow_still_fails_the_deploy() {
+    let mut rig = Rig::new("");
+    let plan = plan_on(&[1]);
+    rig.script().runs = vec![
+        run_with(10, 7, "completed", Some("cancelled")),
+        run_with(11, 8, "completed", Some("success")),
+    ];
+
+    let run = rig.go(&plan);
+
+    assert_eq!(run.statuses(), vec![Status::Failed]);
+    assert!(
+        run.said(0).contains("ended as cancelled"),
+        "{}",
+        run.said(0)
+    );
+}
+
+#[test]
+fn open_pr_adds_one_step_after_the_last_merge_of_the_bundle() {
+    let (mut rig, plan) = bundle_rig("");
+    rig.script().branches = vec!["main".to_string(), BUNDLE.to_string()];
+
+    let run = rig.run(&plan, open_pr_settings(), true, true).unwrap();
+
+    let kinds: Vec<Kind> = run.outcome.report.steps.iter().map(|s| s.kind).collect();
+    assert_eq!(kinds, vec![Kind::Merge, Kind::Merge, Kind::OpenPr]);
+    assert_eq!(run.statuses(), vec![Status::Done; 3]);
+    assert_eq!(run.step(2).target, format!("acme/api:{BUNDLE}"));
+    assert_eq!(run.step(2).detail, format!("opened {BUNDLE} into main"));
+    let lines = rig.lines();
+    let last_put = last_position(&lines, "PUT /repos/acme/api/pulls/");
+    assert!(last_put < position(&lines, PULLS));
+    let body = rig.body(PULLS);
+    assert_eq!(body["title"], BUNDLE);
+    assert_eq!(body["head"], BUNDLE);
+    assert_eq!(body["base"], "main");
+    let text = body["body"].as_str().unwrap();
+    assert!(
+        text.contains("acme/api#1") && text.contains("acme/api#2"),
+        "{text}"
+    );
+    assert_eq!(
+        serde_json::to_value(&run.outcome.report.steps[2]).unwrap()["kind"],
+        "open-pr"
+    );
+}
+
+#[test]
+fn a_dry_run_with_open_pr_plans_the_step_and_writes_nothing() {
+    let (mut rig, plan) = bundle_rig("");
+    let settings = Settings {
+        open_pr: true,
+        ..dry()
+    };
+
+    let run = rig.run(&plan, settings, true, true).unwrap();
+
+    let kinds: Vec<Kind> = run.outcome.report.steps.iter().map(|s| s.kind).collect();
+    assert_eq!(kinds, vec![Kind::Merge, Kind::Merge, Kind::OpenPr]);
+    assert!(run.statuses().iter().all(|s| *s == Status::Planned));
+    assert!(rig.puts().is_empty());
+    assert!(!rig.lines().iter().any(|line| line == PULLS));
+}
+
+#[test]
+fn without_open_pr_no_pull_request_is_ever_opened() {
+    let (mut rig, plan) = bundle_rig("");
+
+    let run = rig.go(&plan);
+
+    assert!(
+        run.outcome
+            .report
+            .steps
+            .iter()
+            .all(|step| step.kind == Kind::Merge)
+    );
+    assert!(!rig.lines().iter().any(|line| line == PULLS));
+}
+
+#[test]
+fn open_pr_does_not_open_when_a_merge_before_it_did_not_finish() {
+    let (mut rig, plan) = bundle_rig("");
+    let first = merge_numbers(&plan)[0];
+    rig.script()
+        .review
+        .insert(first, "CHANGES_REQUESTED".to_string());
+
+    let run = rig.run(&plan, open_pr_settings(), true, true).unwrap();
+
+    assert_eq!(
+        run.statuses(),
+        vec![Status::Failed, Status::Skipped, Status::Skipped]
+    );
+    assert_eq!(run.step(2).detail, STOPPED);
+    assert!(!rig.lines().iter().any(|line| line == PULLS));
+}
+
+#[test]
+fn open_pr_does_not_duplicate_a_deploy_pr_that_is_already_open() {
+    let (mut rig, plan) = bundle_rig("");
+    rig.script().branches = vec!["main".to_string(), BUNDLE.to_string()];
+    rig.script().open_prs = vec![json!({"number": 9})];
+
+    let run = rig.run(&plan, open_pr_settings(), true, true).unwrap();
+
+    assert_eq!(run.step(2).status, Status::Skipped);
+    assert_eq!(run.step(2).detail, "deploy PR already open: acme/api#9");
+    assert!(!rig.lines().iter().any(|line| line == PULLS));
+    assert_eq!(run.outcome.code, 0);
+}
+
+#[test]
+fn open_pr_treats_a_422_already_exists_as_skipped() {
+    let (mut rig, plan) = bundle_rig("");
+    rig.script().branches = vec!["main".to_string(), BUNDLE.to_string()];
+    rig.script().post_status = 422;
+    rig.script().post_message = "A pull request already exists for acme:deploy".to_string();
+
+    let run = rig.run(&plan, open_pr_settings(), true, true).unwrap();
+
+    assert_eq!(run.step(2).status, Status::Skipped);
+    assert_eq!(run.outcome.code, 0);
+}
+
+#[test]
+fn open_pr_fails_loudly_when_the_base_cannot_be_told() {
+    let (mut rig, plan) = bundle_rig("");
+    rig.script().branches = vec!["develop".to_string()];
+
+    let run = rig.run(&plan, open_pr_settings(), true, true).unwrap();
+
+    assert_eq!(run.step(2).status, Status::Failed);
+    assert!(
+        run.step(2).detail.contains("open the PR by hand"),
+        "{}",
+        run.step(2).detail
+    );
+    assert_eq!(run.outcome.code, 1);
+    assert!(!rig.lines().iter().any(|line| line == PULLS));
+}
+
+#[test]
+fn open_pr_skips_prs_that_do_not_target_a_train_branch() {
+    let mut rig = Rig::new("");
+    let plan = plan_on(&[1, 2]);
+
+    let run = rig.run(&plan, open_pr_settings(), true, true).unwrap();
+
+    assert!(
+        run.outcome
+            .report
+            .steps
+            .iter()
+            .all(|s| s.kind == Kind::Merge)
+    );
+}
+
+fn recorded_rig() -> (Rig, Plan) {
+    let mut rig = Rig::new("");
+    rig.script().base = BUNDLE.to_string();
+    rig.script().runs = Vec::new();
+    rig.script().branches = vec!["main".to_string(), BUNDLE.to_string()];
+    rig.store
+        .add_deploy_pr("acme/api", BUNDLE, "acme/api#1")
+        .unwrap();
+    rig.store
+        .add_deploy_pr("acme/api", BUNDLE, "acme/api#2")
+        .unwrap();
+    (rig, plan_of(Vec::new(), Vec::new()))
+}
+
+fn pulls_posted(rig: &Rig) -> usize {
+    rig.lines().iter().filter(|line| *line == PULLS).count()
+}
+
+#[test]
+fn a_run_cut_off_before_open_pr_opens_it_once_on_the_next_run() {
+    let (mut rig, plan) = bundle_rig("");
+    rig.script().branches = vec!["main".to_string(), BUNDLE.to_string()];
+    rig.script().post_status = 500;
+
+    let first = rig.run(&plan, open_pr_settings(), true, true).unwrap();
+
+    assert_eq!(
+        first.statuses(),
+        vec![Status::Done, Status::Done, Status::Failed]
+    );
+    assert_eq!(rig.store.state.deploy_prs.len(), 1);
+
+    let empty = plan_of(Vec::new(), Vec::new());
+    rig.script().post_status = 201;
+    let second = rig.run(&empty, open_pr_settings(), true, true).unwrap();
+
+    let kinds: Vec<Kind> = second.outcome.report.steps.iter().map(|s| s.kind).collect();
+    assert_eq!(kinds, vec![Kind::OpenPr]);
+    assert_eq!(second.step(0).status, Status::Done);
+    assert_eq!(second.step(0).detail, format!("opened {BUNDLE} into main"));
+    let text = rig.body(PULLS)["body"].as_str().unwrap().to_string();
+    assert!(
+        text.contains("acme/api#1") && text.contains("acme/api#2"),
+        "{text}"
+    );
+    assert!(rig.store.state.deploy_prs.is_empty());
+
+    let third = rig.run(&empty, open_pr_settings(), true, true).unwrap();
+    assert!(third.outcome.report.steps.is_empty());
+    assert_eq!(pulls_posted(&rig), 2);
+}
+
+#[test]
+fn a_recorded_bundle_whose_deploy_pr_is_already_open_is_not_duplicated() {
+    let (mut rig, plan) = recorded_rig();
+    rig.script().open_prs = vec![json!({"number": 9})];
+
+    let run = rig.run(&plan, open_pr_settings(), true, true).unwrap();
+
+    assert_eq!(run.step(0).status, Status::Skipped);
+    assert_eq!(run.step(0).detail, "deploy PR already open: acme/api#9");
+    assert_eq!(pulls_posted(&rig), 0);
+    assert!(rig.store.state.deploy_prs.is_empty());
+}
+
+#[test]
+fn a_recorded_bundle_with_a_pr_still_on_the_train_branch_does_not_open() {
+    let (mut rig, plan) = recorded_rig();
+    rig.script().into_train = vec![json!({"number": 5})];
+
+    let run = rig.run(&plan, open_pr_settings(), true, true).unwrap();
+
+    assert_eq!(run.step(0).status, Status::Skipped);
+    assert!(
+        run.step(0).detail.contains("acme/api#5 still targets"),
+        "{}",
+        run.step(0).detail
+    );
+    assert_eq!(pulls_posted(&rig), 0);
+    assert_eq!(rig.store.state.deploy_prs.len(), 1);
+    assert_eq!(run.outcome.code, 0);
+}
+
+#[test]
+fn a_recorded_bundle_whose_branch_is_gone_is_dropped_without_opening() {
+    let (mut rig, plan) = recorded_rig();
+    rig.script().branch_missing = true;
+
+    let run = rig.run(&plan, open_pr_settings(), true, true).unwrap();
+
+    assert_eq!(run.step(0).status, Status::Skipped);
+    assert!(
+        run.step(0).detail.contains("no longer exists"),
+        "{}",
+        run.step(0).detail
+    );
+    assert_eq!(pulls_posted(&rig), 0);
+    assert!(rig.store.state.deploy_prs.is_empty());
+}
+
+#[test]
+fn a_dry_run_plans_the_recorded_bundle_and_writes_nothing() {
+    let (mut rig, plan) = recorded_rig();
+    let settings = Settings {
+        open_pr: true,
+        ..dry()
+    };
+
+    let run = rig.run(&plan, settings, true, true).unwrap();
+
+    assert_eq!(run.outcome.report.steps.len(), 1);
+    assert_eq!(run.step(0).kind, Kind::OpenPr);
+    assert_eq!(run.step(0).status, Status::Planned);
+    assert_eq!(pulls_posted(&rig), 0);
+    assert_eq!(rig.store.state.deploy_prs.len(), 1);
+}
+
+#[test]
+fn without_open_pr_a_recorded_bundle_is_left_alone() {
+    let (mut rig, plan) = recorded_rig();
+
+    let run = rig.go(&plan);
+
+    assert!(run.outcome.report.steps.is_empty());
+    assert_eq!(rig.store.state.deploy_prs.len(), 1);
 }
 
 #[test]

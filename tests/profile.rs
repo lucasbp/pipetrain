@@ -461,6 +461,7 @@ fn pr(number: u64, slug: &str) -> Pr {
         author: String::new(),
         failed_checks: Vec::new(),
         mergeable_unknown: false,
+        behind: false,
         files: Vec::new(),
         files_complete: true,
         labels: Vec::new(),

@@ -48,37 +48,26 @@ pub fn suggest(items: &[Item], deploy_branch: &str, train_prefix: &str) -> Vec<B
             .or_default()
             .push(item);
     }
-    let groups: Vec<((String, String), Vec<&Item>)> = groups
-        .into_iter()
-        .filter(|(_, group)| group.len() >= 2)
-        .collect();
-    let mut bases_per_repo: BTreeMap<&str, usize> = BTreeMap::new();
-    for ((slug, _), _) in &groups {
-        *bases_per_repo.entry(slug.as_str()).or_default() += 1;
-    }
-    let named: Vec<String> = groups
-        .iter()
-        .map(|((slug, base), _)| {
-            if bases_per_repo.get(slug.as_str()).copied().unwrap_or(0) > 1 {
-                format!("{deploy_branch}-{}", base_suffix(base))
-            } else {
-                deploy_branch.to_string()
-            }
-        })
-        .collect();
     groups
         .into_iter()
-        .zip(named)
-        .map(|((_, group), branch)| {
-            let existing = group.iter().find(|i| i.head == branch);
+        .filter(|(_, group)| group.len() >= 2)
+        .map(|((_, base), group)| {
+            let suffix = base_suffix(&base);
+            let suffix = if suffix.is_empty() { "base" } else { &suffix };
+            let named = format!("{deploy_branch}-{suffix}");
+            let existing = group
+                .iter()
+                .find(|i| i.head == named)
+                .or_else(|| group.iter().find(|i| i.head == deploy_branch));
+            let branch = existing.map_or(named, |i| i.head.clone());
             let retarget: Vec<String> = group
                 .iter()
-                .filter(|i| i.head != branch)
+                .filter(|i| !is_train_branch(&i.head, deploy_branch))
                 .map(|i| i.id.clone())
                 .collect();
             Bundle {
                 repo: format!("{}/{}", group[0].org, group[0].repo),
-                base: group[0].base.clone(),
+                base,
                 branch,
                 existing_train_pr: existing.map(|i| i.id.clone()),
                 retarget,

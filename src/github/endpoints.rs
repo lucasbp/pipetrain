@@ -11,9 +11,16 @@ use crate::model::{ChangedFile, Pr, PrKey, PrState};
 use crate::planner::DepState;
 
 const FILE_PAGES: u32 = 3;
+const BRANCH_PAGES: u32 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BranchWrite {
+    Created,
+    AlreadyExists,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrWrite {
     Created,
     AlreadyExists,
 }
@@ -30,6 +37,8 @@ pub struct LivePr {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Run {
+    pub id: u64,
+    pub workflow_id: u64,
     pub name: String,
     pub status: String,
     pub conclusion: Option<String>,
@@ -44,7 +53,10 @@ fn parse_run(value: &Value) -> Run {
             .unwrap_or_default()
             .to_string()
     };
+    let number = |key: &str| value.get(key).and_then(Value::as_u64).unwrap_or_default();
     Run {
+        id: number("id"),
+        workflow_id: number("workflow_id"),
         name: text("name"),
         status: text("status"),
         conclusion: value
@@ -68,7 +80,7 @@ fn encode_path(text: &str) -> String {
     out
 }
 
-const PR_FIELDS: &str = "number title url body headRefName baseRefName baseRef { target { oid } } headRefOid isDraft state reviewDecision mergeable author { login } labels(first: 50) { nodes { name } } repository { name owner { login } } latestOpinionatedReviews(first: 20, writersOnly: true) { nodes { state } } commits(last: 1) { nodes { commit { statusCheckRollup { state contexts(first: 100) { nodes { __typename ... on CheckRun { name conclusion } ... on StatusContext { context state } } } } } } }";
+const PR_FIELDS: &str = "number title url body headRefName baseRefName baseRef { target { oid } } headRefOid isDraft state reviewDecision mergeable mergeStateStatus author { login } labels(first: 50) { nodes { name } } repository { name owner { login } } latestOpinionatedReviews(first: 20, writersOnly: true) { nodes { state } } commits(last: 1) { nodes { commit { statusCheckRollup { state contexts(first: 100) { nodes { __typename ... on CheckRun { name conclusion } ... on StatusContext { context state } } } } } } }";
 
 impl Client {
     pub fn open_prs(&mut self, org: &str) -> Result<Vec<Pr>> {
@@ -258,6 +270,105 @@ impl Client {
             .into_write(&format!("POST {path}"))
             .map_err(|error| self.redact(error))?;
         Ok(BranchWrite::Created)
+    }
+
+    pub fn branch_tip(&mut self, slug: &str, branch: &str) -> Result<Option<String>> {
+        let path = format!("/repos/{slug}/git/ref/heads/{}", encode_path(branch));
+        let reply = self.get(&path)?;
+        if reply.status == 404 {
+            return Ok(None);
+        }
+        let body = reply.into_body(&path).map_err(|error| self.redact(error))?;
+        Ok(body
+            .pointer("/object/sha")
+            .and_then(Value::as_str)
+            .map(str::to_string))
+    }
+
+    pub fn contains_commit(
+        &mut self,
+        slug: &str,
+        branch_sha: &str,
+        base_sha: &str,
+    ) -> Result<bool> {
+        if branch_sha == base_sha {
+            return Ok(true);
+        }
+        let value = self.rest(&format!(
+            "/repos/{slug}/compare/{base_sha}...{branch_sha}?per_page=1"
+        ))?;
+        Ok(matches!(
+            value.get("status").and_then(Value::as_str),
+            Some("ahead" | "identical")
+        ))
+    }
+
+    pub fn open_pr_from(&mut self, slug: &str, branch: &str, base: &str) -> Result<Option<u64>> {
+        let owner = slug.split('/').next().unwrap_or_default();
+        let value = self.rest(&format!(
+            "/repos/{slug}/pulls?state=open&head={}&base={}&per_page=1",
+            encode_path(&format!("{owner}:{branch}")),
+            encode_path(base)
+        ))?;
+        Ok(value
+            .as_array()
+            .and_then(|list| list.first())
+            .and_then(|pr| pr.get("number"))
+            .and_then(Value::as_u64))
+    }
+
+    pub fn open_pr_into(&mut self, slug: &str, base: &str) -> Result<Option<u64>> {
+        let value = self.rest(&format!(
+            "/repos/{slug}/pulls?state=open&base={}&per_page=1",
+            encode_path(base)
+        ))?;
+        Ok(value
+            .as_array()
+            .and_then(|list| list.first())
+            .and_then(|pr| pr.get("number"))
+            .and_then(Value::as_u64))
+    }
+
+    pub fn create_pr(
+        &mut self,
+        slug: &str,
+        title: &str,
+        head: &str,
+        base: &str,
+        body: &str,
+    ) -> Result<PrWrite, ApiError> {
+        let path = format!("/repos/{slug}/pulls");
+        let payload = json!({ "title": title, "head": head, "base": base, "body": body });
+        let reply = self.post_json(&path, &payload)?;
+        if reply.status == 422
+            && reply
+                .message()
+                .to_lowercase()
+                .contains("pull request already exists")
+        {
+            return Ok(PrWrite::AlreadyExists);
+        }
+        reply
+            .into_write(&format!("POST {path}"))
+            .map_err(|error| self.redact(error))?;
+        Ok(PrWrite::Created)
+    }
+
+    pub fn branch_names(&mut self, slug: &str) -> Result<Vec<String>> {
+        let mut names = Vec::new();
+        for page in 1..=BRANCH_PAGES {
+            let value = self.rest(&format!("/repos/{slug}/branches?per_page=100&page={page}"))?;
+            let list = value.as_array().cloned().unwrap_or_default();
+            names.extend(
+                list.iter()
+                    .filter_map(|branch| branch.get("name").and_then(Value::as_str))
+                    .map(str::to_string),
+            );
+            if list.len() < 100 {
+                break;
+            }
+        }
+        Ok(names)
     }
 
     pub fn retarget_pr(&mut self, slug: &str, number: u64, branch: &str) -> Result<(), ApiError> {

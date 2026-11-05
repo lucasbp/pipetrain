@@ -57,6 +57,7 @@ This is a suggestion only. It is not an ordering rule, adds no edge and changes 
 Review and checks, as read from GitHub:
 
 - Review: `APPROVED`, `CHANGES_REQUESTED` or `REVIEW_REQUIRED` from the review decision. When the repo has no decision, the latest opinionated reviews are used. Reasons: `changes requested`, `review required`, `not approved`.
+- Behind: a PR whose `mergeStateStatus` is `BEHIND` (protection requires the branch to be up to date) is `branch behind its base, update it` and goes to `SKIPPED`. Other merge states change nothing.
 - Checks: success is ready, failure or error is `checks failing`, anything else is `checks pending`. Mergeability that GitHub has not computed yet is `mergeability unknown, retry in a minute`, because it often follows a merge into the base and a conflict may hide behind it. No checks at all is `no checks reported`, unless `allow_missing_checks = true` or the repo matches `checks_optional_repos`.
 - `merge conflict` when GitHub reports the PR as conflicting.
 

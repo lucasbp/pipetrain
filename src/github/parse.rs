@@ -135,6 +135,7 @@ pub fn parse_pr(node: &Value) -> Option<Pr> {
         failed_checks: parse_failed_checks(node),
         conflicting: mergeable == Some("CONFLICTING"),
         mergeable_unknown: matches!(mergeable, None | Some("UNKNOWN")),
+        behind: node.get("mergeStateStatus").and_then(|v| v.as_str()) == Some("BEHIND"),
         files: Vec::new(),
         files_complete: true,
         labels: parse_labels(node),

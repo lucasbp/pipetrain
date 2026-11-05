@@ -27,6 +27,7 @@ fn pr(number: u64, author: &str) -> Pr {
         failed_checks: Vec::new(),
         conflicting: false,
         mergeable_unknown: false,
+        behind: false,
         files: Vec::new(),
         files_complete: true,
         labels: Vec::new(),

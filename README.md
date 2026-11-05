@@ -2,7 +2,7 @@
 
 pipetrain is a command-line tool that plans the order in which pull requests should merge across several repositories. It reads GitHub, builds a dependency graph from what it finds, and prints the order: what can merge at the same time, what has to wait for what, and why.
 
-It is read-only by default. It never pushes or comments, and it stores nothing but a cache, the resume state of `merge` and, only if you turn it on, a [local usage log](#local-usage-log). Only two commands write to GitHub, both only with `--apply`: `pipetrain bundle --apply` creates a deploy branch and changes the base of the PRs bundled into it, and `pipetrain merge --apply` merges the PRs of the plan one at a time, waiting for each deploy.
+It is read-only by default. It never pushes or comments, and it stores nothing but a cache, the resume state of `merge` and, only if you turn it on, a [local usage log](#local-usage-log). Only two commands write to GitHub, both only with `--apply`: `pipetrain bundle --apply` creates a deploy branch, changes the base of the PRs bundled into it and, with `--open-pr`, opens the deploy PR, and `pipetrain merge --apply` merges the PRs of the plan one at a time, waiting for each deploy.
 
 ## Requirements
 
@@ -196,7 +196,7 @@ pipetrain plan [OPTIONS] [PRS]...
 | `pipetrain plan --json` | Prints the plan as JSON instead of text (contract in `docs/plan-json.md`). |
 | `pipetrain plan --emit queue` | Prints only a queue of `merge:org/repo#N` lines for a runner (contract in `docs/queue-output.md`). Cannot be combined with `--json`. |
 | `pipetrain bundle` | Dry run of the bundle suggestion: shows the branch it would create and the PRs it would retarget. Writes nothing. Takes the same PR arguments and options as `plan`. |
-| `pipetrain bundle --apply` | Creates the deploy branch and retargets the bundled PRs. Asks for confirmation unless `--yes` is given. See [Applying the bundle suggestion](#applying-the-bundle-suggestion). |
+| `pipetrain bundle --apply` | Creates the deploy branch (`deploy/<date>-<base>`), retargets the bundled PRs and, with `--open-pr`, opens the deploy PR. Asks for confirmation unless `--yes` is given. See [Applying the bundle suggestion](#applying-the-bundle-suggestion). |
 | `pipetrain merge` | Dry run of the merge: the steps it would take in the order of the plan. Writes nothing. Takes the same PR arguments and options as `plan`. |
 | `pipetrain merge --apply` | Merges the PRs of the plan one at a time and waits for each deploy before the next. Asks for confirmation unless `--yes` is given. See [Merging the queue](#merging-the-queue). |
 | `pipetrain feed <PACKAGE> [--version <V>]` | Read-only: tells whether a package version is published in its NuGet or npm feed; `--wait` blocks until it is. See [Checking a package feed](#checking-a-package-feed). |
@@ -223,6 +223,7 @@ pipetrain plan [OPTIONS] [PRS]...
 | `--emit queue` | Replaces the plan with a queue for a runner: one `merge:org/repo#N` line per ready PR on stdout, questions on stderr, exit 3 when questions are open. See [Feeding a queue runner](#feeding-a-queue-runner). Not combinable with `--json`. |
 | `--apply` | Only on `bundle`. Writes to GitHub: creates the deploy branches and retargets the PRs. Without it `bundle` is a dry run. |
 | `--yes` | Only on `bundle`, and only together with `--apply`. Skips the confirmation prompt. Required when stdin is not a terminal. |
+| `--open-pr` | On `bundle` (together with `--apply`): after the last retarget of each bundle, opens the PR `deploy/<date>-<base>` into the base, without merging it. On `merge`: opens that PR only after the last PR of the bundle is merged and its wait is over, which is the one to use for the whole flow, since opening it before the merges starts a round of CI per merge. A deploy PR that already exists is not duplicated. Needs Pull requests: write. |
 | `--color auto\|always\|never` | On `plan` and `bundle`. Colors in the text output. `auto` (the default) colors only on a terminal and honors `NO_COLOR`. `always` colors even when piped, `never` never does. `--json` is never colored. |
 
 PR references are written as `org/repo#123`, as a PR URL, or as `repo#123` without the org. A PR that cannot be found stops the run.
@@ -280,7 +281,7 @@ Both checks are read-only, and so is `plan`. The bundle is a suggestion: `plan` 
 
 ```
 pipetrain bundle [OPTIONS] [PRS]...
-pipetrain bundle --apply [--yes] [OPTIONS] [PRS]...
+pipetrain bundle --apply [--yes] [--open-pr] [OPTIONS] [PRS]...
 pipetrain bundle [--color auto|always|never] [OPTIONS] [PRS]...
 ```
 
@@ -288,12 +289,15 @@ pipetrain bundle [--color auto|always|never] [OPTIONS] [PRS]...
 
 What it does, per bundle:
 
-1. Creates the deploy branch (`deploy/<date>`, built from `train_prefix` and `train_date_format`) from the current tip of the base.
+1. Creates the deploy branch from the current tip of the base. The name is always `deploy/<date>-<base>` (`deploy/<date>` is built from `train_prefix` and `train_date_format`; the base is lowercase, with every character that is not a letter, digit, `.` or `_` turned into `-`), so two bases of one repo never share a branch.
 2. Changes the base of each bundled PR to that branch.
+3. With `--open-pr`, opens the PR `deploy/<date>-<base>` into the base, after the last retarget of that bundle. Without the flag it does not open it.
 
-What it does not do: it never merges, never opens the deploy PR, never deletes a branch and never force-pushes. Steps 3 and 4 of [docs/saving-pipelines.md](docs/saving-pipelines.md) stay with you.
+What it does not do: it never merges, never deletes a branch and never force-pushes. Step 4 of [docs/saving-pipelines.md](docs/saving-pipelines.md) (merging) stays with you, or with `pipetrain merge`.
 
-It stops at the first failed write and never retries. The actions after the failure are reported as `skipped`. Running it again is safe: a branch that already exists is skipped, and so is a PR already based on it, so the second run picks up where the first stopped. When the deploy branch is already the head of an open PR, no branch is created and only the retargets run.
+It never reuses a deploy branch that came from another base. When the branch already exists, it must contain the tip of the base of the bundle; otherwise `bundle` stops with an error before writing anything (on a dry run too). Delete the branch or bundle on another day with `--date`.
+
+It stops at the first failed write and never retries. The actions after the failure, including the deploy PR, are reported as `skipped`. Running it again is safe: a branch that already exists from the right base is skipped, and so is a PR already based on it, so the second run picks up where the first stopped. When the deploy branch is already the head of an open PR, no branch is created, no second deploy PR is opened and only the retargets run.
 
 The text report is colored like the plan: `--color auto` (the default) colors only on a terminal and honors `NO_COLOR`, `always` colors when piped, `never` never does. After `--apply` it ends with a summary line such as `2 done, 1 skipped, 0 failed in 1.4 s`, counted by status and timed from the moment the writes start (after the confirmation). A dry run has no summary. `--json` is never colored and cannot be combined with `--color` (exit 2).
 
@@ -301,7 +305,7 @@ On a terminal, `--apply` shows a live checklist on stderr: one block per repo (`
 
 The checklist is drawn only when stderr is a terminal. With `--json`, `--no-progress`, `CI=true` or a redirected stderr there is no live list, and stdout carries the full text report (or the JSON) exactly as before. Colors follow `NO_COLOR` and `--color`.
 
-Token permissions: Contents: write to create the branch and Pull requests: write to change a base. A read-only token fails on the first write with a message that says so, and nothing after it runs.
+Token permissions: Contents: write to create the branch and Pull requests: write to change a base and, with `--open-pr`, to open the deploy PR. A read-only token fails on the first write with a message that says so, and nothing after it runs.
 
 | Code | Meaning |
 |---|---|
@@ -318,11 +322,12 @@ With `--json` the report goes to stdout. `applied` is `false` on a dry run, and 
     {
       "repo": "acme/api-core",
       "base": "master",
-      "branch": "deploy/30-10-2026",
+      "branch": "deploy/30-10-2026-master",
       "actions": [
-        { "kind": "create-branch", "target": "deploy/30-10-2026", "status": "done", "detail": "" },
+        { "kind": "create-branch", "target": "deploy/30-10-2026-master", "status": "done", "detail": "" },
         { "kind": "retarget", "target": "acme/api-core#1", "status": "done", "detail": "" },
-        { "kind": "retarget", "target": "acme/api-core#2", "status": "skipped", "detail": "already based on deploy/30-10-2026" }
+        { "kind": "retarget", "target": "acme/api-core#2", "status": "skipped", "detail": "already based on deploy/30-10-2026-master" },
+        { "kind": "open-pr", "target": "deploy/30-10-2026-master", "status": "done", "detail": "" }
       ]
     }
   ]
@@ -381,7 +386,7 @@ LANE 3
 
 BUNDLES  one deploy branch instead of N deploys (suggestion, nothing was changed)
   billing-api  2 PRs into main -> 1 deploy, saves 1
-        create deploy/29-10-2026 from main, retarget billing-api#230, billing-api#233, merge them there, then open one PR deploy/29-10-2026 -> main
+        create deploy/29-10-2026-main from main, retarget billing-api#230, billing-api#233, merge them there, then open one PR deploy/29-10-2026-main -> main
 
 CONFLICTS  same repo, same files; the order does not change
   billing-api#230 and billing-api#233  1 file (lockfile)
@@ -423,9 +428,14 @@ pipetrain plan --all --emit queue
 stdout carries only the queue, one item per line, ready for any tool that takes `merge:` items:
 
 ```
+# step 1
 merge:acme/orders-api#12
 # pause: confirm DDL/infra before continuing
+# step 1
+# lane 1
 merge:acme/billing-api#3
+# step 2
+# lane 1
 merge:acme/web#7
 ```
 
@@ -434,6 +444,7 @@ merge:acme/web#7
 - **Bundle comments.** When the plan suggests a deploy branch for a repo, the queue opens with one `# bundle <org>/<repo>: <N> PRs into <base> could be 1 deploy (saves <N-1>): <PR ids>` line per suggestion. It is informative: the saving only happens if you create the day's deploy branch first, and the `merge:` lines do not change.
 - **Wait comments.** Only a PR that bumps the version of a package that other PRs of the queue publish waits: the line `# wait: package <pkg> <version> from <publisher PRs> must be published before <consumer PR>` comes right before the consumer's `merge:` line, with all the publishers on one line. `<version>` is the version the consumer bumps to, read from the added line of the consumer PR's own manifest diff; when it cannot be read (a variable, a wildcard, a range or conflicting versions) the line is `# wait: package <pkg> from <publisher PRs> must be published before <consumer PR>`. A PR that only references the package is ordered after the publisher but does not wait, since it can use the version already in the feed. The runner should stop at the line until that version of the package is in the feed. pipetrain does not query the feed, and a runner that does not understand the line skips it like any `#` line.
 - **Pause.** The runner should stop at the `# pause` line until a human confirms the database or infrastructure change. If no PR follows the gate, the line is omitted.
+- **Step and lane comments.** Each PR is preceded by `# step <n>` (its stage) and, unless it is a gate PR, `# lane <n>` (its lane in the plan). They are informative and a runner skips them like any `#` line; a runner that wants to run lanes side by side can read them.
 - **Lanes are flattened.** The plan runs independent lanes side by side, the queue lists them one after the other. A serial runner is correct with it, only slower than the lanes would be.
 - **Questions.** Each open question goes to stderr as `? <pr>: <message>` (`? (repo): ...` when it is not about one PR), before anything else. The queue is still printed.
 - **No PRs ready.** stdout stays empty and stderr says `no PRs ready`.
@@ -739,7 +750,7 @@ A line holds the time, the version, the subcommand name, the exit code, the erro
 
 ## Merging the queue
 
-`pipetrain merge --apply` runs the order of `plan --emit queue`: it merges one PR, waits until the workflow runs of that push finish, and only then merges the next. Before each merge it reads the PR again and refuses one that is not approved, green and `clean`, or whose head moved after the plan, so a PR the plan marked as not ready is never merged. DDL and infra gates and unpublished package waits ask for confirmation (`--gates-confirmed` answers them; without a terminal the run stops there). A stop, a timeout or a failed deploy leaves a state file, and running the same command again resumes from there. Without `--apply` it only prints the steps.
+`pipetrain merge --apply` runs the order of `plan --emit queue`: it merges one PR, waits until the workflow runs of that push finish, and only then merges the next. Before each merge it reads the PR again and refuses one that is not approved, green and `clean`, or whose head moved after the plan, so a PR the plan marked as not ready is never merged. DDL and infra gates and unpublished package waits ask for confirmation (`--gates-confirmed` answers them; without a terminal the run stops there). A stop, a timeout or a failed deploy leaves a state file, and running the same command again resumes from there. Without `--apply` it only prints the steps. A cancelled workflow run that a newer run of the same workflow replaced is ignored. A merge into a deploy branch skips the wait only after reading the workflow files and finding that none runs on a push to it; when one does, or the files cannot be read, it waits. With `--open-pr`, the deploy PR of a bundle is opened after the last PR of the bundle is merged, never before.
 
 ```toml
 [merge]
