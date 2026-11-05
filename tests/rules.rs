@@ -249,6 +249,29 @@ fn unready_pr_into_the_train_warns_the_train_pr_of_its_repo() {
 }
 
 #[test]
+fn a_branch_named_after_its_base_is_still_the_train() {
+    let cfg = config("");
+    let train = pr(
+        "acme/api-core",
+        10,
+        "deploy/05-11-2026-feature-x",
+        "feature-x",
+    );
+    let into = pr("acme/api-core", 11, "feat/x", "deploy/05-11-2026-feature-x");
+    let found = discovery::discover(vec![train, into], &cfg, "deploy/05-11-2026");
+    assert_eq!(found.ready.len(), 2);
+    let scope = |number: u64| {
+        found
+            .ready
+            .iter()
+            .find(|(p, _)| p.key.number == number)
+            .map(|(_, s)| *s)
+    };
+    assert_eq!(scope(10), Some(Scope::Train));
+    assert_eq!(scope(11), Some(Scope::IntoTrain));
+}
+
+#[test]
 fn bot_branches_and_other_trains_are_not_shared_branches() {
     let cfg = config("");
     let all = vec![

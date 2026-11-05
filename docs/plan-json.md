@@ -84,7 +84,7 @@ One suggestion: in `repo`, several PRs go to the same `base`, so they would depl
 |---|---|---|
 | `repo` | string | `org/repo`, as written on the first PR of the group. |
 | `base` | string | The shared base branch, for example `main`. |
-| `branch` | string | The branch to merge the PRs into: the same value as the top-level `deploy_branch`. |
+| `branch` | string | The branch to merge the PRs into: the same value as the top-level `deploy_branch`. When one repo has bundles on more than one base, each name gets the base as a suffix (`deploy/29-10-2026-main`, `deploy/29-10-2026-feature-x`; the base in lowercase, every character that is not a letter, digit, `.` or `_` turned into `-`) so that two bundles never propose the same branch. |
 | `existing_train_pr` | string or null | Id of a PR in the group whose head branch already is `branch` (compared case-sensitively). That PR already carries the others once they merge into it. `null` when no PR in the group has that head. |
 | `retarget` | string[] | Ids of the PRs to point at `branch`. Never contains `existing_train_pr`. |
 | `deploys_now` | integer | Number of PRs in the group: the deploys without bundling. |

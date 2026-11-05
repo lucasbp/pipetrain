@@ -29,6 +29,7 @@ mod checklist;
 pub mod feed;
 pub mod init;
 pub mod log;
+pub mod merge;
 pub mod names;
 pub mod order;
 pub mod orgs;
@@ -333,6 +334,11 @@ pub fn plan(opts: PlanOptions) -> Result<i32> {
 }
 
 pub(crate) fn build_plan(opts: &PlanOptions) -> Result<(Plan, Client)> {
+    let (built, client, _) = build_plan_with_config(opts)?;
+    Ok((built, client))
+}
+
+pub(crate) fn build_plan_with_config(opts: &PlanOptions) -> Result<(Plan, Client, Config)> {
     let started = Instant::now();
     let (cfg, profile) = resolve::load(
         opts.config.as_deref(),
@@ -394,5 +400,5 @@ pub(crate) fn build_plan(opts: &PlanOptions) -> Result<(Plan, Client)> {
     built.stats.cache_misses = client.cache_misses();
     built.stats.elapsed_ms = elapsed::millis(started.elapsed());
     drop(progress);
-    Ok((built, client))
+    Ok((built, client, cfg))
 }

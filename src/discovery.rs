@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use chrono::NaiveDate;
 
+use crate::bundle::is_train_branch;
 use crate::config::{Config, DEFAULT_TRAIN_DATE_FORMAT, render_date};
 use crate::model::{Pr, Question, Review};
 
@@ -85,11 +86,11 @@ fn shared_branches(all: &[Pr], cfg: &Config, train: &str) -> HashSet<String> {
 }
 
 fn classify_scope(pr: &Pr, cfg: &Config, shared: &HashSet<String>, train: &str) -> Option<Scope> {
-    if pr.head_ref.eq_ignore_ascii_case(train) || labelled(pr, cfg) {
+    if is_train_branch(&pr.head_ref, train) || labelled(pr, cfg) {
         Some(Scope::Train)
     } else if shared.contains(&pr.head_ref) {
         Some(Scope::SharedBranch)
-    } else if pr.base_ref.eq_ignore_ascii_case(train) {
+    } else if is_train_branch(&pr.base_ref, train) {
         Some(Scope::IntoTrain)
     } else {
         None
@@ -177,9 +178,9 @@ pub fn released(all: Vec<Pr>, cfg: &Config, train: &str) -> Discovered {
         if pr.review != Review::Approved {
             continue;
         }
-        let scope = if pr.head_ref.eq_ignore_ascii_case(train) || labelled(&pr, cfg) {
+        let scope = if is_train_branch(&pr.head_ref, train) || labelled(&pr, cfg) {
             Scope::Train
-        } else if pr.base_ref.eq_ignore_ascii_case(train) {
+        } else if is_train_branch(&pr.base_ref, train) {
             Scope::IntoTrain
         } else {
             Scope::Released

@@ -103,3 +103,14 @@ infra_globs = ["**/*.tf"]
 max_requests = 300
 max_per_minute = 100
 min_remaining = 200
+
+# pipetrain merge --apply: how long to wait for each deploy, per repo.
+[merge]
+method = "merge"
+timeout_minutes = 30
+poll_seconds = 15
+no_run_grace_seconds = 120
+no_deploy_repos = []
+
+[merge.repo_timeout_minutes]
+"acme/orders-api" = 60

@@ -1,0 +1,760 @@
+use std::io::{BufRead, IsTerminal, Write};
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use anyhow::{Result, bail};
+
+use super::apply::{Gate, gate, tint};
+use super::build_plan_with_config;
+use super::order::requests_line;
+use crate::bundle::is_stacked;
+use crate::command::PlanOptions;
+use crate::config::Config;
+use crate::emit;
+use crate::github::{Client, LivePr};
+use crate::merge::{
+    Kind, NotMerging, Pending, Report, SCHEMA, STOPPED, State, Status, Step, StepReport, Store,
+    Verdict, default_state_path, judge, steps, wait_is_published,
+};
+use crate::model::{PrKey, PrState};
+use crate::plan::Plan;
+use crate::planner::Item;
+use crate::style::{bold, dim, green, red, yellow};
+
+const MERGEABILITY_TRIES: usize = 3;
+const MERGEABILITY_PAUSE: Duration = Duration::from_secs(2);
+const METHODS: [&str; 3] = ["merge", "squash", "rebase"];
+
+pub struct MergeOptions {
+    pub plan: PlanOptions,
+    pub apply: bool,
+    pub yes: bool,
+    pub gates_confirmed: bool,
+    pub allow_questions: bool,
+    pub method: Option<String>,
+    pub timeout_minutes: Option<u64>,
+    pub state: Option<PathBuf>,
+}
+
+pub struct Settings {
+    pub apply: bool,
+    pub gates_confirmed: bool,
+    pub allow_questions: bool,
+    pub method: Option<String>,
+    pub timeout: Option<Duration>,
+}
+
+pub struct Hooks<'a> {
+    pub confirm: &'a mut dyn FnMut(&str) -> bool,
+    pub gate: &'a mut dyn FnMut(&str) -> bool,
+    pub sleep: &'a mut dyn FnMut(Duration),
+    pub observe: &'a mut dyn FnMut(&StepReport),
+}
+
+#[derive(Debug)]
+pub struct Outcome {
+    pub report: Report,
+    pub aborted: bool,
+    pub code: i32,
+}
+
+struct Env<'a> {
+    cfg: &'a Config,
+    settings: &'a Settings,
+    method: &'a str,
+}
+
+struct Limits {
+    timeout: Duration,
+    poll: Duration,
+    grace: Duration,
+}
+
+enum Deploy {
+    Passed(usize),
+    Failed(String),
+    TimedOut(String),
+    NoRun(Duration),
+    Unreadable(String),
+}
+
+fn short(sha: &str) -> String {
+    sha.chars().take(7).collect()
+}
+
+fn method_of(settings: &Settings, cfg: &Config) -> Result<String> {
+    let method = settings
+        .method
+        .clone()
+        .unwrap_or_else(|| cfg.merge.method.clone())
+        .to_lowercase();
+    if METHODS.contains(&method.as_str()) {
+        Ok(method)
+    } else {
+        bail!("the merge method `{method}` is not one of merge, squash, rebase")
+    }
+}
+
+fn planned_steps(plan: &Plan) -> Vec<StepReport> {
+    steps(&emit::queue_lines(plan))
+        .into_iter()
+        .map(|step| match step {
+            Step::Merge(id) => {
+                let detail = plan
+                    .items
+                    .iter()
+                    .find(|item| item.id == id)
+                    .map(|item| format!("into {}", item.base))
+                    .unwrap_or_default();
+                StepReport::new(Kind::Merge, &id, Status::Planned, &detail)
+            }
+            Step::Gate(text) => StepReport::new(Kind::Gate, &text, Status::Planned, ""),
+            Step::Wait(text) => StepReport::new(Kind::Wait, &text, Status::Planned, ""),
+        })
+        .collect()
+}
+
+fn resume_steps(state: &State) -> Vec<StepReport> {
+    state
+        .pending
+        .iter()
+        .map(|pending| {
+            StepReport::new(
+                Kind::Resume,
+                &pending.id,
+                Status::Planned,
+                "merged by an earlier run, waiting for its deploy",
+            )
+        })
+        .collect()
+}
+
+fn not_merging(plan: &Plan) -> Vec<NotMerging> {
+    plan.skipped
+        .iter()
+        .filter(|skipped| !skipped.hidden)
+        .map(|skipped| NotMerging {
+            id: skipped.id.clone(),
+            reasons: skipped.reasons.clone(),
+        })
+        .collect()
+}
+
+fn fail(report: &mut StepReport, detail: impl Into<String>) {
+    report.status = Status::Failed;
+    report.detail = detail.into();
+}
+
+fn stop(report: &mut StepReport, detail: impl Into<String>) {
+    report.status = Status::Stopped;
+    report.detail = detail.into();
+}
+
+fn not_clean(state: &str) -> Option<String> {
+    let why = match state {
+        "clean" => return None,
+        "behind" => "the branch is behind its base: update it, then run again".to_string(),
+        "dirty" => "the branch has a merge conflict".to_string(),
+        "blocked" => {
+            "branch protection blocks it: a required review or check is missing".to_string()
+        }
+        "unstable" => "some checks are not passing".to_string(),
+        "draft" => "it is a draft".to_string(),
+        "unknown" | "" => {
+            "GitHub has not finished working out mergeability: run again in a minute".to_string()
+        }
+        other => format!("GitHub reports the state `{other}`, not clean"),
+    };
+    Some(why)
+}
+
+fn settled_live(
+    client: &mut Client,
+    slug: &str,
+    number: u64,
+    hooks: &mut Hooks,
+) -> Result<LivePr, crate::github::ApiError> {
+    let mut tries = 0;
+    loop {
+        let live = client.live_pr(slug, number)?;
+        tries += 1;
+        let unsettled = live.open && matches!(live.mergeable_state.as_str(), "unknown" | "");
+        if !unsettled || tries >= MERGEABILITY_TRIES {
+            return Ok(live);
+        }
+        (hooks.sleep)(MERGEABILITY_PAUSE);
+    }
+}
+
+fn wait_for_deploy(
+    client: &mut Client,
+    slug: &str,
+    sha: &str,
+    limits: &Limits,
+    sleep: &mut dyn FnMut(Duration),
+) -> Deploy {
+    let poll = limits.poll.max(Duration::from_millis(1));
+    let mut waited = Duration::ZERO;
+    let mut settled: Option<usize> = None;
+    let mut last = "no workflow run yet".to_string();
+    loop {
+        let runs = match client.push_runs(slug, sha) {
+            Ok(runs) => runs,
+            Err(error) => return Deploy::Unreadable(error.to_string()),
+        };
+        match judge(&runs) {
+            Verdict::Failed(text) => return Deploy::Failed(text),
+            Verdict::Passed(count) => {
+                if settled == Some(count) {
+                    return Deploy::Passed(count);
+                }
+                settled = Some(count);
+            }
+            Verdict::Waiting(text) => {
+                settled = None;
+                last = text;
+            }
+            Verdict::NoRuns => {
+                settled = None;
+                if waited >= limits.grace {
+                    return Deploy::NoRun(limits.grace);
+                }
+            }
+        }
+        if waited >= limits.timeout {
+            return Deploy::TimedOut(last);
+        }
+        sleep(poll);
+        waited += poll;
+    }
+}
+
+fn deploy_phase(
+    env: &Env,
+    client: &mut Client,
+    hooks: &mut Hooks,
+    slug: &str,
+    base: &str,
+    sha: &str,
+) -> (Status, String) {
+    if is_stacked(base, &env.cfg.train_prefix) {
+        return (
+            Status::Done,
+            "not waited: the base is a train branch, the deploy runs when the train PR merges"
+                .to_string(),
+        );
+    }
+    if !env.cfg.merge.waits_for_deploy(slug) {
+        return (
+            Status::Done,
+            "not waited: the repo is listed in merge.no_deploy_repos".to_string(),
+        );
+    }
+    let timeout = env
+        .settings
+        .timeout
+        .unwrap_or_else(|| env.cfg.merge.timeout_for(slug));
+    let limits = Limits {
+        timeout,
+        poll: Duration::from_secs(env.cfg.merge.poll_seconds.max(1)),
+        grace: Duration::from_secs(env.cfg.merge.no_run_grace_seconds),
+    };
+    match wait_for_deploy(client, slug, sha, &limits, &mut *hooks.sleep) {
+        Deploy::Passed(count) => (
+            Status::Done,
+            format!("deploy passed ({count} workflow runs)"),
+        ),
+        Deploy::Failed(text) => (Status::Failed, format!("deploy failed: {text}")),
+        Deploy::TimedOut(last) => (
+            Status::Stopped,
+            format!(
+                "still deploying after {} minutes ({last}); run again to keep waiting",
+                timeout.as_secs() / 60
+            ),
+        ),
+        Deploy::NoRun(grace) => (
+            Status::Stopped,
+            format!(
+                "no workflow run appeared for the push in {}s; if this repo deploys without GitHub Actions, list it in merge.no_deploy_repos; run again to check once more",
+                grace.as_secs()
+            ),
+        ),
+        Deploy::Unreadable(error) => (
+            Status::Stopped,
+            format!("could not read the workflow runs ({error}); run again to resume"),
+        ),
+    }
+}
+
+fn confirm_merge(
+    client: &mut Client,
+    slug: &str,
+    number: u64,
+) -> Result<Option<String>, crate::github::ApiError> {
+    let live = client.live_pr(slug, number)?;
+    Ok(live.merged.then_some(live.merge_commit_sha).flatten())
+}
+
+fn merge_one(
+    env: &Env,
+    item: &Item,
+    client: &mut Client,
+    store: &mut Store,
+    hooks: &mut Hooks,
+    report: &mut StepReport,
+) {
+    let key = PrKey::new(&item.org, &item.repo, item.number);
+    let slug = key.slug();
+    let pr = match client.pr(&key) {
+        Ok(Some(pr)) => pr,
+        Ok(None) => return fail(report, "not found on GitHub"),
+        Err(error) => return fail(report, format!("{error:#}")),
+    };
+    if pr.state == PrState::Merged {
+        report.status = Status::Skipped;
+        report.detail = "already merged".to_string();
+        return;
+    }
+    let reasons = pr.blockers(env.cfg.allows_missing_checks(&slug));
+    if !reasons.is_empty() {
+        return fail(report, format!("no longer ready: {}", reasons.join(", ")));
+    }
+    let live = match settled_live(client, &slug, item.number, hooks) {
+        Ok(live) => live,
+        Err(error) => return fail(report, error.to_string()),
+    };
+    if live.merged {
+        report.status = Status::Skipped;
+        report.detail = "already merged".to_string();
+        return;
+    }
+    if !live.open {
+        return fail(report, "it is closed");
+    }
+    if live.head_sha != item.sha {
+        return fail(
+            report,
+            format!(
+                "the branch moved after the plan ({} to {}): run the plan again",
+                short(&item.sha),
+                short(&live.head_sha)
+            ),
+        );
+    }
+    if live.base != item.base {
+        return fail(
+            report,
+            format!(
+                "the base changed after the plan ({} to {}): run the plan again",
+                item.base, live.base
+            ),
+        );
+    }
+    if let Some(why) = not_clean(&live.mergeable_state) {
+        return fail(report, why);
+    }
+    let pending = Pending {
+        id: item.id.clone(),
+        repo: slug.clone(),
+        base: item.base.clone(),
+        sha: None,
+    };
+    if let Err(error) = store.add(pending) {
+        return fail(report, format!("cannot save the merge state: {error:#}"));
+    }
+    let merge_sha = match client.merge_pr(&slug, item.number, &item.sha, env.method) {
+        Ok(sha) => sha,
+        Err(error) => match confirm_merge(client, &slug, item.number) {
+            Ok(Some(sha)) => sha,
+            Ok(None) => {
+                let _ = store.remove(&item.id);
+                return fail(report, error.to_string());
+            }
+            Err(_) => {
+                return stop(
+                    report,
+                    format!("{error}; could not confirm whether it merged, run again to find out"),
+                );
+            }
+        },
+    };
+    report.merge_sha = Some(merge_sha.clone());
+    if let Err(error) = store.set_sha(&item.id, &merge_sha) {
+        return stop(
+            report,
+            format!(
+                "merged {}, but the merge state could not be saved: {error:#}",
+                short(&merge_sha)
+            ),
+        );
+    }
+    let landed = Landed {
+        id: &item.id,
+        slug: &slug,
+        base: &item.base,
+        sha: &merge_sha,
+    };
+    finish_deploy(env, &landed, client, store, hooks, report);
+}
+
+#[derive(Clone, Copy)]
+struct Landed<'a> {
+    id: &'a str,
+    slug: &'a str,
+    base: &'a str,
+    sha: &'a str,
+}
+
+fn finish_deploy(
+    env: &Env,
+    landed: &Landed,
+    client: &mut Client,
+    store: &mut Store,
+    hooks: &mut Hooks,
+    report: &mut StepReport,
+) {
+    let Landed {
+        id,
+        slug,
+        base,
+        sha,
+    } = *landed;
+    let (status, text) = deploy_phase(env, client, hooks, slug, base, sha);
+    report.deploy = Some(text);
+    report.status = status;
+    report.detail = match status {
+        Status::Done => format!("merged {} into {base}", short(sha)),
+        _ => format!(
+            "merged {} into {base}, but the deploy did not finish",
+            short(sha)
+        ),
+    };
+    if status == Status::Done
+        && let Err(error) = store.remove(id)
+    {
+        stop(report, format!("cannot update the merge state: {error:#}"));
+    }
+}
+
+fn resume_one(
+    env: &Env,
+    pending: &Pending,
+    client: &mut Client,
+    store: &mut Store,
+    hooks: &mut Hooks,
+    report: &mut StepReport,
+) {
+    let sha = match &pending.sha {
+        Some(sha) => sha.clone(),
+        None => {
+            let number = pending
+                .id
+                .rsplit_once('#')
+                .and_then(|(_, number)| number.parse::<u64>().ok());
+            let Some(number) = number else {
+                return fail(report, "the saved id has no PR number");
+            };
+            match confirm_merge(client, &pending.repo, number) {
+                Ok(Some(sha)) => {
+                    let _ = store.set_sha(&pending.id, &sha);
+                    sha
+                }
+                Ok(None) => {
+                    let _ = store.remove(&pending.id);
+                    report.status = Status::Skipped;
+                    report.detail = "it was not merged, nothing to wait for".to_string();
+                    return;
+                }
+                Err(error) => {
+                    return stop(
+                        report,
+                        format!("could not tell whether it merged ({error}); run again"),
+                    );
+                }
+            }
+        }
+    };
+    report.merge_sha = Some(sha.clone());
+    let landed = Landed {
+        id: &pending.id,
+        slug: &pending.repo,
+        base: &pending.base,
+        sha: &sha,
+    };
+    finish_deploy(env, &landed, client, store, hooks, report);
+}
+
+fn gate_step(env: &Env, hooks: &mut Hooks, report: &mut StepReport) {
+    if report.kind == Kind::Wait && wait_is_published(&report.target) {
+        report.status = Status::Skipped;
+        report.detail = "the feed already has it".to_string();
+    } else if env.settings.gates_confirmed {
+        report.status = Status::Done;
+        report.detail = "confirmed with --gates-confirmed".to_string();
+    } else if (hooks.gate)(&report.target) {
+        report.status = Status::Done;
+        report.detail = "confirmed".to_string();
+    } else {
+        stop(
+            report,
+            "not confirmed: do it, then run again (in a terminal, or with --gates-confirmed)",
+        );
+    }
+}
+
+pub fn merge_plan(
+    plan: &Plan,
+    cfg: &Config,
+    client: &mut Client,
+    settings: &Settings,
+    store: &mut Store,
+    hooks: &mut Hooks,
+) -> Result<Outcome> {
+    let method = method_of(settings, cfg)?;
+    let env = Env {
+        cfg,
+        settings,
+        method: &method,
+    };
+    let mut report = Report {
+        schema: SCHEMA,
+        applied: false,
+        stopped: None,
+        steps: planned_steps(plan),
+        not_merging: not_merging(plan),
+        questions: emit::question_lines(plan),
+    };
+    if !settings.apply {
+        report.steps.splice(0..0, resume_steps(&store.state));
+        return Ok(Outcome {
+            report,
+            aborted: false,
+            code: 0,
+        });
+    }
+    if !report.questions.is_empty() && !settings.allow_questions {
+        report.stopped =
+            Some("the plan has open questions: answer them, or pass --allow-questions".to_string());
+        return Ok(Outcome {
+            report,
+            aborted: false,
+            code: emit::EXIT_QUESTIONS,
+        });
+    }
+    report.steps.splice(0..0, resume_steps(&store.state));
+    if report.steps.is_empty() {
+        return Ok(Outcome {
+            report,
+            aborted: false,
+            code: 0,
+        });
+    }
+    if !(hooks.confirm)(&render(&report, false)) {
+        return Ok(Outcome {
+            report,
+            aborted: true,
+            code: 1,
+        });
+    }
+    report.applied = true;
+    let mut halted = false;
+    for index in 0..report.steps.len() {
+        let mut step = report.steps[index].clone();
+        if halted {
+            step.status = Status::Skipped;
+            step.detail = STOPPED.to_string();
+        } else {
+            match step.kind {
+                Kind::Resume => {
+                    let pending = store
+                        .state
+                        .pending
+                        .iter()
+                        .find(|pending| pending.id == step.target)
+                        .cloned();
+                    match pending {
+                        Some(pending) => {
+                            resume_one(&env, &pending, client, store, hooks, &mut step);
+                        }
+                        None => fail(&mut step, "the saved state no longer lists it"),
+                    }
+                }
+                Kind::Merge => match plan.items.iter().find(|item| item.id == step.target) {
+                    Some(item) => merge_one(&env, item, client, store, hooks, &mut step),
+                    None => fail(&mut step, "it is not in the plan"),
+                },
+                Kind::Gate | Kind::Wait => gate_step(&env, hooks, &mut step),
+            }
+            halted = matches!(step.status, Status::Failed | Status::Stopped);
+        }
+        (hooks.observe)(&step);
+        report.steps[index] = step;
+    }
+    let code = report.exit_code();
+    Ok(Outcome {
+        report,
+        aborted: false,
+        code,
+    })
+}
+
+fn step_text(step: &StepReport, color: bool) -> String {
+    let what = match step.kind {
+        Kind::Resume => format!("wait for the deploy of {}", step.target),
+        Kind::Merge => format!("merge {}", step.target),
+        Kind::Gate => format!("gate: {}", step.target),
+        Kind::Wait => format!("wait: {}", step.target),
+    };
+    let what = if step.kind == Kind::Merge {
+        tint(color, bold, &what)
+    } else {
+        what
+    };
+    let suffix = if step.detail.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", step.detail)
+    };
+    let deploy = step
+        .deploy
+        .as_ref()
+        .map(|text| format!("; {text}"))
+        .unwrap_or_default();
+    match step.status {
+        Status::Planned => format!("{what}{suffix}"),
+        Status::Done => format!("{} {what}{suffix}{deploy}", tint(color, green, "done:")),
+        Status::Skipped => format!("{} {what}{suffix}", tint(color, dim, "skipped:")),
+        Status::Failed => format!("{} {what}{suffix}{deploy}", tint(color, red, "failed:")),
+        Status::Stopped => format!("{} {what}{suffix}{deploy}", tint(color, yellow, "stopped:")),
+    }
+}
+
+pub fn render(report: &Report, color: bool) -> String {
+    let mut out = String::new();
+    if !report.applied && report.stopped.is_none() {
+        let banner = "dry run, nothing was merged; pass --apply to do it";
+        out.push_str(&format!("{}\n\n", tint(color, yellow, banner)));
+    }
+    if report.steps.is_empty() {
+        out.push_str(&format!("{}\n", tint(color, dim, "nothing to merge")));
+    }
+    for step in &report.steps {
+        out.push_str(&format!("{}\n", step_text(step, color)));
+    }
+    if !report.not_merging.is_empty() {
+        out.push_str(&format!(
+            "\n{}\n",
+            tint(
+                color,
+                dim,
+                "not merging, the plan marks these as not ready:"
+            )
+        ));
+        for skipped in &report.not_merging {
+            out.push_str(&format!(
+                "  {}: {}\n",
+                skipped.id,
+                skipped.reasons.join(", ")
+            ));
+        }
+    }
+    for question in &report.questions {
+        out.push_str(&format!("{question}\n"));
+    }
+    if let Some(reason) = &report.stopped {
+        out.push_str(&format!("\n{}\n", tint(color, yellow, reason)));
+    }
+    if report.applied {
+        out.push_str(&format!(
+            "\n{} done, {} skipped, {} failed, {} stopped\n",
+            report.count(Status::Done),
+            report.count(Status::Skipped),
+            report.count(Status::Failed),
+            report.count(Status::Stopped)
+        ));
+    }
+    out
+}
+
+fn ask(question: &str, prompt: &str) -> String {
+    eprintln!("{question}");
+    eprint!("{prompt}");
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    let _ = std::io::stdin().lock().read_line(&mut line);
+    line
+}
+
+pub fn run(opts: MergeOptions) -> Result<i32> {
+    let interactive = std::io::stdin().is_terminal();
+    if gate(opts.apply, opts.yes, interactive, None) == Gate::Refuse {
+        bail!("refusing to merge without a terminal: pass --yes");
+    }
+    let started = Instant::now();
+    let json = opts.plan.json;
+    let (built, mut client, cfg) = build_plan_with_config(&opts.plan)?;
+    let mut store = Store::open(opts.state.clone().or_else(default_state_path))?;
+    let settings = Settings {
+        apply: opts.apply,
+        gates_confirmed: opts.gates_confirmed,
+        allow_questions: opts.allow_questions,
+        method: opts.method.clone(),
+        timeout: opts
+            .timeout_minutes
+            .map(|minutes| Duration::from_secs(minutes.saturating_mul(60))),
+    };
+    let (apply, yes) = (opts.apply, opts.yes);
+    let mut confirm = |text: &str| {
+        let answer = if yes {
+            None
+        } else {
+            Some(ask(
+                text,
+                "Merge these PRs one at a time, waiting for each deploy? Type yes: ",
+            ))
+        };
+        gate(apply, yes, interactive, answer.as_deref()) == Gate::Proceed
+    };
+    let mut at_gate = |text: &str| {
+        if !interactive {
+            return false;
+        }
+        let answer = ask(
+            &format!("Gate: {text}"),
+            "Type yes once that is done, anything else stops here: ",
+        );
+        answer.trim() == "yes"
+    };
+    let mut pause = |wait: Duration| std::thread::sleep(wait);
+    let mut observe = |step: &StepReport| {
+        if !json {
+            eprintln!("{}", step_text(step, false));
+        }
+    };
+    let mut hooks = Hooks {
+        confirm: &mut confirm,
+        gate: &mut at_gate,
+        sleep: &mut pause,
+        observe: &mut observe,
+    };
+    let outcome = merge_plan(&built, &cfg, &mut client, &settings, &mut store, &mut hooks)?;
+    if outcome.aborted {
+        eprintln!("aborted, nothing was merged");
+        return Ok(outcome.code);
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&outcome.report)?);
+    } else {
+        anstream::print!("{}", render(&outcome.report, true));
+    }
+    if opts.apply {
+        eprintln!(
+            "{}",
+            requests_line(client.requests(), client.cache_hits(), started.elapsed())
+        );
+        if outcome.code == crate::merge::EXIT_STOPPED {
+            eprintln!("stopped, nothing is lost: run the same command again to resume");
+        }
+    }
+    Ok(outcome.code)
+}

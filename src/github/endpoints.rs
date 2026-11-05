@@ -18,6 +18,43 @@ pub enum BranchWrite {
     AlreadyExists,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LivePr {
+    pub open: bool,
+    pub merged: bool,
+    pub head_sha: String,
+    pub base: String,
+    pub mergeable_state: String,
+    pub merge_commit_sha: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Run {
+    pub name: String,
+    pub status: String,
+    pub conclusion: Option<String>,
+    pub url: String,
+}
+
+fn parse_run(value: &Value) -> Run {
+    let text = |key: &str| {
+        value
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    Run {
+        name: text("name"),
+        status: text("status"),
+        conclusion: value
+            .get("conclusion")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        url: text("html_url"),
+    }
+}
+
 fn encode_path(text: &str) -> String {
     let mut out = String::new();
     for byte in text.bytes() {
@@ -230,6 +267,68 @@ impl Client {
             .into_write(&format!("PATCH {path}"))
             .map_err(|error| self.redact(error))?;
         Ok(())
+    }
+
+    pub fn live_pr(&mut self, slug: &str, number: u64) -> Result<LivePr, ApiError> {
+        let path = format!("/repos/{slug}/pulls/{number}");
+        let body = self
+            .get(&path)?
+            .into_body(&path)
+            .map_err(|error| self.redact(error))?;
+        let text = |pointer: &str| {
+            body.pointer(pointer)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        Ok(LivePr {
+            open: text("/state") == "open",
+            merged: body.get("merged").and_then(Value::as_bool).unwrap_or(false),
+            head_sha: text("/head/sha"),
+            base: text("/base/ref"),
+            mergeable_state: text("/mergeable_state"),
+            merge_commit_sha: body
+                .get("merge_commit_sha")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        })
+    }
+
+    pub fn merge_pr(
+        &mut self,
+        slug: &str,
+        number: u64,
+        sha: &str,
+        method: &str,
+    ) -> Result<String, ApiError> {
+        let path = format!("/repos/{slug}/pulls/{number}/merge");
+        let body = json!({ "sha": sha, "merge_method": method });
+        let reply = self.put_json(&path, &body)?;
+        let merged = reply
+            .into_write(&format!("PUT {path}"))
+            .map_err(|error| self.redact(error))?;
+        match merged.get("sha").and_then(Value::as_str) {
+            Some(commit) if merged.get("merged").and_then(Value::as_bool) != Some(false) => {
+                Ok(commit.to_string())
+            }
+            _ => Err(ApiError::Other {
+                message: format!("GitHub did not confirm the merge of {slug}#{number}"),
+            }),
+        }
+    }
+
+    pub fn push_runs(&mut self, slug: &str, sha: &str) -> Result<Vec<Run>, ApiError> {
+        let path = format!("/repos/{slug}/actions/runs?head_sha={sha}&event=push&per_page=100");
+        let body = self
+            .get(&path)?
+            .into_body(&path)
+            .map_err(|error| self.redact(error))?;
+        let runs = body
+            .get("workflow_runs")
+            .and_then(Value::as_array)
+            .map(|runs| runs.iter().map(parse_run).collect())
+            .unwrap_or_default();
+        Ok(runs)
     }
 
     pub fn tree(&mut self, slug: &str, sha: &str) -> Result<(Vec<String>, bool)> {

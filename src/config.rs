@@ -69,7 +69,53 @@ pub struct Config {
     pub targets: BTreeMap<String, String>,
     pub packages: BTreeMap<String, String>,
     pub api: ApiConfig,
+    pub merge: MergeConfig,
     pub log: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MergeConfig {
+    pub method: String,
+    pub timeout_minutes: u64,
+    pub poll_seconds: u64,
+    pub no_run_grace_seconds: u64,
+    pub no_deploy_repos: Vec<String>,
+    pub repo_timeout_minutes: BTreeMap<String, u64>,
+}
+
+impl Default for MergeConfig {
+    fn default() -> Self {
+        Self {
+            method: "merge".to_string(),
+            timeout_minutes: 30,
+            poll_seconds: 15,
+            no_run_grace_seconds: 120,
+            no_deploy_repos: Vec::new(),
+            repo_timeout_minutes: BTreeMap::new(),
+        }
+    }
+}
+
+impl MergeConfig {
+    pub fn timeout_for(&self, slug: &str) -> std::time::Duration {
+        let minutes = self
+            .repo_timeout_minutes
+            .iter()
+            .find(|(repo, _)| repo.eq_ignore_ascii_case(slug))
+            .map_or(self.timeout_minutes, |(_, minutes)| *minutes);
+        std::time::Duration::from_secs(minutes.saturating_mul(60))
+    }
+
+    pub fn waits_for_deploy(&self, slug: &str) -> bool {
+        !self.no_deploy_repos.iter().any(|pattern| {
+            GlobBuilder::new(pattern)
+                .case_insensitive(true)
+                .build()
+                .map(|g| g.compile_matcher().is_match(slug))
+                .unwrap_or(false)
+        })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -113,6 +159,7 @@ impl Default for Config {
             targets: BTreeMap::new(),
             packages: BTreeMap::new(),
             api: ApiConfig::default(),
+            merge: MergeConfig::default(),
             log: false,
         }
     }

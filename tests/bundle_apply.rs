@@ -569,3 +569,91 @@ fn the_colored_nothing_to_bundle_is_dim() {
         "\u{1b}[2mnothing to bundle\u{1b}[0m\n"
     );
 }
+
+fn plan_on(prs: &[(u64, &str)]) -> Plan {
+    let cfg = Config::parse("orgs = [\"acme\"]").unwrap();
+    let rules = Rules::new(&cfg).unwrap();
+    plan::build(
+        &rules,
+        Gathered {
+            generated_at: "2026-10-30T10:00:00-03:00".to_string(),
+            train: DEPLOY.to_string(),
+            deploy_branch: DEPLOY.to_string(),
+            train_prefix: "deploy/".to_string(),
+            orgs: cfg.orgs.clone(),
+            ready: prs
+                .iter()
+                .map(|(number, base)| {
+                    let mut item = pr(*number);
+                    item.base_ref = base.to_string();
+                    (item, "explicit".to_string())
+                })
+                .collect(),
+            skipped: Vec::new(),
+            questions: Vec::new(),
+            external: BTreeMap::new(),
+            publishers: Publishers::new(),
+            references: Default::default(),
+            max_parallel: cfg.max_parallel,
+            requests: 0,
+            rate_remaining: None,
+        },
+    )
+}
+
+#[test]
+fn two_bases_that_flatten_to_the_same_suffix_are_refused() {
+    let plan = plan_on(&[
+        (1, "feature/x"),
+        (2, "feature/x"),
+        (3, "feature-x"),
+        (4, "feature-x"),
+    ]);
+    let server = serve(happy);
+    let mut client = client(&server);
+    let error = apply_plan(
+        &plan,
+        &mut client,
+        false,
+        &mut |_: &str| true,
+        &mut |_, _| {},
+    )
+    .unwrap_err();
+
+    let text = error.to_string();
+    assert!(text.contains("refusing to bundle acme/api-core"), "{text}");
+    assert!(text.contains("would both use the branch"), "{text}");
+    assert!(server.writes().is_empty());
+}
+
+#[test]
+fn two_bases_in_one_repo_get_their_own_branch_and_a_note() {
+    let plan = plan_on(&[
+        (1, "master"),
+        (2, "master"),
+        (3, "feature-x"),
+        (4, "feature-x"),
+    ]);
+    let server = serve(happy);
+    let outcome = run(&server, &plan, false, true);
+
+    assert!(!outcome.failed && !outcome.aborted);
+    let branches: Vec<&str> = outcome
+        .report
+        .bundles
+        .iter()
+        .map(|b| b.branch.as_str())
+        .collect();
+    assert_eq!(branches.len(), 2);
+    assert_ne!(branches[0], branches[1]);
+    assert!(
+        branches.contains(&"deploy/30-10-2026-master"),
+        "{branches:?}"
+    );
+    assert!(
+        branches.contains(&"deploy/30-10-2026-feature-x"),
+        "{branches:?}"
+    );
+    assert!(render(&outcome.report).contains("named after its base"));
+    assert!(server.writes().is_empty());
+}
