@@ -53,10 +53,27 @@ pub enum Verdict {
     Passed(usize),
 }
 
-pub fn judge(runs: &[Run]) -> Verdict {
-    if runs.is_empty() {
+fn same_workflow(a: &Run, b: &Run) -> bool {
+    if a.workflow_id != 0 || b.workflow_id != 0 {
+        a.workflow_id == b.workflow_id
+    } else {
+        a.name == b.name
+    }
+}
+
+fn superseded(run: &Run, all: &[Run]) -> bool {
+    run.status == "completed"
+        && run.conclusion.as_deref() == Some("cancelled")
+        && all
+            .iter()
+            .any(|other| other.id > run.id && same_workflow(other, run))
+}
+
+pub fn judge(all: &[Run]) -> Verdict {
+    if all.is_empty() {
         return Verdict::NoRuns;
     }
+    let runs: Vec<&Run> = all.iter().filter(|run| !superseded(run, all)).collect();
     for run in runs.iter().filter(|run| run.status == "completed") {
         let conclusion = run.conclusion.as_deref().unwrap_or("unknown");
         if !GOOD_CONCLUSIONS.contains(&conclusion) {
@@ -172,6 +189,8 @@ pub enum Kind {
     Merge,
     Gate,
     Wait,
+    #[serde(rename = "open-pr")]
+    OpenPr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -248,6 +267,8 @@ mod tests {
 
     fn run(name: &str, status: &str, conclusion: Option<&str>) -> Run {
         Run {
+            id: 0,
+            workflow_id: 0,
             name: name.to_string(),
             status: status.to_string(),
             conclusion: conclusion.map(str::to_string),
@@ -336,6 +357,59 @@ mod tests {
             let runs = [run("deploy", "completed", Some(conclusion))];
             assert!(matches!(judge(&runs), Verdict::Failed(_)), "{conclusion}");
         }
+    }
+
+    fn numbered(id: u64, workflow: u64, status: &str, conclusion: Option<&str>) -> Run {
+        Run {
+            id,
+            workflow_id: workflow,
+            ..run("ci", status, conclusion)
+        }
+    }
+
+    #[test]
+    fn a_cancelled_run_that_a_newer_run_of_the_same_workflow_replaced_is_ignored() {
+        let runs = [
+            numbered(1, 7, "completed", Some("cancelled")),
+            numbered(2, 7, "completed", Some("success")),
+        ];
+
+        assert_eq!(judge(&runs), Verdict::Passed(1));
+    }
+
+    #[test]
+    fn a_replacement_still_running_is_waited_for() {
+        let runs = [
+            numbered(1, 7, "completed", Some("cancelled")),
+            numbered(2, 7, "in_progress", None),
+        ];
+
+        assert_eq!(
+            judge(&runs),
+            Verdict::Waiting("1 of 1 workflow runs still going".to_string())
+        );
+    }
+
+    #[test]
+    fn a_cancelled_run_nobody_replaced_still_fails() {
+        let runs = [
+            numbered(1, 7, "completed", Some("cancelled")),
+            numbered(2, 8, "completed", Some("success")),
+        ];
+
+        assert!(matches!(judge(&runs), Verdict::Failed(_)));
+        let alone = [numbered(3, 7, "completed", Some("cancelled"))];
+        assert!(matches!(judge(&alone), Verdict::Failed(_)));
+    }
+
+    #[test]
+    fn a_newer_cancelled_run_is_not_replaced_by_an_older_one() {
+        let runs = [
+            numbered(5, 7, "completed", Some("success")),
+            numbered(6, 7, "completed", Some("cancelled")),
+        ];
+
+        assert!(matches!(judge(&runs), Verdict::Failed(_)));
     }
 
     #[test]

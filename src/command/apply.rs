@@ -317,7 +317,7 @@ fn check_tip(
     }
 }
 
-fn deploy_pr_body(base: &str, targets: &[&str]) -> String {
+pub(crate) fn deploy_pr_body(base: &str, targets: &[&str]) -> String {
     let mut body = format!("Deploy of {} PRs into `{base}`:\n\n", targets.len());
     for target in targets {
         body.push_str(&format!("- {target}\n"));

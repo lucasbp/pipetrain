@@ -711,6 +711,12 @@ struct MergeArgs {
     )]
     state: Option<PathBuf>,
 
+    #[arg(
+        long,
+        help = "After the last PR of a bundle is merged into its deploy branch, open the PR deploy branch -> base, without merging it"
+    )]
+    open_pr: bool,
+
     #[arg(long, help = "Print the report as JSON")]
     json: bool,
 
@@ -889,6 +895,7 @@ fn run_merge(args: MergeArgs) -> Result<i32> {
         method: args.method,
         timeout_minutes: args.timeout_minutes,
         state: args.state,
+        open_pr: args.open_pr,
     })
 }
 

@@ -223,7 +223,7 @@ pipetrain plan [OPTIONS] [PRS]...
 | `--emit queue` | Replaces the plan with a queue for a runner: one `merge:org/repo#N` line per ready PR on stdout, questions on stderr, exit 3 when questions are open. See [Feeding a queue runner](#feeding-a-queue-runner). Not combinable with `--json`. |
 | `--apply` | Only on `bundle`. Writes to GitHub: creates the deploy branches and retargets the PRs. Without it `bundle` is a dry run. |
 | `--yes` | Only on `bundle`, and only together with `--apply`. Skips the confirmation prompt. Required when stdin is not a terminal. |
-| `--open-pr` | Only on `bundle`, and only together with `--apply`. After the last retarget of each bundle, opens the PR `deploy/<date>-<base>` into the base, without merging it. A deploy PR that already exists is not duplicated. Needs Pull requests: write. |
+| `--open-pr` | On `bundle` (together with `--apply`): after the last retarget of each bundle, opens the PR `deploy/<date>-<base>` into the base, without merging it. On `merge`: opens that PR only after the last PR of the bundle is merged and its wait is over, which is the one to use for the whole flow, since opening it before the merges starts a round of CI per merge. A deploy PR that already exists is not duplicated. Needs Pull requests: write. |
 | `--color auto\|always\|never` | On `plan` and `bundle`. Colors in the text output. `auto` (the default) colors only on a terminal and honors `NO_COLOR`. `always` colors even when piped, `never` never does. `--json` is never colored. |
 
 PR references are written as `org/repo#123`, as a PR URL, or as `repo#123` without the org. A PR that cannot be found stops the run.
@@ -750,7 +750,7 @@ A line holds the time, the version, the subcommand name, the exit code, the erro
 
 ## Merging the queue
 
-`pipetrain merge --apply` runs the order of `plan --emit queue`: it merges one PR, waits until the workflow runs of that push finish, and only then merges the next. Before each merge it reads the PR again and refuses one that is not approved, green and `clean`, or whose head moved after the plan, so a PR the plan marked as not ready is never merged. DDL and infra gates and unpublished package waits ask for confirmation (`--gates-confirmed` answers them; without a terminal the run stops there). A stop, a timeout or a failed deploy leaves a state file, and running the same command again resumes from there. Without `--apply` it only prints the steps.
+`pipetrain merge --apply` runs the order of `plan --emit queue`: it merges one PR, waits until the workflow runs of that push finish, and only then merges the next. Before each merge it reads the PR again and refuses one that is not approved, green and `clean`, or whose head moved after the plan, so a PR the plan marked as not ready is never merged. DDL and infra gates and unpublished package waits ask for confirmation (`--gates-confirmed` answers them; without a terminal the run stops there). A stop, a timeout or a failed deploy leaves a state file, and running the same command again resumes from there. Without `--apply` it only prints the steps. A cancelled workflow run that a newer run of the same workflow replaced is ignored. A merge into a deploy branch skips the wait only after reading the workflow files and finding that none runs on a push to it; when one does, or the files cannot be read, it waits. With `--open-pr`, the deploy PR of a bundle is opened after the last PR of the bundle is merged, never before.
 
 ```toml
 [merge]

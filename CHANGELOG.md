@@ -11,9 +11,16 @@
 ### Added
 
 - `plan --emit queue` prints `# step <n>` and `# lane <n>` before each PR (the `stage` and `lane` of the plan; a gate PR has no lane line), so a runner can run lanes side by side. Only additions to the contract: every `merge:` and `# pause` line is unchanged and a runner skips the new lines like any `#` line. See [docs/queue-output.md](docs/queue-output.md).
-- `bundle --apply --open-pr` opens the PR `deploy/<date>-<base>` into the base after the last retarget of each bundle, without merging it. It does not open a second one when the deploy PR already exists, and a failed retarget skips it. Needs Pull requests: write.
+- `bundle --apply --open-pr` opens the PR `deploy/<date>-<base>` into the base after the last retarget of each bundle, without merging it. It does not open a second one when the deploy PR already exists, and a failed retarget skips it. Needs Pull requests: write. Opening the PR before the bundle is merged starts a round of CI per merge; for the whole flow prefer `merge --open-pr`.
+- `merge --apply --open-pr` opens the deploy PR `deploy/<date>-<base>` into its base only after the last PR of the bundle was merged and its deploy wait ended. Any failed or stopped step before it means nothing is opened, and a deploy PR that already exists is not duplicated. The report gains the step kind `open-pr`; a dry run lists it as planned.
+- `merge` ignores a workflow run that ended `cancelled` when a newer run of the same workflow exists for the same commit (CI that cancels in-progress runs on a PR leaves such runs). A cancelled run that nothing replaced still fails the step.
 
-The `--json` output of `plan` keeps schema 1; `bundles[].branch` changes as described above and the report of `bundle --json` gains the action kind `open-pr`.
+### Changed in `merge`
+
+- A merge into a train branch (`deploy/...`) used to skip the deploy wait without looking. It now reads the workflow files of the repo at the merge commit (`.github/workflows/*.yml`, via the tree and blob API, once per repo and branch in a run) and skips the wait only when none of them runs on a push to that branch, reading the `branches`, `branches-ignore` and `tags` filters of `on: push`. A `paths` filter counts as a possible run. When a workflow runs on the push, or the files cannot be read or parsed (no access, a filter it does not understand, invalid YAML), it waits like for any base and the step says why. This adds the crate `yaml-rust2` (pure Rust YAML parser).
+- The second read that confirms the same number of finished runs is there to catch a workflow chained with `workflow_run`. It is not shortened, and it should only be after measuring the real delay of the chain. See [docs/merge.md](docs/merge.md).
+
+The `--json` output of `plan` keeps schema 1; `bundles[].branch` changes as described above and the reports of `bundle --json` and `merge --json` gain the kind `open-pr`.
 
 ## 0.3.0
 

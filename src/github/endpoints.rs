@@ -11,6 +11,7 @@ use crate::model::{ChangedFile, Pr, PrKey, PrState};
 use crate::planner::DepState;
 
 const FILE_PAGES: u32 = 3;
+const BRANCH_PAGES: u32 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BranchWrite {
@@ -36,6 +37,8 @@ pub struct LivePr {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Run {
+    pub id: u64,
+    pub workflow_id: u64,
     pub name: String,
     pub status: String,
     pub conclusion: Option<String>,
@@ -50,7 +53,10 @@ fn parse_run(value: &Value) -> Run {
             .unwrap_or_default()
             .to_string()
     };
+    let number = |key: &str| value.get(key).and_then(Value::as_u64).unwrap_or_default();
     Run {
+        id: number("id"),
+        workflow_id: number("workflow_id"),
         name: text("name"),
         status: text("status"),
         conclusion: value
@@ -334,6 +340,23 @@ impl Client {
             .into_write(&format!("POST {path}"))
             .map_err(|error| self.redact(error))?;
         Ok(PrWrite::Created)
+    }
+
+    pub fn branch_names(&mut self, slug: &str) -> Result<Vec<String>> {
+        let mut names = Vec::new();
+        for page in 1..=BRANCH_PAGES {
+            let value = self.rest(&format!("/repos/{slug}/branches?per_page=100&page={page}"))?;
+            let list = value.as_array().cloned().unwrap_or_default();
+            names.extend(
+                list.iter()
+                    .filter_map(|branch| branch.get("name").and_then(Value::as_str))
+                    .map(str::to_string),
+            );
+            if list.len() < 100 {
+                break;
+            }
+        }
+        Ok(names)
     }
 
     pub fn retarget_pr(&mut self, slug: &str, number: u64, branch: &str) -> Result<(), ApiError> {
