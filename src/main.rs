@@ -159,8 +159,11 @@ struct UpdateArgs {
     #[arg(
         long,
         conflicts_with = "check",
-        help = "Download, verify and swap this executable (not ready, may change); without it `update` changes nothing"
+        help = "Show the current and new version, the asset and the executable that would be replaced, and write nothing"
     )]
+    dry_run: bool,
+
+    #[arg(long, hide = true)]
     experimental_install: bool,
 
     #[arg(long, help = "Print the result as JSON")]
@@ -927,7 +930,7 @@ fn run_command(command: Command) -> Result<i32> {
         Command::Bump(args) => run_bump(args),
         Command::Update(args) => update::run(UpdateOptions {
             check: args.check,
-            install: args.experimental_install,
+            dry_run: args.dry_run,
             json: args.json,
             progress: pipetrain::progress::detect(args.no_progress, args.json, false),
             api_url: args.api_url,
@@ -1088,6 +1091,7 @@ fn dispatch(result: &Result<i32>) -> ExitCode {
 }
 
 fn main() -> ExitCode {
+    pipetrain::update::replace::discard_own_leftover();
     let cli = Cli::parse();
     let suppress = suppression(&cli);
     let logging = start_logging(&cli);

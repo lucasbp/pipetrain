@@ -21,6 +21,22 @@ pub fn discard_leftover(exe: &Path) {
     let _ = fs::remove_file(sibling(exe, ".new"));
 }
 
+pub fn discard_own_leftover() {
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = fs::remove_file(sibling(&exe, ".old"));
+    }
+}
+
+pub fn check_writable(exe: &Path) -> Result<(), UpdateError> {
+    let probe = sibling(exe, ".new");
+    let outcome = fs::write(&probe, b"");
+    let _ = fs::remove_file(&probe);
+    outcome.map_err(|error| UpdateError::NotWritable {
+        path: exe.display().to_string(),
+        reason: error.to_string(),
+    })
+}
+
 #[cfg(unix)]
 fn copy_mode(from: &Path, to: &Path) {
     use std::os::unix::fs::PermissionsExt;

@@ -36,7 +36,7 @@ The install scripts and the in-place installer depend on these names. Changing t
 - `SHA256SUMS` in the `sha256sum` format, one line per asset.
 - The executable at the root of the archive or in one folder.
 
-For now installs and upgrades go through `install.sh` and `install.ps1`. The in-place installer (`pipetrain update --experimental-install`) is not ready and may change.
+First installs go through `install.sh` and `install.ps1`. After that `pipetrain update` upgrades in place: it fetches the asset of the latest full release, checks it against `SHA256SUMS` and swaps the running executable. The flag `--experimental-install` is kept as an accepted no-op.
 
 ## crates.io (manual, not part of the workflow)
 

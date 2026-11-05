@@ -253,7 +253,7 @@ fn text(bytes: &[u8]) -> String {
 fn failed(scenario: &Scenario, expect: &str) -> (Sandbox, Server, String) {
     let sandbox = Sandbox::new();
     let server = scenario.start();
-    let out = sandbox.run(&server, &["--experimental-install"]);
+    let out = sandbox.run(&server, &[]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{stderr}");
     assert!(stderr.contains(expect), "{stderr}");
@@ -295,7 +295,7 @@ fn an_older_release_is_not_installed() {
     scenario.tag = "v0.0.1".to_string();
     let sandbox = Sandbox::new();
     let server = scenario.start();
-    let out = sandbox.run(&server, &["--experimental-install"]);
+    let out = sandbox.run(&server, &[]);
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(server.lines().len(), 1);
     assert!(sandbox.untouched());
@@ -305,7 +305,7 @@ fn an_older_release_is_not_installed() {
 fn update_replaces_the_executable_after_verifying_it() {
     let sandbox = Sandbox::new();
     let server = Scenario::new().start();
-    let out = sandbox.run(&server, &["--experimental-install"]);
+    let out = sandbox.run(&server, &[]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "{stderr}");
     assert_eq!(fs::read(&sandbox.exe).unwrap(), NEW_BYTES);
@@ -328,7 +328,7 @@ fn update_replaces_the_executable_after_verifying_it() {
 fn json_reports_the_update() {
     let sandbox = Sandbox::new();
     let server = Scenario::new().start();
-    let out = sandbox.run(&server, &["--experimental-install", "--json"]);
+    let out = sandbox.run(&server, &["--json"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let report: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(report["schema"], 1);
@@ -408,26 +408,114 @@ fn a_tag_that_is_not_a_version_changes_nothing() {
 }
 
 #[test]
-fn update_without_a_flag_requests_nothing_and_changes_nothing() {
+fn the_old_install_flag_still_installs() {
     let sandbox = Sandbox::new();
     let server = Scenario::new().start();
-    let out = sandbox.run(&server, &[]);
-    let stderr = text(&out.stderr);
-    assert_eq!(out.status.code(), Some(1), "{stderr}");
-    assert!(stderr.contains("not ready yet"), "{stderr}");
-    assert!(stderr.contains("install.sh") && stderr.contains("install.ps1"));
-    assert!(server.lines().is_empty(), "{:?}", server.lines());
+    let out = sandbox.run(&server, &["--experimental-install"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(fs::read(&sandbox.exe).unwrap(), NEW_BYTES);
+}
+
+#[test]
+fn check_with_the_old_install_flag_only_checks() {
+    let sandbox = Sandbox::new();
+    let server = Scenario::new().start();
+    let out = sandbox.run(&server, &["--check", "--experimental-install"]);
+    assert_eq!(out.status.code(), Some(10), "{}", text(&out.stderr));
+    assert_eq!(server.lines().len(), 1);
+    assert!(sandbox.untouched());
+}
+
+#[test]
+fn dry_run_shows_the_plan_and_writes_nothing() {
+    let scenario = Scenario::new();
+    let sandbox = Sandbox::new();
+    let server = scenario.start();
+    let out = sandbox.run(&server, &["--dry-run"]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(stdout.contains("dry run"), "{stdout}");
+    assert!(stdout.contains("99.0.0"), "{stdout}");
+    assert!(stdout.contains(&scenario.asset_name()), "{stdout}");
+    assert!(stdout.contains("would replace"), "{stdout}");
+    assert!(
+        stdout.contains(sandbox.exe.file_name().unwrap().to_str().unwrap()),
+        "{stdout}"
+    );
+    assert_eq!(server.lines().len(), 1);
     assert!(sandbox.untouched());
     assert!(!sandbox.leftovers());
 }
 
 #[test]
-fn the_install_flag_cannot_be_combined_with_check() {
+fn dry_run_json_reports_the_plan_without_updating() {
+    let scenario = Scenario::new();
+    let sandbox = Sandbox::new();
+    let server = scenario.start();
+    let out = sandbox.run(&server, &["--dry-run", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["dry_run"], true);
+    assert_eq!(report["updated"], false);
+    assert_eq!(report["latest"], "99.0.0");
+    assert_eq!(report["asset"], scenario.asset_name());
+    assert!(report["executable"].is_string());
+    assert!(report["sha256"].is_null());
+    assert!(sandbox.untouched());
+}
+
+#[test]
+fn dry_run_cannot_be_combined_with_check() {
     let sandbox = Sandbox::new();
     let server = Scenario::new().start();
-    let out = sandbox.run(&server, &["--check", "--experimental-install"]);
+    let out = sandbox.run(&server, &["--check", "--dry-run"]);
     assert_eq!(out.status.code(), Some(2));
     assert!(server.lines().is_empty());
+    assert!(sandbox.untouched());
+}
+
+#[test]
+fn dry_run_on_the_current_version_is_up_to_date() {
+    let mut scenario = Scenario::new();
+    scenario.tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let sandbox = Sandbox::new();
+    let server = scenario.start();
+    let out = sandbox.run(&server, &["--dry-run"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).contains("up to date"));
+    assert!(sandbox.untouched());
+}
+
+#[test]
+fn a_folder_that_cannot_be_written_stops_before_any_download() {
+    let sandbox = Sandbox::new();
+    let mut blocked = sandbox.exe.clone().into_os_string();
+    blocked.push(".new");
+    fs::create_dir(PathBuf::from(blocked)).unwrap();
+    let server = Scenario::new().start();
+    let out = sandbox.run(&server, &[]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("cannot write next to"), "{stderr}");
+    assert!(
+        stderr.contains(sandbox.exe.file_name().unwrap().to_str().unwrap()),
+        "{stderr}"
+    );
+    assert_eq!(server.lines().len(), 1);
+    assert!(sandbox.untouched());
+}
+
+#[test]
+fn a_leftover_old_executable_is_removed_on_the_next_run() {
+    let sandbox = Sandbox::new();
+    let mut old = sandbox.exe.clone().into_os_string();
+    old.push(".old");
+    let old = PathBuf::from(old);
+    fs::write(&old, b"LEFTOVER").unwrap();
+    let server = Scenario::new().start();
+    let out = sandbox.run(&server, &["--check"]);
+    assert_eq!(out.status.code(), Some(10), "{}", text(&out.stderr));
+    assert!(!old.exists());
     assert!(sandbox.untouched());
 }
 

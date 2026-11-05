@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde_json::json;
 
 use crate::config::ApiConfig;
@@ -17,7 +17,7 @@ const NEWER: i32 = 10;
 
 pub struct UpdateOptions {
     pub check: bool,
-    pub install: bool,
+    pub dry_run: bool,
     pub json: bool,
     pub progress: bool,
     pub api_url: Option<String>,
@@ -26,7 +26,7 @@ pub struct UpdateOptions {
 
 struct Installed {
     asset: String,
-    sha256: String,
+    sha256: Option<String>,
     executable: PathBuf,
 }
 
@@ -131,23 +131,37 @@ fn download_verified(
     Ok((bytes, actual))
 }
 
-fn install(client: &mut Client, base: &str, release: &Release) -> Result<Installed, UpdateError> {
-    let target = target::current()?;
-    let name = target.asset_name(&release.version);
-    let (bytes, sha256) = download_verified(client, base, release, &name)?;
-    let binary = archive::extract(target.format, &bytes, target.exe, ARCHIVE_LIMIT)?;
-    let executable = std::env::current_exe()
+fn running_executable() -> Result<PathBuf, UpdateError> {
+    std::env::current_exe()
         .and_then(std::fs::canonicalize)
         .map_err(|error| UpdateError::Replace {
             path: "the running executable".to_string(),
             reason: error.to_string(),
-        })?;
+        })
+}
+
+fn asset_for(release: &Release) -> Result<(target::Target, String), UpdateError> {
+    let target = target::current()?;
+    let name = target.asset_name(&release.version);
+    Ok((target, name))
+}
+
+fn install(
+    client: &mut Client,
+    base: &str,
+    release: &Release,
+    executable: PathBuf,
+) -> Result<Installed, UpdateError> {
+    let (target, name) = asset_for(release)?;
+    replace::check_writable(&executable)?;
+    let (bytes, sha256) = download_verified(client, base, release, &name)?;
+    let binary = archive::extract(target.format, &bytes, target.exe, ARCHIVE_LIMIT)?;
     progress::phase("replacing the executable");
     replace::discard_leftover(&executable);
     replace::replace(&executable, &binary)?;
     Ok(Installed {
         asset: name,
-        sha256,
+        sha256: Some(sha256),
         executable,
     })
 }
@@ -157,6 +171,7 @@ fn print_report(
     current: &str,
     release: &Release,
     newer: bool,
+    dry_run: bool,
     installed: Option<&Installed>,
 ) -> Result<()> {
     if json {
@@ -166,15 +181,23 @@ fn print_report(
             "latest": release.version,
             "tag": release.tag,
             "update_available": newer,
-            "updated": installed.is_some(),
+            "updated": installed.is_some() && !dry_run,
+            "dry_run": dry_run,
             "asset": installed.map(|done| done.asset.clone()),
-            "sha256": installed.map(|done| done.sha256.clone()),
+            "sha256": installed.and_then(|done| done.sha256.clone()),
             "executable": installed.map(|done| done.executable.display().to_string()),
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
+    } else if let Some(done) = installed.filter(|_| dry_run) {
+        println!("dry run: pipetrain {current} -> {}", release.version);
+        println!("asset {}", done.asset);
+        println!("would replace {}", done.executable.display());
+        println!("nothing was downloaded or written");
     } else if let Some(done) = installed {
         println!("updated pipetrain {current} -> {}", release.version);
-        println!("verified {} (sha256 {})", done.asset, done.sha256);
+        if let Some(sha256) = &done.sha256 {
+            println!("verified {} (sha256 {sha256})", done.asset);
+        }
         println!("replaced {}", done.executable.display());
     } else if newer {
         println!("update available: {current} -> {}", release.version);
@@ -185,24 +208,38 @@ fn print_report(
     Ok(())
 }
 
-const NOT_READY: &str = "automatic install is not ready yet, so `pipetrain update` changes nothing. Run `pipetrain update --check` to see whether a newer release exists, then reinstall with install.sh (Linux and macOS) or install.ps1 (Windows) from https://github.com/lucasbp/pipetrain#install. To try the unfinished installer anyway, add --experimental-install.";
-
 pub fn run(opts: UpdateOptions) -> Result<i32> {
-    if !opts.check && !opts.install {
-        bail!(NOT_READY);
-    }
     let base = opts.api_url.as_deref().unwrap_or(API).to_string();
     let current = env!("CARGO_PKG_VERSION");
     let progress = Progress::start(opts.progress);
     progress::phase("checking the latest release");
     let (mut client, release) = fetch_release(&base, opts.verbose)?;
     let newer = Version::parse(&release.version) > Version::parse(current);
-    let installed = if newer && !opts.check {
-        Some(install(&mut client, &base, &release)?)
+    let installed = if newer && opts.dry_run {
+        let (_, asset) = asset_for(&release)?;
+        Some(Installed {
+            asset,
+            sha256: None,
+            executable: running_executable()?,
+        })
+    } else if newer && !opts.check {
+        Some(install(
+            &mut client,
+            &base,
+            &release,
+            running_executable()?,
+        )?)
     } else {
         None
     };
     drop(progress);
-    print_report(opts.json, current, &release, newer, installed.as_ref())?;
+    print_report(
+        opts.json,
+        current,
+        &release,
+        newer,
+        opts.dry_run,
+        installed.as_ref(),
+    )?;
     Ok(if newer && opts.check { NEWER } else { 0 })
 }

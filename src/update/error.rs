@@ -17,6 +17,7 @@ pub enum UpdateError {
     TooLarge { what: String, limit: u64 },
     BadArchive { reason: String },
     Replace { path: String, reason: String },
+    NotWritable { path: String, reason: String },
 }
 
 const MANUAL: &str = "Download the release by hand from https://github.com/lucasbp/pipetrain/releases and check it against SHA256SUMS, or run the install script again.";
@@ -37,6 +38,7 @@ impl UpdateError {
             Self::TooLarge { .. } => "TooLarge",
             Self::BadArchive { .. } => "BadArchive",
             Self::Replace { .. } => "Replace",
+            Self::NotWritable { .. } => "NotWritable",
         }
     }
 }
@@ -89,6 +91,10 @@ impl fmt::Display for UpdateError {
             Self::BadArchive { reason } => write!(
                 f,
                 "the downloaded archive is not usable ({reason}), nothing was changed. Try again, or {MANUAL}"
+            ),
+            Self::NotWritable { path, reason } => write!(
+                f,
+                "cannot write next to {path}: {reason}. Nothing was changed. Run `pipetrain update` with permission to write that folder, or reinstall into a folder you can write to."
             ),
             Self::Replace { path, reason } => write!(
                 f,
