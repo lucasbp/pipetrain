@@ -30,6 +30,8 @@ struct Script {
     tree_status: u16,
     branches: Vec<String>,
     open_prs: Vec<Value>,
+    into_train: Vec<Value>,
+    branch_missing: bool,
     post_status: u16,
     post_message: String,
 }
@@ -67,6 +69,8 @@ impl Script {
             tree_status: 200,
             branches: vec!["main".to_string(), "feat/x".to_string()],
             open_prs: Vec::new(),
+            into_train: Vec::new(),
+            branch_missing: false,
             post_status: 201,
             post_message: String::new(),
         }
@@ -180,8 +184,17 @@ fn respond(script: &Mutex<Script>, line: &str, payload: &str) -> (u16, Value) {
             .collect();
         return (200, Value::Array(names));
     }
+    if line.starts_with("GET /repos/acme/api/git/ref/heads/") {
+        if script.branch_missing {
+            return (404, json!({"message": "Not Found"}));
+        }
+        return (200, json!({"object": {"sha": "c".repeat(40)}}));
+    }
     if line.starts_with("GET /repos/acme/api/pulls?") {
-        return (200, Value::Array(script.open_prs.clone()));
+        if line.contains("&head=") {
+            return (200, Value::Array(script.open_prs.clone()));
+        }
+        return (200, Value::Array(script.into_train.clone()));
     }
     if line == "POST /repos/acme/api/pulls" {
         return (
@@ -1039,6 +1052,133 @@ fn open_pr_skips_prs_that_do_not_target_a_train_branch() {
             .iter()
             .all(|s| s.kind == Kind::Merge)
     );
+}
+
+fn recorded_rig() -> (Rig, Plan) {
+    let mut rig = Rig::new("");
+    rig.script().base = BUNDLE.to_string();
+    rig.script().runs = Vec::new();
+    rig.script().branches = vec!["main".to_string(), BUNDLE.to_string()];
+    rig.store
+        .add_deploy_pr("acme/api", BUNDLE, "acme/api#1")
+        .unwrap();
+    rig.store
+        .add_deploy_pr("acme/api", BUNDLE, "acme/api#2")
+        .unwrap();
+    (rig, plan_of(Vec::new(), Vec::new()))
+}
+
+fn pulls_posted(rig: &Rig) -> usize {
+    rig.lines().iter().filter(|line| *line == PULLS).count()
+}
+
+#[test]
+fn a_run_cut_off_before_open_pr_opens_it_once_on_the_next_run() {
+    let (mut rig, plan) = bundle_rig("");
+    rig.script().branches = vec!["main".to_string(), BUNDLE.to_string()];
+    rig.script().post_status = 500;
+
+    let first = rig.run(&plan, open_pr_settings(), true, true).unwrap();
+
+    assert_eq!(
+        first.statuses(),
+        vec![Status::Done, Status::Done, Status::Failed]
+    );
+    assert_eq!(rig.store.state.deploy_prs.len(), 1);
+
+    let empty = plan_of(Vec::new(), Vec::new());
+    rig.script().post_status = 201;
+    let second = rig.run(&empty, open_pr_settings(), true, true).unwrap();
+
+    let kinds: Vec<Kind> = second.outcome.report.steps.iter().map(|s| s.kind).collect();
+    assert_eq!(kinds, vec![Kind::OpenPr]);
+    assert_eq!(second.step(0).status, Status::Done);
+    assert_eq!(second.step(0).detail, format!("opened {BUNDLE} into main"));
+    let text = rig.body(PULLS)["body"].as_str().unwrap().to_string();
+    assert!(
+        text.contains("acme/api#1") && text.contains("acme/api#2"),
+        "{text}"
+    );
+    assert!(rig.store.state.deploy_prs.is_empty());
+
+    let third = rig.run(&empty, open_pr_settings(), true, true).unwrap();
+    assert!(third.outcome.report.steps.is_empty());
+    assert_eq!(pulls_posted(&rig), 2);
+}
+
+#[test]
+fn a_recorded_bundle_whose_deploy_pr_is_already_open_is_not_duplicated() {
+    let (mut rig, plan) = recorded_rig();
+    rig.script().open_prs = vec![json!({"number": 9})];
+
+    let run = rig.run(&plan, open_pr_settings(), true, true).unwrap();
+
+    assert_eq!(run.step(0).status, Status::Skipped);
+    assert_eq!(run.step(0).detail, "deploy PR already open: acme/api#9");
+    assert_eq!(pulls_posted(&rig), 0);
+    assert!(rig.store.state.deploy_prs.is_empty());
+}
+
+#[test]
+fn a_recorded_bundle_with_a_pr_still_on_the_train_branch_does_not_open() {
+    let (mut rig, plan) = recorded_rig();
+    rig.script().into_train = vec![json!({"number": 5})];
+
+    let run = rig.run(&plan, open_pr_settings(), true, true).unwrap();
+
+    assert_eq!(run.step(0).status, Status::Skipped);
+    assert!(
+        run.step(0).detail.contains("acme/api#5 still targets"),
+        "{}",
+        run.step(0).detail
+    );
+    assert_eq!(pulls_posted(&rig), 0);
+    assert_eq!(rig.store.state.deploy_prs.len(), 1);
+    assert_eq!(run.outcome.code, 0);
+}
+
+#[test]
+fn a_recorded_bundle_whose_branch_is_gone_is_dropped_without_opening() {
+    let (mut rig, plan) = recorded_rig();
+    rig.script().branch_missing = true;
+
+    let run = rig.run(&plan, open_pr_settings(), true, true).unwrap();
+
+    assert_eq!(run.step(0).status, Status::Skipped);
+    assert!(
+        run.step(0).detail.contains("no longer exists"),
+        "{}",
+        run.step(0).detail
+    );
+    assert_eq!(pulls_posted(&rig), 0);
+    assert!(rig.store.state.deploy_prs.is_empty());
+}
+
+#[test]
+fn a_dry_run_plans_the_recorded_bundle_and_writes_nothing() {
+    let (mut rig, plan) = recorded_rig();
+    let settings = Settings {
+        open_pr: true,
+        ..dry()
+    };
+
+    let run = rig.run(&plan, settings, true, true).unwrap();
+
+    assert_eq!(run.outcome.report.steps.len(), 1);
+    assert_eq!(run.step(0).kind, Kind::OpenPr);
+    assert_eq!(run.step(0).status, Status::Planned);
+    assert_eq!(pulls_posted(&rig), 0);
+    assert_eq!(rig.store.state.deploy_prs.len(), 1);
+}
+
+#[test]
+fn without_open_pr_a_recorded_bundle_is_left_alone() {
+    let (mut rig, plan) = recorded_rig();
+
+    let run = rig.go(&plan);
+
+    assert!(run.outcome.report.steps.is_empty());
+    assert_eq!(rig.store.state.deploy_prs.len(), 1);
 }
 
 #[test]

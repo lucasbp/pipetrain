@@ -317,6 +317,18 @@ impl Client {
             .and_then(Value::as_u64))
     }
 
+    pub fn open_pr_into(&mut self, slug: &str, base: &str) -> Result<Option<u64>> {
+        let value = self.rest(&format!(
+            "/repos/{slug}/pulls?state=open&base={}&per_page=1",
+            encode_path(base)
+        ))?;
+        Ok(value
+            .as_array()
+            .and_then(|list| list.first())
+            .and_then(|pr| pr.get("number"))
+            .and_then(Value::as_u64))
+    }
+
     pub fn create_pr(
         &mut self,
         slug: &str,

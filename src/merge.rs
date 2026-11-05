@@ -101,12 +101,21 @@ pub struct Pending {
     pub sha: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeployPr {
+    pub slug: String,
+    pub branch: String,
+    pub ids: Vec<String>,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct State {
     #[serde(default)]
     pub schema: u32,
     #[serde(default)]
     pub pending: Vec<Pending>,
+    #[serde(default)]
+    pub deploy_prs: Vec<DeployPr>,
 }
 
 pub struct Store {
@@ -178,6 +187,34 @@ impl Store {
 
     pub fn remove(&mut self, id: &str) -> Result<()> {
         self.state.pending.retain(|p| p.id != id);
+        self.save()
+    }
+
+    pub fn add_deploy_pr(&mut self, slug: &str, branch: &str, id: &str) -> Result<()> {
+        match self
+            .state
+            .deploy_prs
+            .iter_mut()
+            .find(|found| found.slug == slug && found.branch == branch)
+        {
+            Some(found) => {
+                if !found.ids.iter().any(|known| known == id) {
+                    found.ids.push(id.to_string());
+                }
+            }
+            None => self.state.deploy_prs.push(DeployPr {
+                slug: slug.to_string(),
+                branch: branch.to_string(),
+                ids: vec![id.to_string()],
+            }),
+        }
+        self.save()
+    }
+
+    pub fn remove_deploy_pr(&mut self, slug: &str, branch: &str) -> Result<()> {
+        self.state
+            .deploy_prs
+            .retain(|found| !(found.slug == slug && found.branch == branch));
         self.save()
     }
 }

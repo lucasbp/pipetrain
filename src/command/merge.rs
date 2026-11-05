@@ -430,6 +430,18 @@ fn merge_one(
             ),
         );
     }
+    if env.settings.open_pr
+        && is_stacked(&item.base, &env.cfg.train_prefix)
+        && let Err(error) = store.add_deploy_pr(&slug, &item.base, &item.id)
+    {
+        return stop(
+            report,
+            format!(
+                "merged {}, but the deploy PR could not be recorded: {error:#}",
+                short(&merge_sha)
+            ),
+        );
+    }
     let landed = Landed {
         id: &item.id,
         slug: &slug,
@@ -613,6 +625,31 @@ fn arrange(
             }
         }
     }
+    for recorded in &store.state.deploy_prs {
+        let target = open_target(&recorded.slug, &recorded.branch);
+        if let Some(group) = groups.get_mut(&target) {
+            for id in &recorded.ids {
+                if !group.ids.contains(id) {
+                    group.ids.push(id.clone());
+                }
+            }
+            continue;
+        }
+        report.steps.push(StepReport::new(
+            Kind::OpenPr,
+            &target,
+            Status::Planned,
+            "the last PR of the bundle was merged by an earlier run",
+        ));
+        groups.insert(
+            target,
+            Bundled {
+                slug: recorded.slug.clone(),
+                branch: recorded.branch.clone(),
+                ids: recorded.ids.clone(),
+            },
+        );
+    }
     groups
 }
 
@@ -652,7 +689,7 @@ fn open_deploy_pr(
     bundled: &Bundled,
     client: &mut Client,
     report: &mut StepReport,
-) {
+) -> bool {
     let queued = plan.items.iter().find(|item| {
         item.head == bundled.branch
             && format!("{}/{}", item.org, item.repo).eq_ignore_ascii_case(&bundled.slug)
@@ -660,20 +697,53 @@ fn open_deploy_pr(
     if let Some(item) = queued {
         report.status = Status::Skipped;
         report.detail = format!("the deploy PR {} is already in the queue", item.id);
-        return;
+        return true;
+    }
+    match client.branch_tip(&bundled.slug, &bundled.branch) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            report.status = Status::Skipped;
+            report.detail = format!("the branch {} no longer exists", bundled.branch);
+            return true;
+        }
+        Err(error) => {
+            fail(report, format!("{error:#}"));
+            return false;
+        }
+    }
+    match client.open_pr_into(&bundled.slug, &bundled.branch) {
+        Ok(Some(number)) => {
+            report.status = Status::Skipped;
+            report.detail = format!(
+                "{}#{number} still targets {}: merge or retarget it first",
+                bundled.slug, bundled.branch
+            );
+            return false;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            fail(report, format!("{error:#}"));
+            return false;
+        }
     }
     let base = match resolve_base(env, plan, bundled, client) {
         Ok(base) => base,
-        Err(error) => return fail(report, format!("{error:#}")),
+        Err(error) => {
+            fail(report, format!("{error:#}"));
+            return false;
+        }
     };
     match client.open_pr_from(&bundled.slug, &bundled.branch, &base) {
         Ok(Some(number)) => {
             report.status = Status::Skipped;
             report.detail = format!("deploy PR already open: {}#{number}", bundled.slug);
-            return;
+            return true;
         }
         Ok(None) => {}
-        Err(error) => return fail(report, format!("{error:#}")),
+        Err(error) => {
+            fail(report, format!("{error:#}"));
+            return false;
+        }
     }
     let ids: Vec<&str> = bundled.ids.iter().map(String::as_str).collect();
     let body = deploy_pr_body(&base, &ids);
@@ -687,12 +757,17 @@ fn open_deploy_pr(
         Ok(PrWrite::Created) => {
             report.status = Status::Done;
             report.detail = format!("opened {} into {base}", bundled.branch);
+            true
         }
         Ok(PrWrite::AlreadyExists) => {
             report.status = Status::Skipped;
             report.detail = "deploy PR already open".to_string();
+            true
         }
-        Err(error) => fail(report, error.to_string()),
+        Err(error) => {
+            fail(report, error.to_string());
+            false
+        }
     }
 }
 
@@ -780,7 +855,18 @@ pub fn merge_plan(
                 },
                 Kind::Gate | Kind::Wait => gate_step(&env, hooks, &mut step),
                 Kind::OpenPr => match bundles.get(&step.target) {
-                    Some(bundled) => open_deploy_pr(&env, plan, bundled, client, &mut step),
+                    Some(bundled) => {
+                        let settled = open_deploy_pr(&env, plan, bundled, client, &mut step);
+                        if settled
+                            && let Err(error) =
+                                store.remove_deploy_pr(&bundled.slug, &bundled.branch)
+                        {
+                            stop(
+                                &mut step,
+                                format!("cannot update the merge state: {error:#}"),
+                            );
+                        }
+                    }
                     None => fail(&mut step, "the bundle is not in this run"),
                 },
             }
