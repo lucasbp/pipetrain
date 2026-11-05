@@ -18,6 +18,8 @@ const DEPLOY: &str = "deploy/30-10-2026";
 const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 const REF: &str = "GET /repos/acme/api-core/git/ref/heads/master";
 const CREATE: &str = "POST /repos/acme/api-core/git/refs";
+const BRANCH: &str = "deploy/30-10-2026-master";
+const PROBE: &str = "GET /repos/acme/api-core/git/ref/heads/deploy/30-10-2026-master";
 const FIRST: &str = "PATCH /repos/acme/api-core/pulls/1";
 const SECOND: &str = "PATCH /repos/acme/api-core/pulls/2";
 
@@ -39,6 +41,7 @@ fn pr(number: u64, author: &str) -> Pr {
         author: author.to_string(),
         failed_checks: Vec::new(),
         mergeable_unknown: false,
+        behind: false,
         files: Vec::new(),
         files_complete: true,
         labels: Vec::new(),
@@ -328,7 +331,9 @@ impl Server {
 }
 
 fn happy(line: &str) -> (u16, Value) {
-    if line.starts_with("GET ") {
+    if line == PROBE {
+        (404, json!({"message": "Not Found"}))
+    } else if line.starts_with("GET ") {
         (200, json!({"object": {"sha": SHA}}))
     } else if line.starts_with("POST ") {
         (201, json!({}))
@@ -382,7 +387,12 @@ fn bundle_retargets_only_visible_prs() {
     assert!(!outcome.failed);
     assert_eq!(
         server.lines(),
-        vec![REF.to_string(), CREATE.to_string(), FIRST.to_string()]
+        vec![
+            REF.to_string(),
+            PROBE.to_string(),
+            CREATE.to_string(),
+            FIRST.to_string()
+        ]
     );
     assert!(!server.lines().contains(&SECOND.to_string()));
     let actions: Vec<(Kind, &str, Status)> = outcome.report.bundles[0]
@@ -393,7 +403,7 @@ fn bundle_retargets_only_visible_prs() {
     assert_eq!(
         actions,
         vec![
-            (Kind::CreateBranch, DEPLOY, Status::Done),
+            (Kind::CreateBranch, BRANCH, Status::Done),
             (Kind::Retarget, "acme/api-core#1", Status::Done),
         ]
     );
@@ -413,6 +423,7 @@ fn bundle_without_a_filter_retargets_everything() {
         server.lines(),
         vec![
             REF.to_string(),
+            PROBE.to_string(),
             CREATE.to_string(),
             FIRST.to_string(),
             SECOND.to_string()

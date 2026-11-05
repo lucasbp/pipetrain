@@ -280,6 +280,7 @@ fn pr(slug: &str, number: u64) -> Pr {
         author: String::new(),
         failed_checks: Vec::new(),
         mergeable_unknown: false,
+        behind: false,
         files: Vec::new(),
         files_complete: true,
         labels: Vec::new(),

@@ -16,7 +16,13 @@
 | `# bundle <org>/<repo>: <N> PRs into <base> could be 1 deploy (saves <N-1>): <PR ids>` | Informative. One per suggested deploy branch. The runner skips it like any `#` line. |
 | `# conflict: <PR id> and <PR id> both change <N file(s)> (<kind>)` | Informative. Two PRs of the same repo change the same files. `<N file(s)>` reads `1 file` or `N files`, and `<kind>` is `lockfile`, `sql`, `generated` or `other`. The runner skips it like any `#` line. |
 | `# wait: package <pkg> <version> from <PR ids> must be published before <org>/<repo>#<n>` | The PRs after `from` publish `<pkg>` and the PR in the `merge:` line right below bumps it to `<version>`. `<version>` is omitted when it is not readable: `# wait: package <pkg> from <PR ids> must be published before <org>/<repo>#<n>`. The runner stops there until that version of the package is in the feed. pipetrain does not query the feed. A runner that does not understand the line ignores it like any `#` line. |
+| `# step <n>` | Informative. Printed right before each PR, before its `# lane` and `# wait` lines: the `stage` of the PR in the plan, starting at 1. PRs with the same step can merge at the same time. |
+| `# lane <n>` | Informative. Printed right after `# step`, only for a PR that is in a lane: the 1-based index of the PR in the plan's `lanes`. A gate PR has no lane and gets no `# lane` line. |
 | `# ...` | Any line that starts with `#` is a comment. Skip it. |
+
+## Step and lane comments
+
+Every PR is preceded by `# step <n>` and, when it has a lane, `# lane <n>`, so a runner can run lanes side by side. The numbers are the `stage` and `lane` of the plan's `items` (see `docs/plan-json.md`). They are additions: the 0.4.0 queue has these lines and the earlier queue does not, and every `merge:` and `# pause` line keeps its place and text. The runner skips them like any `#` line. Order of the lines for one PR: `# gate` and `# pause` (late gates only), `# step`, `# lane`, the `# wait` lines, then `merge:`.
 
 ## Wait comments
 
@@ -48,6 +54,7 @@ The rule "gate PRs first" has one exception. A gate PR that must come after anot
 ```
 # gate: <org>/<repo>#<n> waits for <PR ids> (<rule>: <detail>)
 # pause: confirm DDL/infra before continuing
+# step <n>
 # wait: package <pkg> <version> from <PR ids> must be published before <org>/<repo>#<n>
 merge:<org>/<repo>#<n>
 ```
@@ -55,10 +62,15 @@ merge:<org>/<repo>#<n>
 The `# wait` line is optional: it appears only when the gate bumps a package that another PR of the queue publishes. The ids after `waits for` are the predecessors by those three rules, sorted and without repeats. The detail lists each distinct `rule: text` pair joined by `; `, where `text` is the package name when the edge has one, else the reason of the edge. The pause line is never printed twice in a row: when the queue has early gates and the first PR after them is a late gate, the late gate's own pause serves. Every other `merge:` line keeps its place relative to the other non-gate PRs. Example:
 
 ```
+# step 1
+# lane 1
 merge:acme/kit#6
+# step 1
+# lane 2
 merge:acme/other#7
 # gate: acme/web#5 waits for acme/kit#6 (package: @acme/kit)
 # pause: confirm DDL/infra before continuing
+# step 2
 # wait: package @acme/kit 1.1.0 from acme/kit#6 must be published before acme/web#5
 merge:acme/web#5
 ```

@@ -34,6 +34,7 @@ fn pr(slug: &str, number: u64, head: &str, base: &str, labels: &[&str]) -> Pr {
         author: String::new(),
         failed_checks: Vec::new(),
         mergeable_unknown: false,
+        behind: false,
         files: Vec::new(),
         files_complete: true,
         labels: labels.iter().map(ToString::to_string).collect(),

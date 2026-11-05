@@ -31,6 +31,7 @@ fn pr_with(failed: &[&str]) -> Pr {
         failed_checks: failed.iter().map(|n| n.to_string()).collect(),
         conflicting: false,
         mergeable_unknown: false,
+        behind: false,
         files: Vec::new(),
         files_complete: true,
         labels: Vec::new(),

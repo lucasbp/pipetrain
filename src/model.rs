@@ -105,6 +105,7 @@ pub struct Pr {
     pub failed_checks: Vec<String>,
     pub conflicting: bool,
     pub mergeable_unknown: bool,
+    pub behind: bool,
     pub files: Vec<ChangedFile>,
     pub files_complete: bool,
     pub labels: Vec<String>,
@@ -170,6 +171,8 @@ impl Pr {
         }
         if self.conflicting {
             reasons.push("merge conflict".to_string());
+        } else if self.behind {
+            reasons.push("branch behind its base, update it".to_string());
         } else if self.mergeable_unknown {
             reasons.push("mergeability unknown, retry in a minute".to_string());
         }

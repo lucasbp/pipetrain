@@ -36,9 +36,9 @@ When a PR of the group already has the train branch as its head (`existing_train
 
 ## How to apply it by hand
 
-`plan` only plans. Steps 1 and 2 below can be done with `pipetrain bundle --apply` (a dry run without `--apply`; see [Applying the bundle suggestion](../README.md#applying-the-bundle-suggestion)). Step 3 can be done with [`pipetrain merge --apply`](merge.md); opening the deploy PR stays manual. For each entry under `BUNDLES`:
+`plan` only plans. Steps 1 and 2 below can be done with `pipetrain bundle --apply`, and the opening of the deploy PR in step 4 with `pipetrain bundle --apply --open-pr` (a dry run without `--apply`; see [Applying the bundle suggestion](../README.md#applying-the-bundle-suggestion)). Step 3 can be done with [`pipetrain merge --apply`](merge.md). For each entry under `BUNDLES`:
 
-1. Create the branch named in the suggestion (`deploy/<date>`, or `deploy/<date>-<base>` when the repo has bundles on more than one base) from the base.
+1. Create the branch named in the suggestion (always `deploy/<date>-<base>`) from the base. If a branch with that name already exists, it must come from that base: it has to contain the tip of the base.
 2. Change the base of each PR listed under `retarget` to that branch.
 3. Merge those PRs into the branch, in the order the plan gives.
 4. Open one PR from the branch to the original base, and merge it. That is the one deploy.

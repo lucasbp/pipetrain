@@ -569,6 +569,13 @@ struct BundleArgs {
     )]
     yes: bool,
 
+    #[arg(
+        long,
+        requires = "apply",
+        help = "After the last retarget of each bundle, open the PR deploy branch -> base, without merging it"
+    )]
+    open_pr: bool,
+
     #[arg(long, help = "Print the report as JSON")]
     json: bool,
 
@@ -852,6 +859,7 @@ fn run_bundle(args: BundleArgs) -> Result<i32> {
         },
         apply: args.apply,
         yes: args.yes,
+        open_pr: args.open_pr,
     })
 }
 

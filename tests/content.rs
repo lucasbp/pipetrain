@@ -24,6 +24,7 @@ fn pr(slug: &str, number: u64, head: &str, base: &str, paths: &[&str]) -> Pr {
         author: String::new(),
         failed_checks: Vec::new(),
         mergeable_unknown: false,
+        behind: false,
         files: paths
             .iter()
             .map(|path| ChangedFile {

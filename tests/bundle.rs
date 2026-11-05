@@ -38,7 +38,7 @@ fn three_prs_into_master_become_one_deploy() {
     let b = &bundles[0];
     assert_eq!(b.repo, "acme/api-core");
     assert_eq!(b.base, "master");
-    assert_eq!(b.branch, DEPLOY);
+    assert_eq!(b.branch, "deploy/30-10-2026-master");
     assert_eq!(b.existing_train_pr, None);
     assert_eq!(b.retarget.len(), 3);
     assert_eq!(b.deploys_now, 3);

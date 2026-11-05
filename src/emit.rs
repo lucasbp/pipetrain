@@ -68,7 +68,9 @@ fn wait_lines(plan: &Plan, item: &Item) -> Vec<String> {
 }
 
 fn item_lines(plan: &Plan, item: &Item) -> Vec<String> {
-    let mut lines = wait_lines(plan, item);
+    let mut lines = vec![format!("# step {}", item.stage)];
+    lines.extend(item.lane.map(|lane| format!("# lane {lane}")));
+    lines.extend(wait_lines(plan, item));
     lines.push(format!("merge:{}", item.id));
     lines
 }
