@@ -19,6 +19,7 @@ pub mod live;
 pub mod log;
 pub mod manifest;
 pub mod mcp;
+pub mod merge;
 pub mod model;
 pub mod plan;
 pub mod planner;

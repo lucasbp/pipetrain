@@ -9,7 +9,7 @@ use anyhow::Result;
 use chrono::Utc;
 use serde_json::{Value, json};
 
-use crate::config::ApiConfig;
+use crate::config::{ApiConfig, Config};
 use crate::elapsed;
 use crate::github::{ApiError, Client, probe_gh, resolve};
 use crate::hint::Os;
@@ -160,6 +160,9 @@ pub fn gather_with(
     let org_checks = rest.split_off(HEAD_CHECKS);
     checks.extend(rest);
     checks.push(check::config(&loaded.state));
+    let searched = Config::search_paths();
+    let existing: Vec<PathBuf> = searched.iter().filter(|p| p.is_file()).cloned().collect();
+    checks.push(check::configs(&searched, &existing, config));
     checks.push(check::profile(&loaded.profile));
     checks.extend(org_checks);
     checks

@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::io::{BufRead, IsTerminal, Write};
 use std::time::{Duration, Instant};
 
@@ -237,9 +238,44 @@ fn left_alone_note(ids: &[String]) -> Option<String> {
     ))
 }
 
-fn assemble(bundle: &Bundle, found: Retargets, client: &mut Client) -> Result<BundleReport> {
+fn reject_collisions(plan: &Plan) -> Result<()> {
+    let mut seen: BTreeMap<(String, String), &Bundle> = BTreeMap::new();
+    for bundle in &plan.bundles {
+        let key = (bundle.repo.to_lowercase(), bundle.branch.to_lowercase());
+        if let Some(other) = seen.insert(key, bundle) {
+            bail!(
+                "refusing to bundle {}: the bases `{}` and `{}` would both use the branch `{}`; rename one base or bundle them on separate days with --date",
+                bundle.repo,
+                other.base,
+                bundle.base,
+                bundle.branch
+            );
+        }
+    }
+    Ok(())
+}
+
+fn per_base_note(plan: &Plan, bundle: &Bundle) -> Option<String> {
+    let siblings = plan
+        .bundles
+        .iter()
+        .filter(|other| other.repo.eq_ignore_ascii_case(&bundle.repo))
+        .count();
+    (siblings > 1).then(|| {
+        format!(
+            "{siblings} bundles in this repo on different bases, so each branch is named after its base"
+        )
+    })
+}
+
+fn assemble(
+    bundle: &Bundle,
+    found: Retargets,
+    client: &mut Client,
+    per_base: Option<String>,
+) -> Result<BundleReport> {
     let mut actions = Vec::new();
-    let mut notes = Vec::new();
+    let mut notes: Vec<String> = per_base.into_iter().collect();
     match &bundle.existing_train_pr {
         Some(pr) => {
             notes.push(format!(
@@ -279,6 +315,7 @@ fn assemble(bundle: &Bundle, found: Retargets, client: &mut Client) -> Result<Bu
 }
 
 fn prepare(plan: &Plan, client: &mut Client) -> Result<Report> {
+    reject_collisions(plan)?;
     let mut drafts = Vec::new();
     for bundle in &plan.bundles {
         let found = retargets(plan, bundle)?;
@@ -293,7 +330,12 @@ fn prepare(plan: &Plan, client: &mut Client) -> Result<Report> {
     }
     let mut bundles = Vec::new();
     for (bundle, found) in drafts {
-        bundles.push(assemble(bundle, found, client)?);
+        bundles.push(assemble(
+            bundle,
+            found,
+            client,
+            per_base_note(plan, bundle),
+        )?);
     }
     Ok(Report {
         schema: 1,

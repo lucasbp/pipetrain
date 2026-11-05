@@ -1,3 +1,4 @@
+use std::thread::sleep;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -8,6 +9,7 @@ use ureq::{Agent, Body};
 use super::error::ApiError;
 use super::guard::Guard;
 use super::reply::{Rate, Reply};
+use super::retry::Retry;
 use crate::cache::Cache;
 use crate::config::ApiConfig;
 
@@ -59,6 +61,8 @@ pub struct Client {
     token: String,
     base: String,
     guard: Guard,
+    retry: Retry,
+    retry_after: Option<Duration>,
     pub(super) cache: Cache,
 }
 
@@ -78,7 +82,17 @@ impl Client {
     pub fn new(token: String, cfg: &ApiConfig, verbose: bool) -> Self {
         let env = std::env::var(API_ENV).ok();
         let base = api_override(env.as_deref());
-        Self::with_base_url(token, cfg, verbose, base.unwrap_or(API))
+        let client = Self::with_base_url(token, cfg, verbose, base.unwrap_or(API));
+        if base.is_some() {
+            client
+        } else {
+            client.with_retry(Retry::standard())
+        }
+    }
+
+    pub fn with_retry(mut self, retry: Retry) -> Self {
+        self.retry = retry;
+        self
     }
 
     #[doc(hidden)]
@@ -104,6 +118,8 @@ impl Client {
             token,
             base: base.trim_end_matches('/').to_string(),
             guard: Guard::new(cfg, verbose),
+            retry: Retry::off(),
+            retry_after: None,
             cache: Cache::disabled(),
         }
     }
@@ -132,6 +148,12 @@ impl Client {
     fn read(&mut self, mut response: Response<Body>) -> Reply {
         let status = response.status().as_u16();
         let rate = Rate::from_headers(response.headers());
+        self.retry_after = response
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .map(Duration::from_secs);
         if let Some(left) = rate.remaining {
             self.guard.remaining.insert(rate.resource.clone(), left);
         }
@@ -139,20 +161,49 @@ impl Client {
         Reply { status, rate, body }
     }
 
+    fn call_read(
+        &mut self,
+        resource: &str,
+        label: &str,
+        send: &dyn Fn(&Agent) -> Result<Response<Body>, ureq::Error>,
+    ) -> Result<Reply, ApiError> {
+        let mut retried = 0;
+        loop {
+            self.guard.before(resource, label)?;
+            let reply = match send(&self.agent) {
+                Ok(response) => self.read(response),
+                Err(error) => return Err(transport(error, label).redacted(&self.token)),
+            };
+            let Some(cause) = Retry::cause(&reply, self.retry_after) else {
+                return Ok(reply);
+            };
+            let Some(wait) = self.retry.wait(retried, self.retry_after) else {
+                return Ok(reply);
+            };
+            retried += 1;
+            crate::progress::line(&format!(
+                "GitHub {} for {label}: retrying in {:.1}s (retry {retried} of {})",
+                cause.describe(),
+                wait.as_secs_f64(),
+                self.retry.max_retries
+            ));
+            sleep(wait);
+        }
+    }
+
     pub fn get(&mut self, path: &str) -> Result<Reply, ApiError> {
-        self.guard.before("core", &format!("GET {path}"))?;
-        let mut request = self
-            .agent
-            .get(format!("{}{path}", self.base))
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28");
-        if !self.token.is_empty() {
-            request = request.header("Authorization", format!("Bearer {}", self.token));
-        }
-        match request.call() {
-            Ok(response) => Ok(self.read(response)),
-            Err(error) => Err(transport(error, &format!("GET {path}")).redacted(&self.token)),
-        }
+        let url = format!("{}{path}", self.base);
+        let token = self.token.clone();
+        self.call_read("core", &format!("GET {path}"), &move |agent| {
+            let mut request = agent
+                .get(&url)
+                .header("Accept", "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", "2022-11-28");
+            if !token.is_empty() {
+                request = request.header("Authorization", format!("Bearer {token}"));
+            }
+            request.call()
+        })
     }
 
     pub fn download(&mut self, url: &str, limit: u64) -> Result<Vec<u8>, Download> {
@@ -237,6 +288,18 @@ impl Client {
         self.finish(result, "POST", path)
     }
 
+    pub fn put_json(&mut self, path: &str, body: &Value) -> Result<Reply, ApiError> {
+        self.guard.before("core", &format!("PUT {path}"))?;
+        let result = self
+            .agent
+            .put(format!("{}{path}", self.base))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send_json(body);
+        self.finish(result, "PUT", path)
+    }
+
     pub fn patch_json(&mut self, path: &str, body: &Value) -> Result<Reply, ApiError> {
         self.guard.before("core", &format!("PATCH {path}"))?;
         let result = self
@@ -250,17 +313,16 @@ impl Client {
     }
 
     pub fn query(&mut self, label: &str, query: &str, variables: Value) -> Result<Reply, ApiError> {
-        self.guard.before("graphql", &format!("GRAPHQL {label}"))?;
-        let result = self
-            .agent
-            .post(format!("{}/graphql", self.base))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .header("Accept", "application/vnd.github+json")
-            .send_json(json!({ "query": query, "variables": variables }));
-        match result {
-            Ok(response) => Ok(self.read(response)),
-            Err(error) => Err(transport(error, &format!("GRAPHQL {label}")).redacted(&self.token)),
-        }
+        let url = format!("{}/graphql", self.base);
+        let token = self.token.clone();
+        let body = json!({ "query": query, "variables": variables });
+        self.call_read("graphql", &format!("GRAPHQL {label}"), &move |agent| {
+            agent
+                .post(&url)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("Accept", "application/vnd.github+json")
+                .send_json(&body)
+        })
     }
 
     pub fn rest(&mut self, path: &str) -> Result<Value> {

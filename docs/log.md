@@ -25,7 +25,7 @@ One JSON object per run, one line each:
 |---|---|
 | `time` | UTC time of the end of the run, to the second. |
 | `version` | pipetrain version. |
-| `command` | Name of the subcommand only: `plan`, `bundle`, `doctor`, `profiles`, `orgs`, `order`, `init`, `feed`, `bump` or `update`. |
+| `command` | Name of the subcommand only: `plan`, `bundle`, `merge`, `doctor`, `profiles`, `orgs`, `order`, `init`, `feed`, `bump` or `update`. |
 | `exit` | Exit code of the run. |
 | `error` | Type of the error that ended the run: `ApiError`, `UpdateError` or `Other`. `null` when there was no error. |
 | `variant` | Name of the variant of a typed error, for example `RateLimited`. `null` for `Other` and when there was no error. |

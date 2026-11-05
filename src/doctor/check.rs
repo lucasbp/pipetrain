@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -141,6 +141,69 @@ pub fn config(state: &ConfigState) -> Check {
             ),
         ),
         ConfigState::Invalid(message) => Check::fail("config", message.clone(), None),
+    }
+}
+
+fn shown(path: &Path) -> String {
+    std::path::absolute(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .display()
+        .to_string()
+}
+
+fn shown_list(paths: &[&PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|p| shown(p))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+pub fn configs(searched: &[PathBuf], existing: &[PathBuf], explicit: Option<&Path>) -> Check {
+    if let Some(chosen) = explicit {
+        let chosen_text = shown(chosen);
+        let others: Vec<&PathBuf> = existing
+            .iter()
+            .filter(|p| shown(p) != chosen_text)
+            .collect();
+        if others.is_empty() {
+            return Check::ok("configs", format!("{chosen_text} (chosen with --config)"));
+        }
+        return Check::ok(
+            "configs",
+            format!(
+                "{chosen_text} (chosen with --config); also found but ignored: {}",
+                shown_list(&others)
+            ),
+        );
+    }
+    let order = searched
+        .iter()
+        .map(|p| shown(p))
+        .collect::<Vec<_>>()
+        .join(", then ");
+    match existing {
+        [] => Check::ok(
+            "configs",
+            format!("no config file in the places searched: {order}"),
+        ),
+        [only] => Check::ok("configs", format!("{} (the only one found)", shown(only))),
+        [first, rest @ ..] => {
+            let ignored: Vec<&PathBuf> = rest.iter().collect();
+            Check::warn(
+                "configs",
+                format!(
+                    "{} configs found. Used: {} (first match; the search order is {order}). Ignored: {}",
+                    existing.len(),
+                    shown(first),
+                    shown_list(&ignored)
+                ),
+                Some(
+                    "Pass --config PATH to choose one on purpose, or remove the file you do not want."
+                        .to_string(),
+                ),
+            )
+        }
     }
 }
 

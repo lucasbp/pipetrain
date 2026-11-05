@@ -12,6 +12,7 @@ use pipetrain::command::bump::{self, BumpOptions, Level as BumpLevel};
 use pipetrain::command::feed::{self, FeedOptions, WaitOptions};
 use pipetrain::command::init::{self, InitOptions};
 use pipetrain::command::log::{self, LogOptions};
+use pipetrain::command::merge::{self, MergeOptions};
 use pipetrain::command::order::{self, OrderOptions};
 use pipetrain::command::orgs::{self, OrgsOptions};
 use pipetrain::command::profiles::{self, ProfilesOptions};
@@ -51,6 +52,7 @@ fn suppression(cli: &Cli) -> Suppress {
     let (json, emit_queue, is_update) = match &cli.command {
         Command::Plan(args) => (args.json, args.emit.is_some(), false),
         Command::Bundle(args) => (args.json, false, false),
+        Command::Merge(args) => (args.json, false, false),
         Command::Doctor(args) => (args.json, false, false),
         Command::Feed(args) => (args.json, false, false),
         Command::Bump(args) => (args.json, false, false),
@@ -74,6 +76,11 @@ enum Command {
         about = "Writes to GitHub only with --apply: creates the deploy branch of each bundle and retargets its PRs"
     )]
     Bundle(BundleArgs),
+
+    #[command(
+        about = "Merges the PRs of the plan one at a time, waiting for each deploy; only with --apply, without it nothing is written"
+    )]
+    Merge(MergeArgs),
 
     #[command(
         about = "Read-only: checks the token, the API, the rate limit, the config and the orgs"
@@ -619,6 +626,141 @@ struct BundleArgs {
 }
 
 #[derive(clap::Args)]
+struct MergeArgs {
+    #[arg(
+        help = "PRs to merge as org/repo#123 or repo#123 (the org is searched in the profile's orgs); without any, today's train is discovered"
+    )]
+    prs: Vec<String>,
+
+    #[arg(
+        long,
+        conflicts_with = "prs",
+        help = "Look at every approved open PR in the orgs, whatever its branch"
+    )]
+    all: bool,
+
+    #[arg(long, help = "Show only PRs by the token's own login")]
+    mine: bool,
+
+    #[arg(
+        long = "author",
+        value_name = "LOGIN",
+        help = "Show only PRs by this author; repeatable, @me is you"
+    )]
+    authors: Vec<String>,
+
+    #[arg(
+        long,
+        conflicts_with_all = ["mine", "authors"],
+        help = "Ignore the authors set in the config and show every author"
+    )]
+    all_authors: bool,
+
+    #[arg(
+        long,
+        help = "Merge the PRs one at a time, waiting for each deploy; without it nothing is written"
+    )]
+    apply: bool,
+
+    #[arg(
+        long,
+        requires = "apply",
+        help = "Do not ask for confirmation before merging; gates still ask (see --gates-confirmed)"
+    )]
+    yes: bool,
+
+    #[arg(
+        long,
+        requires = "apply",
+        help = "Treat every DDL/infra gate and unpublished package wait as already done by you; without it each one asks, and stops when there is no terminal"
+    )]
+    gates_confirmed: bool,
+
+    #[arg(
+        long,
+        requires = "apply",
+        help = "Merge even though the plan has open questions (the default stops before merging anything)"
+    )]
+    allow_questions: bool,
+
+    #[arg(
+        long,
+        value_parser = ["merge", "squash", "rebase"],
+        help = "How to merge (default: merge.method in the config, then merge)"
+    )]
+    method: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "MINUTES",
+        help = "How long to wait for each deploy, for every repo (default: merge.timeout_minutes and merge.repo_timeout_minutes in the config)"
+    )]
+    timeout_minutes: Option<u64>,
+
+    #[arg(
+        long,
+        value_name = "FILE",
+        help = "Where the resume state is kept (default: the user state dir, pipetrain/merge-state.json)"
+    )]
+    state: Option<PathBuf>,
+
+    #[arg(long, help = "Print the report as JSON")]
+    json: bool,
+
+    #[arg(
+        long,
+        help = "Config file (default: ./pipetrain.toml, then the user config dir)"
+    )]
+    config: Option<PathBuf>,
+
+    #[arg(
+        long,
+        help = "Profile to use; without it the folder, the default or the only profile decides"
+    )]
+    profile: Option<String>,
+
+    #[arg(
+        long = "org",
+        help = "Org to look at, overrides the profile's orgs; repeatable"
+    )]
+    orgs: Vec<String>,
+
+    #[arg(
+        long,
+        help = "Train date instead of today: the config's train_date_format (default dd-mm-yyyy) or ISO yyyy-mm-dd"
+    )]
+    date: Option<String>,
+
+    #[arg(long, help = "Log every API request to stderr")]
+    verbose: bool,
+
+    #[arg(
+        long,
+        conflicts_with = "refresh",
+        help = "Do not read or write the local cache of data that never changes for a sha"
+    )]
+    no_cache: bool,
+
+    #[arg(
+        long,
+        help = "Ignore cached data and fetch it again, then rewrite the cache"
+    )]
+    refresh: bool,
+
+    #[arg(long, help = "Do not draw the progress indicator on stderr")]
+    no_progress: bool,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value = "auto",
+        conflicts_with = "json",
+        help = "Colors: auto (only on a terminal, honors NO_COLOR), always, never"
+    )]
+    color: clap::ColorChoice,
+}
+
+#[derive(clap::Args)]
 struct DoctorArgs {
     #[arg(
         long,
@@ -713,6 +855,35 @@ fn run_bundle(args: BundleArgs) -> Result<i32> {
     })
 }
 
+fn run_merge(args: MergeArgs) -> Result<i32> {
+    apply_color(args.color);
+    let progress = pipetrain::progress::detect(args.no_progress, args.json, false);
+    merge::run(MergeOptions {
+        plan: PlanOptions {
+            prs: args.prs,
+            all: args.all,
+            json: args.json,
+            emit: None,
+            config: args.config,
+            profile: args.profile,
+            orgs: args.orgs,
+            authors: AuthorFilter::from_flags(args.mine, args.authors, args.all_authors),
+            date: args.date,
+            verbose: args.verbose,
+            cache: CacheMode::from_flags(args.no_cache, args.refresh),
+            progress,
+            check_feeds: true,
+        },
+        apply: args.apply,
+        yes: args.yes,
+        gates_confirmed: args.gates_confirmed,
+        allow_questions: args.allow_questions,
+        method: args.method,
+        timeout_minutes: args.timeout_minutes,
+        state: args.state,
+    })
+}
+
 fn run_bump(args: BumpArgs) -> Result<i32> {
     apply_color(args.color);
     let progress = pipetrain::progress::detect(args.no_progress, args.json, false);
@@ -754,6 +925,7 @@ fn run_command(command: Command) -> Result<i32> {
         Command::Doctor(args) => run_doctor(args),
         Command::Plan(args) => run_plan(args),
         Command::Bundle(args) => run_bundle(args),
+        Command::Merge(args) => run_merge(args),
         Command::Profiles(args) => profiles::run(ProfilesOptions {
             config: args.config,
         }),
@@ -818,6 +990,7 @@ fn command_name(command: &Command) -> Option<&'static str> {
     Some(match command {
         Command::Plan(_) => "plan",
         Command::Bundle(_) => "bundle",
+        Command::Merge(_) => "merge",
         Command::Doctor(_) => "doctor",
         Command::Profiles(_) => "profiles",
         Command::Orgs(_) => "orgs",
@@ -834,6 +1007,7 @@ fn config_path(command: &Command) -> Option<PathBuf> {
     match command {
         Command::Plan(args) => args.config.clone(),
         Command::Bundle(args) => args.config.clone(),
+        Command::Merge(args) => args.config.clone(),
         Command::Doctor(args) => args.config.clone(),
         Command::Profiles(args) => args.config.clone(),
         Command::Orgs(args) => args.config.clone(),

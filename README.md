@@ -2,7 +2,7 @@
 
 pipetrain is a command-line tool that plans the order in which pull requests should merge across several repositories. It reads GitHub, builds a dependency graph from what it finds, and prints the order: what can merge at the same time, what has to wait for what, and why.
 
-It is read-only by default. It never merges, pushes or comments, and it stores nothing but a cache and, only if you turn it on, a [local usage log](#local-usage-log). The only command that writes to GitHub is `pipetrain bundle --apply`, which creates a deploy branch and changes the base of the PRs bundled into it. A `go` command that would execute a whole plan does not exist yet.
+It is read-only by default. It never pushes or comments, and it stores nothing but a cache, the resume state of `merge` and, only if you turn it on, a [local usage log](#local-usage-log). Only two commands write to GitHub, both only with `--apply`: `pipetrain bundle --apply` creates a deploy branch and changes the base of the PRs bundled into it, and `pipetrain merge --apply` merges the PRs of the plan one at a time, waiting for each deploy.
 
 ## Requirements
 
@@ -107,7 +107,7 @@ The token is used in memory for the run. It is never written to disk, to the con
 pipetrain doctor [--config <path>] [--profile <name>] [--org <org>]... [--json] [--color auto|always|never]
 ```
 
-`doctor` runs six read-only checks, one line each. It sends only `GET` requests and GraphQL queries, installs nothing, changes nothing and never prints the token.
+`doctor` runs seven read-only checks, one line each. It sends only `GET` requests and GraphQL queries, installs nothing, changes nothing and never prints the token.
 
 | Check | What it looks at |
 |---|---|
@@ -115,6 +115,7 @@ pipetrain doctor [--config <path>] [--profile <name>] [--org <org>]... [--json] 
 | `api` | Whether GitHub accepts the token: a GraphQL `viewer` query. Shows the login. |
 | `rate` | Your REST requests left (`GET /rate_limit`). Warns under 500. |
 | `config` | Whether a config file was found, and whether it parses. |
+| `configs` | Every config file found in the places searched, which one won and why. Warns when there is more than one, and says how to choose on purpose (`--config`). |
 | `profile` | Which [profile](#profiles) applies from here and why, or what is wrong: an unknown `--profile`, or no profile that can be chosen. |
 | `org:<name>` | One line per org, from the profile's `orgs` or `--org`: visible or not. Warns when no private repos come back, which is how SAML SSO usually shows up. That is a heuristic: an org with no private repos gets the same warning. |
 
@@ -125,9 +126,10 @@ Each line starts with a status: `[ ok ]`, `[warn]` or `[fail]`. A `warn` or `fai
 [ ok ] api GraphQL answered, signed in as octocat
 [ ok ] rate core: 4914 of 5000 requests left; it resets in about 39 minutes
 [ ok ] config loaded ./pipetrain.toml
+[ ok ] configs /home/you/project/pipetrain.toml (the only one found)
 [ ok ] profile default (the only profile)
 [ ok ] org:acme organization is visible, 134 private repos seen
-6 ok, 0 warn, 0 fail
+7 ok, 0 warn, 0 fail
 ```
 
 Output on a machine with no token, no `gh` and no config:
@@ -143,8 +145,9 @@ Output on a machine with no token, no `gh` and no config:
 [warn] rate skipped: no token
 [warn] config no config file found; `plan` needs `orgs` from a config or --org
        Create ./pipetrain.toml with `orgs = ["your-org"]`, or pass --org.
+[ ok ] configs no config file in the places searched: /home/you/project/pipetrain.toml, then /home/you/.config/pipetrain/config.toml
 [warn] org:acme skipped: needs a working token
-0 ok, 4 warn, 1 fail
+1 ok, 4 warn, 1 fail
 ```
 
 | Exit code | Meaning |
@@ -194,6 +197,8 @@ pipetrain plan [OPTIONS] [PRS]...
 | `pipetrain plan --emit queue` | Prints only a queue of `merge:org/repo#N` lines for a runner (contract in `docs/queue-output.md`). Cannot be combined with `--json`. |
 | `pipetrain bundle` | Dry run of the bundle suggestion: shows the branch it would create and the PRs it would retarget. Writes nothing. Takes the same PR arguments and options as `plan`. |
 | `pipetrain bundle --apply` | Creates the deploy branch and retargets the bundled PRs. Asks for confirmation unless `--yes` is given. See [Applying the bundle suggestion](#applying-the-bundle-suggestion). |
+| `pipetrain merge` | Dry run of the merge: the steps it would take in the order of the plan. Writes nothing. Takes the same PR arguments and options as `plan`. |
+| `pipetrain merge --apply` | Merges the PRs of the plan one at a time and waits for each deploy before the next. Asks for confirmation unless `--yes` is given. See [Merging the queue](#merging-the-queue). |
 | `pipetrain feed <PACKAGE> [--version <V>]` | Read-only: tells whether a package version is published in its NuGet or npm feed; `--wait` blocks until it is. See [Checking a package feed](#checking-a-package-feed). |
 | `pipetrain bump <PACKAGE> [--to <V>]` | Dry run only: shows which manifests of the scanned repos would move to a version of a package. Writes nothing and has no `--apply`. See [Bumping a package](#bumping-a-package-dry-run). |
 | `pipetrain profiles` | Read-only: lists the profiles, their orgs and folders, and which one applies from the current folder. |
@@ -555,6 +560,8 @@ Redirects are not followed. GitHub answers a renamed or moved repo with a redire
 
 `--verbose` prints each request, and each wait, to stderr. The `api` line of the output shows how many requests the run used and how many GitHub says remain. On a terminal, a small spinner on stderr shows the phase, a counter and the elapsed time while pipetrain talks to GitHub, in color unless `NO_COLOR` is set or `--color never` is used; it never touches stdout. The `time` line is the wall-clock time of the run until the data was gathered; with the cache it is shorter.
 
+Requests that only read are retried up to 4 times, with growing waits and jitter, when GitHub answers `500`, `502`, `503`, `504` or a secondary rate limit (`Retry-After` is honored up to 60 seconds). Each retry prints one line on stderr saying what GitHub answered and for which request. An exhausted primary rate limit is reported with its reset time, not waited out, and writes (`bundle --apply`, `merge --apply`) are never retried.
+
 ## Local cache
 
 `plan` and `order suggest` keep a small cache on disk of data that can never change for a given key, so a second run right after the first asks GitHub for much less. On a real queue of 12 PRs across 7 repos, the second run in a row went from 38 requests to 11, with the same output.
@@ -716,6 +723,7 @@ Repos that do not reference the package are not listed. A scanned repo name that
 | 0 | A plan was generated. Skipped PRs and `?` questions do not change this. |
 | 1 | An error: no token, bad config, bad `--date`, a PR not found, budget reached, GitHub failure. The message goes to stderr as `error: ...`. For `bundle` it also means the prompt was declined or a write failed. |
 | 3 | Only with `--emit queue`: the queue was printed, but at least one question is open. Without `--emit queue` this code is never used. |
+| 5 | Only `merge --apply`: stopped and resumable (deploy timeout or no run, gate not confirmed). Run the same command again. See [docs/merge.md](docs/merge.md). |
 
 `pipetrain update --check` also uses 10: a newer release exists.
 
@@ -728,6 +736,21 @@ Off by default. Turn it on with `log = true` in the config or `PIPETRAIN_LOG=1`;
 A line holds the time, the version, the subcommand name, the exit code, the error type (such as `ApiError`), the duration, the number of requests and whether the cache answered. It never holds a token, an org or repo name, a PR number or title, an argument value, a path, a diff or an error message. A failure to write it never fails or slows the command.
 
 `pipetrain log --summary [--json]` counts runs per command, the error rate by type and the median duration. Details and the JSON shape: [docs/log.md](docs/log.md).
+
+## Merging the queue
+
+`pipetrain merge --apply` runs the order of `plan --emit queue`: it merges one PR, waits until the workflow runs of that push finish, and only then merges the next. Before each merge it reads the PR again and refuses one that is not approved, green and `clean`, or whose head moved after the plan, so a PR the plan marked as not ready is never merged. DDL and infra gates and unpublished package waits ask for confirmation (`--gates-confirmed` answers them; without a terminal the run stops there). A stop, a timeout or a failed deploy leaves a state file, and running the same command again resumes from there. Without `--apply` it only prints the steps.
+
+```toml
+[merge]
+timeout_minutes = 30
+no_deploy_repos = ["acme/docs"]
+
+[merge.repo_timeout_minutes]
+"acme/api" = 60
+```
+
+Exit code `5` means stopped and resumable. Everything else, the checks, the JSON and the design questions that were left open on purpose: [docs/merge.md](docs/merge.md).
 
 ## MCP server for AI agents
 
@@ -754,7 +777,7 @@ The tools, the result format, the errors and the protocol choice are in [docs/mc
 
 ## Out of scope
 
-pipetrain does not merge, push, approve, comment, label or re-run checks, and nothing in it is a deploy tool. The only thing it writes to GitHub is what `pipetrain bundle --apply` does: create a deploy branch and change the base of the PRs bundled into it. It decides order, not safety: it does not know whether a migration is backward compatible, only that it has to go first.
+pipetrain does not push, approve, comment, label or re-run checks, and nothing in it is a deploy tool. It writes to GitHub only through two commands that need `--apply`: `pipetrain bundle --apply` creates a deploy branch and changes the base of the PRs bundled into it, and `pipetrain merge --apply` merges the PRs of the plan one at a time and waits for their deploy. It decides order, not safety: it does not know whether a migration is backward compatible, only that it has to go first.
 
 ## Documentation
 
@@ -764,6 +787,7 @@ pipetrain does not merge, push, approve, comment, label or re-run checks, and no
 - [docs/github-action.md](docs/github-action.md): the GitHub Action, its inputs, outputs and exit codes.
 - [docs/log.md](docs/log.md): the opt-in local usage log, what a line holds and what never enters it.
 - [docs/mcp.md](docs/mcp.md): the MCP server, its five read-only tools, results, errors and the protocol choice.
+- [docs/merge.md](docs/merge.md): the contract of `pipetrain merge`: what it checks, what it waits for, resuming, exit codes, JSON and the open design questions.
 - [docs/releasing.md](docs/releasing.md): how a release is cut, what the workflow builds and the optional crates.io step.
 - [docs/repo-names.md](docs/repo-names.md): how `repo#123` is resolved to an org, and what it costs.
 - [docs/saving-pipelines.md](docs/saving-pipelines.md): why the plan checks "already in the base", why it suggests a deploy branch, and how to apply it by hand.

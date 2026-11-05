@@ -16,7 +16,7 @@ At most five, each with a short description, because every tool weighs on the ag
 
 `order_suggest` is the one tool that is not JSON, because `order suggest` has no `--json`. Its text is the same text the command prints on stdout.
 
-Nothing that writes is exposed: no `bundle --apply`, no `bump --apply`, no `update`, no `init --write`. The tool list marks every tool `readOnlyHint: true`, and a test asserts that the list has exactly these five names.
+Nothing that writes is exposed: no `bundle --apply`, no `merge --apply`, no `bump --apply`, no `update`, no `init --write`. The tool list marks every tool `readOnlyHint: true`, and a test asserts that the list has exactly these five names.
 
 Each tool runs the same code as its command (`plan_json`, `feed::render`, `bump::execute`, `doctor::json_report`, `order::execute`), so the JSON is the command's JSON and a change to a contract in one place changes both. Progress is always off.
 
