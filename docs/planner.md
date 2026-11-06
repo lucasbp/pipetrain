@@ -8,7 +8,7 @@ Code: `src/planner.rs` (rules, graph, stages, lanes), `src/planner/order.rs` (th
 
 ## What goes into the plan
 
-Only PRs that are ready: not merged, not closed, not draft, approved (or with no review decision at all, see below), checks green and no merge conflict. A PR that fails any of these shows up under `skipped` with the reasons and takes no part in ordering.
+Only PRs that are ready: not merged, not closed, not draft, approved (or with no review decision at all, see below; not required at all with `require_approval = false`), checks green and no merge conflict. A PR that fails any of these shows up under `skipped` with the reasons and takes no part in ordering.
 
 Why only ready PRs: the plan answers "in what order do I merge what can be merged now". A PR that is not ready cannot be merged, so ordering it would be fiction. When a skipped PR matters to a ready one, the planner raises a question instead (`sibling-not-ready`, `stacked-not-ready`, `depends-on-open`).
 
@@ -56,7 +56,7 @@ This is a suggestion only. It is not an ordering rule, adds no edge and changes 
 
 Review and checks, as read from GitHub:
 
-- Review: `APPROVED`, `CHANGES_REQUESTED` or `REVIEW_REQUIRED` from the review decision. When the repo has no decision, the latest opinionated reviews are used. Reasons: `changes requested`, `review required`, `not approved`.
+- Review: `APPROVED`, `CHANGES_REQUESTED` or `REVIEW_REQUIRED` from the review decision. When the repo has no decision, the latest opinionated reviews are used. Reasons: `changes requested`, `review required`, `not approved`. With `require_approval = false` (config or profile) `review required` and `not approved` stop being reasons and `--all` stops filtering by approval, while `changes requested` still blocks. Default `true`.
 - Behind: a PR whose `mergeStateStatus` is `BEHIND` (protection requires the branch to be up to date) is `branch behind its base, update it` and goes to `SKIPPED`. Other merge states change nothing.
 - Checks: success is ready, failure or error is `checks failing`, anything else is `checks pending`. Mergeability that GitHub has not computed yet is `mergeability unknown, retry in a minute`, because it often follows a merge into the base and a conflict may hide behind it. No checks at all is `no checks reported`, unless `allow_missing_checks = true` or the repo matches `checks_optional_repos`.
 - `merge conflict` when GitHub reports the PR as conflicting.

@@ -32,6 +32,10 @@ ignore_branch_prefixes = ["dependabot/", "renovate/"]
 # false: a PR with no checks reported is skipped as "no checks reported".
 allow_missing_checks = false
 
+# true (default): a PR needs an approval to be ready. false: no review decision is
+# accepted, "changes requested" still blocks. Useful for a single-developer team.
+require_approval = true
+
 # Repos (org/repo globs) where missing checks are accepted (example).
 checks_optional_repos = ["acme/docs-*"]
 

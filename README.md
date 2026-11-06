@@ -249,7 +249,7 @@ The train branch is `train_prefix` plus the date, for example `deploy/29-10-2026
 - on a branch name that is open in 2 or more repos, which is how one change spans repos (`shared-branch`);
 - targeting the train branch (`into-train`).
 
-Of those, only PRs that are ready enter the plan: not draft, approved, checks green, no merge conflict. A repo with no checks at all blocks its PRs, unless `allow_missing_checks` is on or the repo matches a glob in `checks_optional_repos`. The rest are listed as `SKIPPED` with the reasons, and a few of them raise a question when they affect a ready PR. How the order is then decided, rule by rule, is in [docs/planner.md](docs/planner.md).
+Of those, only PRs that are ready enter the plan: not draft, approved (unless `require_approval = false`), checks green, no merge conflict. A repo with no checks at all blocks its PRs, unless `allow_missing_checks` is on or the repo matches a glob in `checks_optional_repos`. The rest are listed as `SKIPPED` with the reasons, and a few of them raise a question when they affect a ready PR. How the order is then decided, rule by rule, is in [docs/planner.md](docs/planner.md).
 
 **Finding the train by label.** Set `train_label` in the config (for example `train_label = "train"`) and any open PR with that label joins the train with scope `train`, whatever its branch name. The match ignores case, and a PR that carries the label is never counted as a shared branch. Without `train_label` nothing changes: only the branch name finds the train. An empty value is a config error. It can be set per profile, and a profile inherits the shared value. With `--all` a labelled approved PR also gets scope `train`.
 
@@ -266,6 +266,9 @@ pipetrain plan --all
 - Approved and ready (not draft, checks green, no merge conflict) enters the plan with scope `released`.
 - Approved but not ready goes to `SKIPPED` with the reasons, for example `checks failing: build, test` or `draft`.
 - Not approved is ignored without a trace: no review, review requested or changes requested.
+- With `require_approval = false` the approval filter of `--all` is off: every open, non-draft PR is considered. A PR with no review decision or `REVIEW_REQUIRED` is ready or `SKIPPED` only for the other reasons, and `CHANGES_REQUESTED` stays in `SKIPPED` as `changes requested`.
+
+**Approval is optional per profile.** `require_approval` is `true` by default. Set it to `false` in the config or in a `[profile.<name>]` table for a team with a single developer, since GitHub does not let the author approve their own PR. It affects `plan`, `plan --all`, `bundle` and the revalidation `merge` does before each merge. It never lets through a draft, failing checks, a merge conflict or `changes requested`. There is no command line flag, on purpose.
 
 A PR whose head is today's train branch keeps scope `train`, and one targeting it keeps `into-train`. In this mode PRs are not grouped by shared branch, so the `sibling-not-ready` and `stacked-not-ready` questions are not raised. Everything after discovery is the same: the already-merged check, files, dependencies, packages, stacked PRs, targets, gate, layers and bundles.
 
