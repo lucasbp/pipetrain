@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.2
+
+### Fixed
+
+- The search for open PRs now checks the total GitHub reports (`issueCount`). When GitHub cuts the list short without an error, pipetrain searches again (up to 2 more times) and, if the list is still short, fails with `GitHub returned N of M open PRs in <org> (the search was cut short). Try again in a minute, or run with --verbose.` instead of returning an empty or partial plan.
+- The search asks for pages of 20 PRs instead of 50.
+
 ## 0.7.1
 
 ### Fixed

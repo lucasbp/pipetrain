@@ -12,6 +12,8 @@ use crate::planner::DepState;
 
 const FILE_PAGES: u32 = 3;
 const BRANCH_PAGES: u32 = 5;
+const SEARCH_PAGE: u32 = 20;
+const SEARCH_RETRIES: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BranchWrite {
@@ -82,14 +84,45 @@ fn encode_path(text: &str) -> String {
 
 const PR_FIELDS: &str = "number title url body headRefName baseRefName baseRef { target { oid } } headRefOid isDraft state reviewDecision mergeable mergeStateStatus author { login } labels(first: 50) { nodes { name } } repository { name owner { login } } latestOpinionatedReviews(first: 20, writersOnly: true) { nodes { state } } commits(last: 1) { nodes { commit { statusCheckRollup { state contexts(first: 100) { nodes { __typename ... on CheckRun { name conclusion } ... on StatusContext { context state } } } } } } }";
 
+struct OpenSearch {
+    prs: Vec<Pr>,
+    received: u64,
+    total: Option<u64>,
+}
+
 impl Client {
     pub fn open_prs(&mut self, org: &str) -> Result<Vec<Pr>> {
+        let mut retried = 0;
+        loop {
+            let found = self.search_open_prs(org)?;
+            let Some(total) = found.total.filter(|total| found.received < *total) else {
+                return Ok(found.prs);
+            };
+            if retried >= SEARCH_RETRIES {
+                return Err(anyhow!(
+                    "GitHub returned {} of {total} open PRs in {org} (the search was cut short). Try again in a minute, or run with --verbose.",
+                    found.received
+                ));
+            }
+            retried += 1;
+            crate::progress::line(&format!(
+                "GitHub returned {} of {total} open PRs in {org}: searching again (retry {retried} of {SEARCH_RETRIES})",
+                found.received
+            ));
+            self.pause_before_search_retry(retried - 1);
+        }
+    }
+
+    fn search_open_prs(&mut self, org: &str) -> Result<OpenSearch> {
         let query = format!(
-            "query($q: String!, $after: String) {{ search(query: $q, type: ISSUE, first: 50, after: $after) {{ pageInfo {{ hasNextPage endCursor }} nodes {{ ... on PullRequest {{ {PR_FIELDS} }} }} }} }}"
+            "query($q: String!, $after: String) {{ search(query: $q, type: ISSUE, first: {SEARCH_PAGE}, after: $after) {{ issueCount pageInfo {{ hasNextPage endCursor }} nodes {{ ... on PullRequest {{ {PR_FIELDS} }} }} }} }}"
         );
         let search = format!("org:{org} is:pr is:open archived:false");
         let mut after = Value::Null;
         let mut all = Vec::new();
+        let mut received = 0u64;
+        let mut total = None;
+        let mut first_page = true;
         loop {
             let response = self.graphql(
                 &format!("search open PRs in {org}"),
@@ -97,6 +130,16 @@ impl Client {
                 json!({ "q": search, "after": after }),
             )?;
             all.extend(parse_search(&response));
+            received += response
+                .pointer("/data/search/nodes")
+                .and_then(|v| v.as_array())
+                .map_or(0, |nodes| nodes.len() as u64);
+            if first_page {
+                total = response
+                    .pointer("/data/search/issueCount")
+                    .and_then(|v| v.as_u64());
+                first_page = false;
+            }
             let page = response.pointer("/data/search/pageInfo");
             let more = page
                 .and_then(|p| p.get("hasNextPage"))
@@ -110,7 +153,11 @@ impl Client {
                 .cloned()
                 .unwrap_or(Value::Null);
         }
-        Ok(all)
+        Ok(OpenSearch {
+            prs: all,
+            received,
+            total,
+        })
     }
 
     pub fn viewer_login(&mut self) -> Result<String> {

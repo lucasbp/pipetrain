@@ -251,6 +251,8 @@ The train branch is `train_prefix` plus the date, for example `deploy/29-10-2026
 
 Of those, only PRs that are ready enter the plan: not draft, approved (unless `require_approval = false`), checks green, no merge conflict. A repo with no checks at all blocks its PRs, unless `allow_missing_checks` is on or the repo matches a glob in `checks_optional_repos`. The rest are listed as `SKIPPED` with the reasons, and a few of them raise a question when they affect a ready PR. How the order is then decided, rule by rule, is in [docs/planner.md](docs/planner.md).
 
+**A search that comes back short.** GitHub sometimes cuts the list of open PRs short without an error. pipetrain reads the total GitHub reports for the search and compares it with the PRs it received. When fewer arrive, it repeats the search up to 2 more times; if the list is still short, the run fails with `GitHub returned N of M open PRs in <org> (the search was cut short). Try again in a minute, or run with --verbose.` instead of planning with a partial list. A reply with no total is not checked.
+
 **Finding the train by label.** Set `train_label` in the config (for example `train_label = "train"`) and any open PR with that label joins the train with scope `train`, whatever its branch name. The match ignores case, and a PR that carries the label is never counted as a shared branch. Without `train_label` nothing changes: only the branch name finds the train. An empty value is a config error. It can be set per profile, and a profile inherits the shared value. With `--all` a labelled approved PR also gets scope `train`.
 
 ## Any day: released PRs
