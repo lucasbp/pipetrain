@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- `plan --all` and `bundle --all` no longer drop an unapproved PR in silence when `require_approval` is `true`: it is listed under `SKIPPED` with the same reasons `merge` gives (`not approved`, `review required`, `changes requested`), so `plan --all`, `plan <pr>`, `merge` and `merge --apply` agree on what a ready PR is.
+- `merge --apply` with nothing to merge no longer prints the dry run banner ("dry run, nothing was merged; pass --apply to do it").
+
 ## 0.7.0
 
 ### Added

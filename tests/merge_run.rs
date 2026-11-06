@@ -508,6 +508,33 @@ fn a_dry_run_lists_the_steps_in_queue_order_and_writes_nothing() {
 }
 
 #[test]
+fn apply_with_nothing_to_merge_does_not_print_the_dry_run_banner() {
+    let mut rig = Rig::new("");
+    let plan = plan_on(&[]);
+
+    let run = rig.go(&plan);
+
+    assert!(run.outcome.report.steps.is_empty());
+    assert_eq!(run.outcome.code, 0);
+    let text = render(&run.outcome.report, false);
+    assert!(text.contains("nothing to merge"), "{text}");
+    assert!(!text.contains("dry run"), "{text}");
+    assert!(!text.contains("pass --apply"), "{text}");
+}
+
+#[test]
+fn dry_run_with_nothing_to_merge_still_prints_the_banner() {
+    let mut rig = Rig::new("");
+    let plan = plan_on(&[]);
+
+    let run = rig.run(&plan, dry(), true, true).unwrap();
+
+    let text = render(&run.outcome.report, false);
+    assert!(text.contains("dry run"), "{text}");
+    assert!(text.contains("nothing to merge"), "{text}");
+}
+
+#[test]
 fn two_ready_prs_merge_one_at_a_time_and_each_deploy_ends_before_the_next_merge() {
     let mut rig = Rig::new("");
     let plan = plan_on(&[1, 2]);

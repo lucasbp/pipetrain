@@ -4,7 +4,7 @@ use chrono::NaiveDate;
 
 use crate::bundle::is_train_branch;
 use crate::config::{Config, DEFAULT_TRAIN_DATE_FORMAT, render_date};
-use crate::model::{Pr, Question, Review};
+use crate::model::{Pr, Question};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
@@ -175,9 +175,6 @@ pub fn discover(all: Vec<Pr>, cfg: &Config, train: &str) -> Discovered {
 pub fn released(all: Vec<Pr>, cfg: &Config, train: &str) -> Discovered {
     let mut out = Discovered::default();
     for pr in all {
-        if cfg.require_approval && pr.review != Review::Approved {
-            continue;
-        }
         let scope = if is_train_branch(&pr.head_ref, train) || labelled(&pr, cfg) {
             Scope::Train
         } else if is_train_branch(&pr.base_ref, train) {

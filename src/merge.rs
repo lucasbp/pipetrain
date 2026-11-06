@@ -275,6 +275,8 @@ pub struct NotMerging {
 pub struct Report {
     pub schema: u32,
     pub applied: bool,
+    #[serde(skip)]
+    pub requested: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stopped: Option<String>,
     pub steps: Vec<StepReport>,
