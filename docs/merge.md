@@ -27,7 +27,7 @@ Every other `#` line is a comment and is ignored. A PR the plan did not mark as 
 
 Right before each merge it reads the PR again, because the earlier merges can change it. It does not merge, and the step is `failed`, if any of these is true:
 
-- The PR is no longer open, or the plan's rules for a ready PR no longer hold (not approved, checks not green, draft, conflict).
+- The PR is no longer open, or the plan's rules for a ready PR no longer hold (not approved, checks not green, draft, conflict). With `require_approval = false` a PR with no review decision is not refused for that, `changes requested` still is, and the check is the same function the plan uses.
 - The head commit is not the one the plan saw. The merge request also carries that sha, so GitHub itself refuses a PR that moved in between.
 - The base branch is not the one the plan saw.
 - GitHub's `mergeable_state` is anything but `clean` (`behind`, `dirty`, `blocked`, `unstable`, `draft`, or still unknown after three tries). pipetrain never updates a branch for you.

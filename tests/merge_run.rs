@@ -247,11 +247,15 @@ struct Rig {
 
 impl Rig {
     fn new(extra: &str) -> Self {
+        Self::with_top("", extra)
+    }
+
+    fn with_top(top: &str, extra: &str) -> Self {
         let script = Arc::new(Mutex::new(Script::new()));
         let shared = Arc::clone(&script);
         let server = serve_requests(move |line, payload| respond(&shared, line, payload));
         let cfg = Config::parse(&format!(
-            "orgs = [\"acme\"]\n[merge]\npoll_seconds = 1\ntimeout_minutes = 1\nno_run_grace_seconds = 3\n{extra}"
+            "orgs = [\"acme\"]\n{top}[merge]\npoll_seconds = 1\ntimeout_minutes = 1\nno_run_grace_seconds = 3\n{extra}"
         ))
         .unwrap();
         Self {
@@ -563,6 +567,57 @@ fn a_pr_that_lost_its_approval_is_not_merged_and_the_rest_are_skipped() {
     assert_eq!(run.outcome.code, 1);
     assert!(rig.puts().is_empty());
     assert!(rig.store.state.pending.is_empty());
+}
+
+#[test]
+fn a_pr_without_any_review_is_not_merged_by_default() {
+    let mut rig = Rig::new("");
+    let plan = plan_on(&[1]);
+    let first = merge_numbers(&plan)[0];
+    rig.script().review.insert(first, String::new());
+
+    let run = rig.go(&plan);
+
+    assert_eq!(run.statuses(), vec![Status::Failed]);
+    assert!(
+        run.step(0).detail.contains("not approved"),
+        "{}",
+        run.said(0)
+    );
+    assert!(rig.puts().is_empty());
+}
+
+#[test]
+fn a_pr_without_any_review_is_merged_when_approval_is_not_required() {
+    let mut rig = Rig::with_top("require_approval = false\n", "");
+    let plan = plan_on(&[1]);
+    let first = merge_numbers(&plan)[0];
+    rig.script().review.insert(first, String::new());
+
+    let run = rig.go(&plan);
+
+    assert_eq!(run.statuses(), vec![Status::Done]);
+    assert_eq!(rig.puts().len(), 1);
+}
+
+#[test]
+fn changes_requested_still_blocks_the_merge_when_approval_is_not_required() {
+    let mut rig = Rig::with_top("require_approval = false\n", "");
+    let plan = plan_on(&[1]);
+    let first = merge_numbers(&plan)[0];
+    rig.script()
+        .review
+        .insert(first, "CHANGES_REQUESTED".to_string());
+
+    let run = rig.go(&plan);
+
+    assert_eq!(run.statuses(), vec![Status::Failed]);
+    assert!(
+        run.step(0).detail.contains("changes requested"),
+        "{}",
+        run.said(0)
+    );
+    assert!(rig.puts().is_empty());
 }
 
 #[test]

@@ -138,6 +138,10 @@ impl Pr {
     }
 
     pub fn blockers(&self, allow_missing_checks: bool) -> Vec<String> {
+        self.blockers_with(allow_missing_checks, true)
+    }
+
+    pub fn blockers_with(&self, allow_missing_checks: bool, require_approval: bool) -> Vec<String> {
         let mut reasons = Vec::new();
         match self.state {
             PrState::Merged => {
@@ -156,8 +160,11 @@ impl Pr {
         match self.review {
             Review::Approved => {}
             Review::ChangesRequested => reasons.push("changes requested".to_string()),
-            Review::ReviewRequired => reasons.push("review required".to_string()),
-            Review::None => reasons.push("not approved".to_string()),
+            Review::ReviewRequired if require_approval => {
+                reasons.push("review required".to_string())
+            }
+            Review::None if require_approval => reasons.push("not approved".to_string()),
+            Review::ReviewRequired | Review::None => {}
         }
         match self.checks {
             Checks::Success => {}

@@ -158,7 +158,7 @@ pub fn discover(all: Vec<Pr>, cfg: &Config, train: &str) -> Discovered {
         let Some(scope) = classify_scope(&pr, cfg, &shared, train) else {
             continue;
         };
-        let reasons = pr.blockers(cfg.allows_missing_checks(&pr.key.slug()));
+        let reasons = cfg.blockers(&pr);
         if reasons.is_empty() {
             out.ready.push((pr, scope));
         } else {
@@ -175,7 +175,7 @@ pub fn discover(all: Vec<Pr>, cfg: &Config, train: &str) -> Discovered {
 pub fn released(all: Vec<Pr>, cfg: &Config, train: &str) -> Discovered {
     let mut out = Discovered::default();
     for pr in all {
-        if pr.review != Review::Approved {
+        if cfg.require_approval && pr.review != Review::Approved {
             continue;
         }
         let scope = if is_train_branch(&pr.head_ref, train) || labelled(&pr, cfg) {
@@ -185,7 +185,7 @@ pub fn released(all: Vec<Pr>, cfg: &Config, train: &str) -> Discovered {
         } else {
             Scope::Released
         };
-        let reasons = pr.blockers(cfg.allows_missing_checks(&pr.key.slug()));
+        let reasons = cfg.blockers(&pr);
         if reasons.is_empty() {
             out.ready.push((pr, scope));
         } else {
@@ -198,7 +198,7 @@ pub fn released(all: Vec<Pr>, cfg: &Config, train: &str) -> Discovered {
 pub fn explicit(prs: Vec<Pr>, cfg: &Config) -> Discovered {
     let mut out = Discovered::default();
     for pr in prs {
-        let reasons = pr.blockers(cfg.allows_missing_checks(&pr.key.slug()));
+        let reasons = cfg.blockers(&pr);
         if reasons.is_empty() {
             out.ready.push((pr, Scope::Explicit));
         } else {

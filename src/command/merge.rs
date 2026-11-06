@@ -357,7 +357,7 @@ fn merge_one(
         report.detail = "already merged".to_string();
         return;
     }
-    let reasons = pr.blockers(env.cfg.allows_missing_checks(&slug));
+    let reasons = env.cfg.blockers(&pr);
     if !reasons.is_empty() {
         return fail(report, format!("no longer ready: {}", reasons.join(", ")));
     }

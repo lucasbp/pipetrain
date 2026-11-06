@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.0
+
+### Added
+
+- `require_approval` config option, also settable per profile, `true` by default. With `false`, a PR with no review decision or `REVIEW_REQUIRED` is no longer `SKIPPED` as `not approved` or `review required`, `plan --all` considers every open PR instead of only approved ones, and `merge` does not refuse such a PR when it revalidates. `changes requested` still blocks. Config only, there is no flag.
+
 ## 0.6.0
 
 ### Changed

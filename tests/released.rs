@@ -12,6 +12,11 @@ fn run(prs: Vec<Pr>) -> Discovered {
     discovery::released(prs, &cfg, TRAIN)
 }
 
+fn run_without_approval(prs: Vec<Pr>) -> Discovered {
+    let cfg = Config::parse("orgs = [\"acme\"]\nrequire_approval = false").unwrap();
+    discovery::released(prs, &cfg, TRAIN)
+}
+
 #[test]
 fn approved_green_pr_on_any_branch_is_released() {
     let found = run(vec![pr("acme/api", 1, "fix/typo", "main")]);
@@ -84,4 +89,43 @@ fn shared_branches_do_not_raise_sibling_questions() {
     assert_eq!(found.ready[0].1.as_str(), "released");
     assert_eq!(found.skipped.len(), 1);
     assert!(found.questions.is_empty());
+}
+
+#[test]
+fn approval_is_required_unless_the_config_says_otherwise() {
+    assert!(Config::parse("orgs = [\"acme\"]").unwrap().require_approval);
+}
+
+#[test]
+fn without_require_approval_a_pr_with_no_decision_is_ready() {
+    let mut none = pr("acme/api", 3, "feat/a", "main");
+    none.review = Review::None;
+    let mut required = pr("acme/api", 4, "feat/b", "main");
+    required.review = Review::ReviewRequired;
+    let found = run_without_approval(vec![none, required]);
+    assert_eq!(found.ready.len(), 2);
+    assert!(found.skipped.is_empty());
+}
+
+#[test]
+fn without_require_approval_changes_requested_is_still_skipped() {
+    let mut changes = pr("acme/api", 5, "feat/c", "main");
+    changes.review = Review::ChangesRequested;
+    let found = run_without_approval(vec![changes]);
+    assert!(found.ready.is_empty());
+    assert_eq!(found.skipped.len(), 1);
+    assert_eq!(
+        found.skipped[0].reasons,
+        vec!["changes requested".to_string()]
+    );
+}
+
+#[test]
+fn without_require_approval_other_blockers_still_apply() {
+    let mut red = pr("acme/api", 6, "feat/d", "main");
+    red.review = Review::None;
+    red.checks = Checks::Failure;
+    let found = run_without_approval(vec![red]);
+    assert!(found.ready.is_empty());
+    assert_eq!(found.skipped[0].reasons, vec!["checks failing".to_string()]);
 }

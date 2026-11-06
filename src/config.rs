@@ -62,6 +62,7 @@ pub struct Config {
     pub train_label: Option<String>,
     pub ignore_branch_prefixes: Vec<String>,
     pub allow_missing_checks: bool,
+    pub require_approval: bool,
     pub checks_optional_repos: Vec<String>,
     pub layer: Vec<LayerConfig>,
     pub order: Vec<OrderConfig>,
@@ -152,6 +153,7 @@ impl Default for Config {
             train_label: None,
             ignore_branch_prefixes: vec!["dependabot/".to_string(), "renovate/".to_string()],
             allow_missing_checks: false,
+            require_approval: true,
             checks_optional_repos: Vec::new(),
             layer: Vec::new(),
             order: Vec::new(),
@@ -190,6 +192,13 @@ impl Default for ApiConfig {
 }
 
 impl Config {
+    pub fn blockers(&self, pr: &crate::model::Pr) -> Vec<String> {
+        pr.blockers_with(
+            self.allows_missing_checks(&pr.key.slug()),
+            self.require_approval,
+        )
+    }
+
     pub fn allows_missing_checks(&self, slug: &str) -> bool {
         self.allow_missing_checks
             || self.checks_optional_repos.iter().any(|pattern| {
