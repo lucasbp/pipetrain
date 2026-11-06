@@ -38,7 +38,7 @@ fn approved_pr_with_failing_checks_is_skipped_with_the_reason() {
 }
 
 #[test]
-fn unapproved_pr_is_ignored_in_silence() {
+fn unapproved_pr_is_skipped_with_the_same_reason_merge_gives() {
     let mut none = pr("acme/api", 3, "feat/a", "main");
     none.review = Review::None;
     let mut required = pr("acme/api", 4, "feat/b", "main");
@@ -47,7 +47,53 @@ fn unapproved_pr_is_ignored_in_silence() {
     changes.review = Review::ChangesRequested;
     let found = run(vec![none, required, changes]);
     assert!(found.ready.is_empty());
-    assert!(found.skipped.is_empty());
+    let reasons: Vec<Vec<String>> = found.skipped.iter().map(|s| s.reasons.clone()).collect();
+    assert_eq!(
+        reasons,
+        vec![
+            vec!["not approved".to_string()],
+            vec!["review required".to_string()],
+            vec!["changes requested".to_string()],
+        ]
+    );
+}
+
+#[test]
+fn all_and_explicit_discovery_agree_on_every_review_state() {
+    for require_approval in [true, false] {
+        let cfg = Config::parse(&format!(
+            "orgs = [\"acme\"]\nrequire_approval = {require_approval}"
+        ))
+        .unwrap();
+        for review in [
+            Review::Approved,
+            Review::None,
+            Review::ReviewRequired,
+            Review::ChangesRequested,
+        ] {
+            let mut item = pr("acme/api", 3, "feat/a", "main");
+            item.review = review;
+            let all = discovery::released(vec![item.clone()], &cfg, TRAIN);
+            let named = discovery::explicit(vec![item], &cfg);
+            assert_eq!(
+                all.ready.len(),
+                named.ready.len(),
+                "{review:?} {require_approval}"
+            );
+            let reasons = |found: &Discovered| -> Vec<String> {
+                found
+                    .skipped
+                    .iter()
+                    .flat_map(|s| s.reasons.clone())
+                    .collect()
+            };
+            assert_eq!(
+                reasons(&all),
+                reasons(&named),
+                "{review:?} {require_approval}"
+            );
+        }
+    }
 }
 
 #[test]

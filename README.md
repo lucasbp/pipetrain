@@ -194,7 +194,7 @@ pipetrain plan [OPTIONS] [PRS]...
 | `pipetrain plan` | Discovers today's train in the configured orgs and plans it. |
 | `pipetrain plan acme/orders-api#12 acme/billing-api#3` | Plans exactly these PRs, no discovery. |
 | `pipetrain plan orders-api#12 billing-api#3` | Same, with the org left out: each repo name is searched in the orgs of the active profile. See [Repo names without the org](#repo-names-without-the-org). |
-| `pipetrain plan --all` | Plans every approved open PR in the configured orgs, whatever its branch. For any day, not only the train day. Cannot be combined with explicit PRs. |
+| `pipetrain plan --all` | Plans every ready open PR in the configured orgs, whatever its branch (approved, unless `require_approval = false`); the others are listed as `SKIPPED` with the reason. For any day, not only the train day. Cannot be combined with explicit PRs. |
 | `pipetrain plan --json` | Prints the plan as JSON instead of text (contract in `docs/plan-json.md`). |
 | `pipetrain plan --emit queue` | Prints only a queue of `merge:org/repo#N` lines for a runner (contract in `docs/queue-output.md`). Cannot be combined with `--json`. |
 | `pipetrain bundle` | Dry run of the bundle suggestion: shows the branch it would create and the PRs it would retarget. Writes nothing. Takes the same PR arguments and options as `plan`. |
@@ -265,8 +265,8 @@ pipetrain plan --all
 
 - Approved and ready (not draft, checks green, no merge conflict) enters the plan with scope `released`.
 - Approved but not ready goes to `SKIPPED` with the reasons, for example `checks failing: build, test` or `draft`.
-- Not approved is ignored without a trace: no review, review requested or changes requested.
-- With `require_approval = false` the approval filter of `--all` is off: every open, non-draft PR is considered. A PR with no review decision or `REVIEW_REQUIRED` is ready or `SKIPPED` only for the other reasons, and `CHANGES_REQUESTED` stays in `SKIPPED` as `changes requested`.
+- Not approved goes to `SKIPPED` too, with the reason `not approved` (no review), `review required` or `changes requested`: the same words `merge` uses when it refuses the PR.
+- With `require_approval = false` approval is not a requirement at all: every open, non-draft PR is considered. A PR with no review decision or `REVIEW_REQUIRED` is ready or `SKIPPED` only for the other reasons, and `CHANGES_REQUESTED` stays in `SKIPPED` as `changes requested`.
 
 **Approval is optional per profile.** `require_approval` is `true` by default. Set it to `false` in the config or in a `[profile.<name>]` table for a team with a single developer, since GitHub does not let the author approve their own PR. It affects `plan`, `plan --all`, `bundle` and the revalidation `merge` does before each merge. It never lets through a draft, failing checks, a merge conflict or `changes requested`. There is no command line flag, on purpose.
 

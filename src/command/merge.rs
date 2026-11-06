@@ -789,6 +789,7 @@ pub fn merge_plan(
     let mut report = Report {
         schema: SCHEMA,
         applied: false,
+        requested: settings.apply,
         stopped: None,
         steps: planned_steps(plan),
         not_merging: not_merging(plan),
@@ -917,7 +918,7 @@ fn step_text(step: &StepReport, color: bool) -> String {
 
 pub fn render(report: &Report, color: bool) -> String {
     let mut out = String::new();
-    if !report.applied && report.stopped.is_none() {
+    if !report.applied && !report.requested && report.stopped.is_none() {
         let banner = "dry run, nothing was merged; pass --apply to do it";
         out.push_str(&format!("{}\n\n", tint(color, yellow, banner)));
     }
