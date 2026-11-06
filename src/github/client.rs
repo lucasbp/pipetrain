@@ -129,6 +129,12 @@ impl Client {
         self
     }
 
+    pub(super) fn pause_before_search_retry(&self, retried: u32) {
+        if let Some(wait) = self.retry.wait(retried, None) {
+            sleep(wait);
+        }
+    }
+
     pub fn cache_hits(&self) -> u32 {
         self.cache.hits()
     }
