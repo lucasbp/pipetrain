@@ -101,6 +101,14 @@ impl<W: Write> Painter<W> {
     }
 
     pub fn line(&mut self, text: &str) {
+        let choice = if self.color {
+            anstream::ColorChoice::AlwaysAnsi
+        } else {
+            anstream::ColorChoice::Never
+        };
+        let mut stream = anstream::AutoStream::new(Vec::new(), choice);
+        let _ = write!(stream, "{text}");
+        let text = String::from_utf8_lossy(&stream.into_inner()).into_owned();
         let out = if self.hidden {
             format!("{ERASE_LINE}{text}\n")
         } else {
@@ -241,7 +249,7 @@ pub fn count(done: usize, total: usize) {
 pub fn line(text: &str) {
     match active().as_mut() {
         Some(painter) => painter.line(text),
-        None => eprintln!("{text}"),
+        None => anstream::eprintln!("{text}"),
     }
 }
 
@@ -336,6 +344,20 @@ mod tests {
     fn painter(enabled: bool) -> (Painter<Sink>, Sink) {
         let sink = Sink::default();
         (Painter::new(sink.clone(), enabled, DELAY), sink)
+    }
+
+    #[test]
+    fn result_colors_preserve_spinner_controls_and_follow_color_choice() {
+        for color in [false, true] {
+            let (p, sink) = painter(true);
+            let mut p = p.with_color(color);
+            p.set_phase("deploy");
+            p.tick(DELAY);
+            p.line("\x1b[31mfailed:\x1b[0m deploy");
+            assert!(sink.text().contains(ERASE));
+            assert_eq!(sink.text().contains("\x1b[31mfailed:"), color);
+            assert!(sink.text().contains("failed:"));
+        }
     }
 
     #[test]

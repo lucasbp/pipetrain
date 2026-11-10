@@ -51,3 +51,14 @@ fn plan_help_does_not_offer_the_merge_flags() {
     assert!(out.status.success());
     assert!(!stdout.contains("--gates-confirmed"), "stdout: {stdout}");
 }
+
+#[test]
+fn dependency_failure_accepts_only_stop_or_skip() {
+    for value in ["stop", "skip"] {
+        let out = run(&["merge", "--dependency-failure", value, "--help"]);
+        assert!(out.status.success());
+        assert!(String::from_utf8_lossy(&out.stdout).contains("--dependency-failure"));
+    }
+    let out = run(&["merge", "--dependency-failure", "continue"]);
+    assert_eq!(out.status.code(), Some(2));
+}

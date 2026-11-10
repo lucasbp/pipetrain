@@ -8,7 +8,9 @@ use pipetrain::command::merge::{Hooks, Outcome, Settings, merge_plan, render, re
 use pipetrain::config::{ApiConfig, Config, Rules};
 use pipetrain::emit;
 use pipetrain::github::Client;
-use pipetrain::merge::{EXIT_STOPPED, Kind, STOPPED, Status, Step, StepReport, Store};
+use pipetrain::merge::{
+    DependencyFailure, EXIT_STOPPED, Kind, STOPPED, Status, Step, StepReport, Store,
+};
 use pipetrain::model::{ChangedFile, Pr, Question};
 use pipetrain::plan::{self, Gathered, Plan};
 use pipetrain::publishers::Publishers;
@@ -26,6 +28,8 @@ struct Script {
     put_merges: bool,
     merged: BTreeSet<u64>,
     runs: Vec<Value>,
+    runs_by_sha: BTreeMap<String, Vec<Value>>,
+    bases: BTreeMap<u64, String>,
     workflows: Vec<(String, String)>,
     tree_status: u16,
     branches: Vec<String>,
@@ -65,6 +69,8 @@ impl Script {
             put_merges: true,
             merged: BTreeSet::new(),
             runs: green(),
+            runs_by_sha: BTreeMap::new(),
+            bases: BTreeMap::new(),
             workflows: Vec::new(),
             tree_status: 200,
             branches: vec!["main".to_string(), "feat/x".to_string()],
@@ -103,7 +109,7 @@ impl Script {
             "url": format!("https://github.com/acme/api/pull/{number}"),
             "body": "",
             "headRefName": format!("feat/{number}"),
-            "baseRefName": self.base,
+            "baseRefName": self.bases.get(&number).unwrap_or(&self.base),
             "baseRef": {"target": {"oid": "b".repeat(40)}},
             "headRefOid": format!("{number:040x}"),
             "isDraft": false,
@@ -133,7 +139,7 @@ impl Script {
             "state": if merged { "closed" } else { "open" },
             "merged": merged,
             "head": {"sha": head},
-            "base": {"ref": self.base},
+            "base": {"ref": self.bases.get(&number).unwrap_or(&self.base)},
             "mergeable_state": state,
         });
         if merged {
@@ -145,6 +151,11 @@ impl Script {
 
 fn respond(script: &Mutex<Script>, line: &str, payload: &str) -> (u16, Value) {
     let mut script = script.lock().unwrap();
+    let normalized = line.split_once("/repos/acme/").and_then(|(prefix, path)| {
+        path.split_once('/')
+            .map(|(_, suffix)| format!("{prefix}/repos/acme/api/{suffix}"))
+    });
+    let line = normalized.as_deref().unwrap_or(line);
     if line == "POST /graphql" {
         let body: Value = serde_json::from_str(payload).unwrap();
         if body.pointer("/variables/e0").is_some() {
@@ -154,10 +165,10 @@ fn respond(script: &Mutex<Script>, line: &str, payload: &str) -> (u16, Value) {
             .pointer("/variables/n")
             .and_then(Value::as_u64)
             .unwrap();
-        return (
-            200,
-            json!({"data": {"repository": {"pullRequest": script.node(number)}}}),
-        );
+        let mut node = script.node(number);
+        node["repository"]["name"] = body["variables"]["r"].clone();
+        node["repository"]["owner"]["login"] = body["variables"]["o"].clone();
+        return (200, json!({"data": {"repository": {"pullRequest": node}}}));
     }
     if let Some(rest) = line.strip_prefix("PUT /repos/acme/api/pulls/") {
         let number: u64 = rest.trim_end_matches("/merge").parse().unwrap();
@@ -206,12 +217,19 @@ fn respond(script: &Mutex<Script>, line: &str, payload: &str) -> (u16, Value) {
         return (200, script.live(rest.parse().unwrap()));
     }
     if line.starts_with("GET /repos/acme/api/actions/runs") {
-        return (200, json!({"workflow_runs": script.runs}));
+        let sha = line
+            .split("head_sha=")
+            .nth(1)
+            .and_then(|query| query.split('&').next())
+            .unwrap_or("");
+        let runs = script.runs_by_sha.get(sha).unwrap_or(&script.runs);
+        return (200, json!({"workflow_runs": runs}));
     }
     (404, json!({"message": "not found"}))
 }
 
 struct Run {
+    phases: Vec<String>,
     outcome: Outcome,
     confirms: usize,
     gates: usize,
@@ -292,6 +310,7 @@ impl Rig {
         let mut gates = 0;
         let mut slept = Duration::ZERO;
         let mut observed = 0;
+        let mut phases = Vec::new();
         let outcome = {
             let mut confirm_hook = |_: &str| {
                 confirms += 1;
@@ -303,11 +322,13 @@ impl Rig {
             };
             let mut sleep_hook = |pause: Duration| slept += pause;
             let mut observe_hook = |_: &StepReport| observed += 1;
+            let mut progress_hook = |text: &str| phases.push(text.to_string());
             let mut hooks = Hooks {
                 confirm: &mut confirm_hook,
                 gate: &mut gate_hook,
                 sleep: &mut sleep_hook,
                 observe: &mut observe_hook,
+                progress: &mut progress_hook,
             };
             merge_plan(
                 plan,
@@ -319,6 +340,7 @@ impl Rig {
             )?
         };
         Ok(Run {
+            phases,
             outcome,
             confirms,
             gates,
@@ -381,6 +403,7 @@ fn applied() -> Settings {
         method: None,
         timeout: None,
         open_pr: false,
+        dependency_failure: DependencyFailure::Stop,
     }
 }
 
@@ -473,6 +496,104 @@ fn last_position(lines: &[String], needle: &str) -> usize {
 }
 
 #[test]
+fn progress_identifies_the_current_pr_and_deploy_confirmation_in_queue_order() {
+    let mut rig = Rig::new("");
+    let plan = plan_on(&[1, 2]);
+    let order = merge_numbers(&plan);
+    let run = rig.go(&plan);
+    let first = format!("merging acme/api#{} into main", order[0]);
+    let second = format!("merging acme/api#{} into main", order[1]);
+    let first_at = run
+        .phases
+        .iter()
+        .position(|text| text.ends_with(&first))
+        .unwrap();
+    let second_at = run
+        .phases
+        .iter()
+        .position(|text| text.ends_with(&second))
+        .unwrap();
+    let confirmed_at = run
+        .phases
+        .iter()
+        .position(|text| text.contains("confirming completion"))
+        .unwrap();
+    assert!(first_at < confirmed_at && confirmed_at < second_at);
+    let second_step_at = run
+        .phases
+        .iter()
+        .position(|text| text.starts_with("step 2/2,"))
+        .unwrap();
+    assert!(
+        run.phases[..second_step_at]
+            .iter()
+            .all(|text| text.starts_with("step 1/2, 1 remaining [acme/api#1]:"))
+    );
+    assert!(
+        run.phases[second_step_at..]
+            .iter()
+            .all(|text| text.starts_with("step 2/2, 0 remaining [acme/api#2]:"))
+    );
+    assert!(
+        run.phases
+            .iter()
+            .any(|text| text == "step 1/2, 1 remaining [acme/api#1]: starting")
+    );
+    assert!(
+        run.phases
+            .iter()
+            .any(|text| text.contains("checking merge readiness"))
+    );
+    assert!(
+        run.phases
+            .iter()
+            .any(|text| text.ends_with("checking deploy workflows for acme/api@main"))
+    );
+}
+
+#[test]
+fn progress_shows_running_workflows_and_waiting_for_the_first_run() {
+    let plan = plan_on(&[1]);
+    let mut running = Rig::new("");
+    running.script().runs = vec![run_json("deploy", "in_progress", None)];
+    let run = running
+        .run(
+            &plan,
+            Settings {
+                timeout: Some(Duration::from_secs(1)),
+                ..applied()
+            },
+            true,
+            true,
+        )
+        .unwrap();
+    assert!(
+        run.phases
+            .iter()
+            .any(|text| text.ends_with("deploy acme/api: 1 of 1 workflow runs still going"))
+    );
+
+    let mut absent = Rig::new("");
+    absent.script().runs = Vec::new();
+    let run = absent.go(&plan);
+    assert!(
+        run.phases
+            .iter()
+            .any(|text| text.ends_with("deploy acme/api: waiting for a workflow to start"))
+    );
+    assert_eq!(run.step(0).status, Status::Stopped);
+}
+
+#[test]
+fn declined_confirmation_emits_no_execution_progress() {
+    let mut rig = Rig::new("");
+    let plan = plan_on(&[1]);
+    let run = rig.run(&plan, applied(), false, true).unwrap();
+    assert!(run.phases.is_empty());
+    assert!(rig.puts().is_empty());
+}
+
+#[test]
 fn a_dry_run_lists_the_steps_in_queue_order_and_writes_nothing() {
     let mut rig = Rig::new("");
     let plan = plan_on(&[1, 2]);
@@ -502,6 +623,7 @@ fn a_dry_run_lists_the_steps_in_queue_order_and_writes_nothing() {
     assert_eq!(run.outcome.code, 0);
     assert_eq!(run.confirms, 0);
     assert!(rig.puts().is_empty());
+    assert!(run.phases.is_empty());
     let text = render(&run.outcome.report, false);
     assert!(text.contains("dry run"), "{text}");
     assert!(text.contains("pass --apply"), "{text}");
@@ -718,7 +840,7 @@ fn a_head_that_moved_after_the_plan_is_refused() {
 }
 
 #[test]
-fn a_failed_deploy_fails_the_step_keeps_the_pending_and_stops_the_queue() {
+fn a_failed_deploy_keeps_the_pending_and_blocks_the_same_target() {
     let mut rig = Rig::new("");
     let plan = plan_on(&[1, 2]);
     let order = merge_numbers(&plan);
@@ -739,7 +861,8 @@ fn a_failed_deploy_fails_the_step_keeps_the_pending_and_stops_the_queue() {
         "{}",
         run.said(0)
     );
-    assert_eq!(run.step(1).detail, STOPPED);
+    assert!(run.step(1).detail.contains("blocked by failed deploy"));
+    assert!(run.step(1).blocked_by.is_some());
     assert_eq!(run.outcome.code, 1);
     assert_eq!(rig.puts().len(), 1);
     assert_eq!(rig.store.state.pending.len(), 1);
@@ -1516,4 +1639,260 @@ fn a_gateway_error_on_a_merge_that_actually_happened_goes_on_as_merged() {
     assert_eq!(run.outcome.code, 0);
     assert_eq!(rig.puts().len(), 1);
     assert!(rig.store.state.pending.is_empty());
+}
+
+fn deployment_plan() -> Plan {
+    let mut portal = pr("acme/portal", 2, "feat/2", "main");
+    portal.body = "depends-on: acme/sdk#1".to_string();
+    let mut auth = pr("acme/auth", 3, "feat/3", "main");
+    auth.body = "depends-on: acme/sdk#1".to_string();
+    let mut later = pr("acme/auth", 5, "feat/5", "main");
+    later.body = "depends-on: acme/auth#3".to_string();
+    let mut plan = plan_of(
+        vec![
+            pr("acme/sdk", 1, "feat/1", "main"),
+            portal,
+            auth,
+            pr("acme/sync", 4, "feat/4", "main"),
+            later,
+        ],
+        Vec::new(),
+    );
+    for item in &mut plan.items {
+        item.stage = item.number as usize;
+    }
+    plan
+}
+
+fn fail_deploy(rig: &Rig, number: u64) {
+    rig.script().runs_by_sha.insert(
+        merge_sha(number),
+        vec![run_json("deploy", "completed", Some("failure"))],
+    );
+}
+
+#[test]
+fn leaf_failure_continues_independent_prs_in_order_and_stays_failed_in_json() {
+    let mut rig = Rig::new("");
+    let plan = deployment_plan();
+    assert_eq!(merge_numbers(&plan), vec![1, 2, 3, 4, 5]);
+    fail_deploy(&rig, 2);
+    let run = rig.go(&plan);
+    assert_eq!(
+        run.statuses(),
+        vec![
+            Status::Done,
+            Status::Failed,
+            Status::Done,
+            Status::Done,
+            Status::Done
+        ]
+    );
+    assert_eq!(rig.puts().len(), 5);
+    assert_eq!(run.outcome.code, 1);
+    assert_eq!(rig.store.state.pending.len(), 1);
+    let json = serde_json::to_value(&run.outcome.report).unwrap();
+    assert_eq!(json["steps"][1]["merge_sha"], merge_sha(2));
+    assert_eq!(json["steps"][1]["status"], "failed");
+    assert_eq!(json["steps"][4]["status"], "done");
+}
+
+#[test]
+fn publisher_failure_stops_by_default_but_skip_blocks_transitive_consumers() {
+    for policy in [DependencyFailure::Stop, DependencyFailure::Skip] {
+        let mut rig = Rig::new("");
+        let plan = deployment_plan();
+        fail_deploy(&rig, 1);
+        let run = rig
+            .run(
+                &plan,
+                Settings {
+                    dependency_failure: policy,
+                    ..applied()
+                },
+                true,
+                true,
+            )
+            .unwrap();
+        assert_eq!(run.outcome.code, 1);
+        assert_eq!(run.step(0).status, Status::Failed);
+        assert_eq!(run.step(1).status, Status::Skipped);
+        assert_eq!(run.step(2).status, Status::Skipped);
+        assert_eq!(run.step(4).status, Status::Skipped);
+        assert_eq!(run.step(4).blocked_by.as_deref(), Some("acme/sdk#1"));
+        assert_eq!(
+            run.step(3).status,
+            if policy == DependencyFailure::Stop {
+                Status::Skipped
+            } else {
+                Status::Done
+            }
+        );
+        assert_eq!(
+            rig.puts().len(),
+            if policy == DependencyFailure::Stop {
+                1
+            } else {
+                2
+            }
+        );
+    }
+}
+
+#[test]
+fn resumed_leaf_failure_uses_saved_graph_even_when_merged_pr_is_absent() {
+    let mut first = Rig::new("");
+    let mut plan = deployment_plan();
+    fail_deploy(&first, 2);
+    first.go(&plan);
+    let pending = first.store.state.pending[0].clone();
+    assert!(pending.continuation.is_some());
+    plan.items.retain(|item| item.number >= 3);
+    let mut rig = Rig::new("");
+    rig.store.state.pending.push(pending);
+    fail_deploy(&rig, 2);
+    let run = rig.go(&plan);
+    assert_eq!(run.step(0).kind, Kind::Resume);
+    assert_eq!(
+        run.statuses(),
+        vec![Status::Failed, Status::Done, Status::Done, Status::Done]
+    );
+    assert_eq!(rig.puts().len(), 3);
+    assert_eq!(rig.store.state.pending.len(), 1);
+}
+
+#[test]
+fn legacy_resume_without_independence_metadata_stops_safely() {
+    let mut first = Rig::new("");
+    fail_deploy(&first, 2);
+    first.go(&deployment_plan());
+    let mut pending = first.store.state.pending[0].clone();
+    pending.continuation = None;
+    let mut rig = Rig::new("");
+    rig.store.state.pending.push(pending);
+    fail_deploy(&rig, 2);
+    let plan = plan_of(vec![pr("acme/sync", 4, "feat/4", "main")], Vec::new());
+    let run = rig.go(&plan);
+    assert_eq!(run.statuses(), vec![Status::Failed, Status::Skipped]);
+    assert!(run.step(0).detail.contains("no independence proof"));
+    assert!(rig.puts().is_empty());
+}
+
+#[test]
+fn all_skipped_workflows_are_gray_successful_noops_and_do_not_block() {
+    let mut rig = Rig::new("");
+    rig.script().runs = vec![run_json("publish", "completed", Some("skipped"))];
+    let run = rig.go(&plan_on(&[1, 2]));
+    assert_eq!(run.statuses(), vec![Status::Skipped, Status::Skipped]);
+    assert_eq!(run.outcome.code, 0);
+    assert_eq!(rig.puts().len(), 2);
+    assert!(rig.store.state.pending.is_empty());
+    for step in &run.outcome.report.steps {
+        assert!(step.merge_sha.is_some());
+        assert!(step.blocked_by.is_none());
+    }
+    let color = render(&run.outcome.report, true);
+    assert!(color.contains("\x1b[2mskipped:"));
+    assert!(!render(&run.outcome.report, false).contains('\x1b'));
+}
+
+#[test]
+fn auxiliary_skip_does_not_mask_success_or_failure() {
+    for (conclusion, expected) in [("success", Status::Done), ("failure", Status::Failed)] {
+        let mut rig = Rig::new("");
+        rig.script().runs = vec![
+            run_json("audit", "completed", Some(conclusion)),
+            run_json("publish", "completed", Some("skipped")),
+        ];
+        let run = rig.go(&plan_on(&[1]));
+        assert_eq!(run.step(0).status, expected);
+    }
+}
+
+#[test]
+fn resumed_failure_rejects_new_heads_without_independence_proof() {
+    let mut first = Rig::new("");
+    fail_deploy(&first, 2);
+    let mut plan = deployment_plan();
+    first.go(&plan);
+    let mut rig = Rig::new("");
+    rig.store
+        .state
+        .pending
+        .push(first.store.state.pending[0].clone());
+    plan.items
+        .retain(|item| item.number == 3 || item.number == 4);
+    plan.items
+        .iter_mut()
+        .find(|item| item.number == 3)
+        .unwrap()
+        .sha = "f".repeat(40);
+    fail_deploy(&rig, 2);
+    let run = rig.go(&plan);
+    assert_eq!(
+        run.statuses(),
+        vec![Status::Failed, Status::Skipped, Status::Done]
+    );
+    assert!(run.step(1).detail.contains("no saved independence proof"));
+    assert_eq!(rig.puts().len(), 1);
+    let color = render(&run.outcome.report, true);
+    assert!(color.contains("\x1b[33mskipped:"));
+    assert!(color.contains("\x1b[32mdone:"));
+    assert!(color.contains("failed:"));
+    assert!(!render(&run.outcome.report, false).contains('\x1b'));
+}
+
+#[test]
+fn resumed_publisher_failure_still_stops_after_publisher_leaves_plan() {
+    let mut first = Rig::new("");
+    fail_deploy(&first, 1);
+    let mut plan = deployment_plan();
+    first.go(&plan);
+    let mut rig = Rig::new("");
+    rig.store
+        .state
+        .pending
+        .push(first.store.state.pending[0].clone());
+    plan.items.retain(|item| item.number != 1);
+    fail_deploy(&rig, 1);
+    let run = rig.go(&plan);
+    assert_eq!(run.step(0).kind, Kind::Resume);
+    assert_eq!(run.step(0).status, Status::Failed);
+    assert!(
+        run.outcome.report.steps[1..]
+            .iter()
+            .all(|step| step.status == Status::Skipped)
+    );
+    assert!(rig.puts().is_empty());
+}
+
+#[test]
+fn timeout_stops_even_proven_independent_prs() {
+    let mut rig = Rig::new("");
+    rig.script()
+        .runs_by_sha
+        .insert(merge_sha(2), vec![run_json("deploy", "in_progress", None)]);
+    let run = rig
+        .run(
+            &deployment_plan(),
+            Settings {
+                timeout: Some(Duration::from_secs(5)),
+                ..applied()
+            },
+            true,
+            true,
+        )
+        .unwrap();
+    assert_eq!(
+        run.statuses(),
+        vec![
+            Status::Done,
+            Status::Stopped,
+            Status::Skipped,
+            Status::Skipped,
+            Status::Skipped
+        ]
+    );
+    assert_eq!(rig.puts().len(), 2);
+    assert_eq!(run.outcome.code, EXIT_STOPPED);
 }

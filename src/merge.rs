@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -51,6 +52,7 @@ pub enum Verdict {
     Waiting(String),
     Failed(String),
     Passed(usize),
+    Skipped(usize),
 }
 
 fn same_workflow(a: &Run, b: &Run) -> bool {
@@ -90,7 +92,28 @@ pub fn judge(all: &[Run]) -> Verdict {
             runs.len()
         ));
     }
-    Verdict::Passed(runs.len())
+    if runs
+        .iter()
+        .all(|run| run.conclusion.as_deref() == Some("skipped"))
+    {
+        Verdict::Skipped(runs.len())
+    } else {
+        Verdict::Passed(runs.len())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Continuation {
+    pub independent: BTreeMap<String, String>,
+    pub dependents: Vec<String>,
+    pub has_consumers: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum DependencyFailure {
+    #[default]
+    Stop,
+    Skip,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,6 +122,8 @@ pub struct Pending {
     pub repo: String,
     pub base: String,
     pub sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<Continuation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -250,6 +275,8 @@ pub struct StepReport {
     pub merge_sha: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deploy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked_by: Option<String>,
 }
 
 impl StepReport {
@@ -261,6 +288,7 @@ impl StepReport {
             detail: detail.to_string(),
             merge_sha: None,
             deploy: None,
+            blocked_by: None,
         }
     }
 }
@@ -374,6 +402,32 @@ mod tests {
     }
 
     #[test]
+    fn only_all_skipped_runs_are_a_normal_skipped_deploy() {
+        assert_eq!(
+            judge(&[run("publish", "completed", Some("skipped"))]),
+            Verdict::Skipped(1)
+        );
+        assert_eq!(
+            judge(&[
+                numbered(1, 1, "completed", Some("success")),
+                numbered(2, 2, "completed", Some("skipped"))
+            ]),
+            Verdict::Passed(2)
+        );
+        assert_eq!(
+            judge(&[run("audit", "completed", Some("neutral"))]),
+            Verdict::Passed(1)
+        );
+        assert!(matches!(
+            judge(&[
+                numbered(1, 1, "completed", Some("failure")),
+                numbered(2, 2, "completed", Some("skipped"))
+            ]),
+            Verdict::Failed(_)
+        ));
+    }
+
+    #[test]
     fn a_failed_run_wins_even_while_others_still_run() {
         let runs = [
             run("build", "in_progress", None),
@@ -482,6 +536,7 @@ mod tests {
                 repo: "acme/api".to_string(),
                 base: "main".to_string(),
                 sha: None,
+                continuation: None,
             })
             .unwrap();
         store.set_sha("acme/api#1", "abc123").unwrap();
