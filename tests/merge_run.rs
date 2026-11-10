@@ -4,7 +4,7 @@ use std::time::Duration;
 
 mod common;
 use common::{Server, pr, serve_requests};
-use pipetrain::command::merge::{Hooks, Outcome, Settings, merge_plan, render};
+use pipetrain::command::merge::{Hooks, Outcome, Settings, merge_plan, render, render_final};
 use pipetrain::config::{ApiConfig, Config, Rules};
 use pipetrain::emit;
 use pipetrain::github::Client;
@@ -751,6 +751,57 @@ fn a_failed_deploy_fails_the_step_keeps_the_pending_and_stops_the_queue() {
         rig.store.state.pending[0].sha.as_deref(),
         Some(merge_sha(order[0]).as_str())
     );
+    assert!(run.step(0).detail.contains("the deploy failed"));
+    let final_text = render_final(&run.outcome.report, false);
+    assert!(!final_text.contains("failed: merge"), "{final_text}");
+    assert!(!final_text.contains("skipped: merge"), "{final_text}");
+    assert!(final_text.contains("1 PRs merged, 0 earlier merges checked"));
+    assert!(final_text.contains("0 done, 1 skipped, 1 failed, 0 stopped"));
+    assert!(final_text.contains("same --state to resume"));
+    assert!(final_text.contains("The merge will not be repeated"));
+    let full_text = render(&run.outcome.report, false);
+    assert_eq!(full_text.matches("failed: merge").count(), 1);
+    let json = serde_json::to_value(&run.outcome.report).unwrap();
+    assert_eq!(json["steps"][0]["status"], "failed");
+    assert_eq!(json["steps"][0]["merge_sha"], merge_sha(order[0]));
+}
+
+#[test]
+fn a_failed_deploy_can_resume_after_a_successful_rerun_without_another_merge() {
+    let mut rig = Rig::new("");
+    let plan = plan_on(&[1]);
+    rig.script().runs = vec![run_json("deploy", "completed", Some("failure"))];
+    let first = rig.go(&plan);
+    assert_eq!(first.statuses(), vec![Status::Failed]);
+    assert_eq!(rig.puts().len(), 1);
+
+    rig.script().runs = green();
+    let second = rig.go(&plan);
+    assert_eq!(second.step(0).kind, Kind::Resume);
+    assert_eq!(second.step(0).status, Status::Done);
+    assert_eq!(second.outcome.code, 0);
+    assert_eq!(rig.puts().len(), 1);
+    assert!(rig.store.state.pending.is_empty());
+    let text = render_final(&second.outcome.report, false);
+    assert!(text.contains("0 PRs merged, 1 earlier merges checked"));
+    assert!(!text.contains("same --state to resume"));
+}
+
+#[test]
+fn final_dry_run_keeps_the_plan_and_final_success_does_not_repeat_steps() {
+    let mut rig = Rig::new("");
+    let plan = plan_on(&[1]);
+    let dry_run = rig.run(&plan, dry(), true, true).unwrap();
+    assert_eq!(
+        render_final(&dry_run.outcome.report, false),
+        render(&dry_run.outcome.report, false)
+    );
+
+    let applied = rig.go(&plan);
+    let text = render_final(&applied.outcome.report, false);
+    assert!(!text.contains("done: merge"));
+    assert!(text.contains("1 PRs merged, 0 earlier merges checked"));
+    assert!(text.contains("1 done, 0 skipped, 0 failed, 0 stopped"));
 }
 
 #[test]

@@ -478,6 +478,7 @@ fn finish_deploy(
     report.status = status;
     report.detail = match status {
         Status::Done => format!("merged {} into {base}", short(sha)),
+        Status::Failed => format!("merged {} into {base}, but the deploy failed", short(sha)),
         _ => format!(
             "merged {} into {base}, but the deploy did not finish",
             short(sha)
@@ -917,6 +918,14 @@ fn step_text(step: &StepReport, color: bool) -> String {
 }
 
 pub fn render(report: &Report, color: bool) -> String {
+    render_with_steps(report, color, true)
+}
+
+pub fn render_final(report: &Report, color: bool) -> String {
+    render_with_steps(report, color, !report.applied)
+}
+
+fn render_with_steps(report: &Report, color: bool, include_steps: bool) -> String {
     let mut out = String::new();
     if !report.applied && !report.requested && report.stopped.is_none() {
         let banner = "dry run, nothing was merged; pass --apply to do it";
@@ -925,8 +934,10 @@ pub fn render(report: &Report, color: bool) -> String {
     if report.steps.is_empty() {
         out.push_str(&format!("{}\n", tint(color, dim, "nothing to merge")));
     }
-    for step in &report.steps {
-        out.push_str(&format!("{}\n", step_text(step, color)));
+    if include_steps {
+        for step in &report.steps {
+            out.push_str(&format!("{}\n", step_text(step, color)));
+        }
     }
     if !report.not_merging.is_empty() {
         out.push_str(&format!(
@@ -952,6 +963,19 @@ pub fn render(report: &Report, color: bool) -> String {
         out.push_str(&format!("\n{}\n", tint(color, yellow, reason)));
     }
     if report.applied {
+        let merged = report
+            .steps
+            .iter()
+            .filter(|step| step.kind == Kind::Merge && step.merge_sha.is_some())
+            .count();
+        let resumed = report
+            .steps
+            .iter()
+            .filter(|step| step.kind == Kind::Resume && step.merge_sha.is_some())
+            .count();
+        out.push_str(&format!(
+            "\n{merged} PRs merged, {resumed} earlier merges checked\n"
+        ));
         out.push_str(&format!(
             "\n{} done, {} skipped, {} failed, {} stopped\n",
             report.count(Status::Done),
@@ -959,6 +983,11 @@ pub fn render(report: &Report, color: bool) -> String {
             report.count(Status::Failed),
             report.count(Status::Stopped)
         ));
+        if report.steps.iter().any(|step| {
+            step.merge_sha.is_some() && matches!(step.status, Status::Failed | Status::Stopped)
+        }) {
+            out.push_str("The PR is already merged and its deploy is still pending in the state file. Fix or re-run the workflow, then repeat the same command with the same --state to resume. The merge will not be repeated.\n");
+        }
     }
     out
 }
@@ -1033,7 +1062,7 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
     if json {
         println!("{}", serde_json::to_string_pretty(&outcome.report)?);
     } else {
-        anstream::print!("{}", render(&outcome.report, true));
+        anstream::print!("{}", render_final(&outcome.report, true));
     }
     if opts.apply {
         eprintln!(

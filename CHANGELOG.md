@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.3
+
+### Fixed
+
+- `merge --apply` no longer repeats every streamed step in its final text output. The final summary separately counts merged PRs and earlier merges checked, so a failed deployment does not hide a successful merge behind `0 done`.
+- A failed deployment explicitly says that it failed and explains how to resume with the same state file after fixing or re-running the workflow. Pending deploys still stop the queue; JSON retains the complete step report.
+
 ## 0.7.2
 
 ### Fixed
