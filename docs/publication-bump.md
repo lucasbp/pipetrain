@@ -12,6 +12,10 @@ the merge plan. PRs excluded for missing approval, failing checks or other
 readiness blockers are not edited by this option. Author-hidden PRs are not bump
 targets. Those consumers require a separate reviewed preparation before joining
 the queue. Bump audit events are additional to the queue-job progress count.
+The current planner records one package contract per publisher/consumer pair.
+Consumers of multiple packages published by the same repository require manual
+preparation to cover every package; automatic preparation is not a complete
+multi-package update for that topology.
 
 ## Publication evidence
 
@@ -67,6 +71,12 @@ consumer branch and verifies its SHA before checkout. Existing checkouts are nev
 reused, reset or cleaned. Hooks and filesystem monitor commands are disabled for
 these git operations. Existing git authentication and commit identity are required;
 the backend does not install credentials or modify global configuration.
+
+Subprocesses and their descendants remain owned for the lifetime of each
+operation. Windows starts the child suspended and places it in a kill-on-close
+Job Object before resuming; Unix uses an owned process group. Timeouts terminate
+the owned tree even when the original child has exited but descendants retain
+its output pipes. Failure to establish containment prevents execution.
 
 Preparation requires a clean workspace, patches the requested pins, performs
 `dotnet restore --use-lock-file`, then repeats with `--locked-mode`. These commands
