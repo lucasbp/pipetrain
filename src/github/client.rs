@@ -90,6 +90,18 @@ impl Client {
         }
     }
 
+    pub fn fork(&self) -> Self {
+        Self {
+            agent: self.agent.clone(),
+            token: self.token.clone(),
+            base: self.base.clone(),
+            guard: self.guard.clone(),
+            retry: self.retry,
+            retry_after: None,
+            cache: Cache::disabled(),
+        }
+    }
+
     pub fn with_retry(mut self, retry: Retry) -> Self {
         self.retry = retry;
         self
@@ -144,11 +156,11 @@ impl Client {
     }
 
     pub fn requests(&self) -> u32 {
-        self.guard.total
+        self.guard.total()
     }
 
     pub fn remaining(&self) -> Option<u64> {
-        self.guard.remaining.values().copied().min()
+        self.guard.remaining()
     }
 
     fn read(&mut self, mut response: Response<Body>) -> Reply {
@@ -161,7 +173,7 @@ impl Client {
             .and_then(|value| value.trim().parse::<u64>().ok())
             .map(Duration::from_secs);
         if let Some(left) = rate.remaining {
-            self.guard.remaining.insert(rate.resource.clone(), left);
+            self.guard.observe(&rate.resource, left, rate.reset);
         }
         let body: Value = response.body_mut().read_json().unwrap_or(Value::Null);
         Reply { status, rate, body }

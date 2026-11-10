@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.8.0
+
+### Added
+
+- Merge execution now runs independent repositories concurrently up to `max_parallel`, preserving dependency order, one active operation per repository, gate barriers and durable checkpoints before effects. Running work is reconciled on resume without repeating merges.
+- `merge --bump` optionally prepares NuGet consumer updates after a new publisher push is proved by its workflow and exact package feed version. Pins and lockfiles are prepared together in an isolated worktree, and a draft PR targets the consumer branch for CI and review before the consumer can merge. `--no-bump` explicitly keeps automatic preparation disabled.
+- Publication inputs, consumer contracts and bump preparation markers persist in the merge state. Skipped or duplicate publications never select an old latest version or create a consumer bump. Partial preparations stop for inspection rather than creating duplicate PRs.
+
+### Changed
+
+- Parallel progress shows completed steps, active operations and remaining work. GitHub request and pacing limits are shared across workers.
+
+### Fixed
+
+- Animated status fits the current terminal width, preserving the step/PR context and elapsed time without wrapping each frame. Narrow terminals use a compact prefix, and truncation preserves UTF-8 and color controls.
+
 ## 0.7.4
 
 ### Added

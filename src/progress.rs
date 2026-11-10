@@ -33,6 +33,68 @@ pub struct Painter<W: Write> {
     color: bool,
 }
 
+fn ellipsize(text: &str, budget: usize) -> String {
+    if text.len() <= budget {
+        return text.to_string();
+    }
+    let marker = if budget >= "…".len() { "…" } else { "." };
+    let available = budget.saturating_sub(marker.len());
+    let mut out = String::new();
+    for character in text.chars() {
+        if out.len() + character.len_utf8() > available {
+            break;
+        }
+        out.push(character);
+    }
+    if budget > 0 {
+        out.push_str(marker);
+    }
+    out
+}
+
+fn fit_phase(phase: &str, budget: usize) -> String {
+    let plain: String = phase
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
+    if plain.len() <= budget {
+        return plain;
+    }
+    if let Some(open) = plain.find('[')
+        && let Some(close) = plain[open..].find("]: ").map(|offset| open + offset + 1)
+        && close + 2 > budget
+    {
+        let mut words = plain[..open].split_whitespace();
+        let first = words.next().unwrap_or_default();
+        let counter = if first == "step" {
+            words.next().unwrap_or_default()
+        } else {
+            first
+        };
+        let counter = counter.trim_end_matches(',');
+        if counter.split_once('/').is_some_and(|(done, total)| {
+            !done.is_empty()
+                && !total.is_empty()
+                && done
+                    .chars()
+                    .chain(total.chars())
+                    .all(|character| character.is_ascii_digit())
+        }) {
+            return ellipsize(
+                &format!("{counter} {}{}", &plain[open..close], &plain[close..]),
+                budget,
+            );
+        }
+    }
+    ellipsize(&plain, budget)
+}
+
 impl<W: Write> Painter<W> {
     pub fn new(writer: W, enabled: bool, delay: Duration) -> Self {
         Painter {
@@ -66,6 +128,10 @@ impl<W: Write> Painter<W> {
     }
 
     pub fn tick(&mut self, elapsed: Duration) {
+        self.tick_at_width(elapsed, terminal_width());
+    }
+
+    fn tick_at_width(&mut self, elapsed: Duration, width: Option<usize>) {
         if !self.enabled || elapsed < self.delay {
             return;
         }
@@ -79,14 +145,27 @@ impl<W: Write> Painter<W> {
         } else {
             ("", "", "")
         };
-        let mut text = format!("{hide}{ERASE_LINE}{glyph_on}{glyph}{off} {phase}");
-        if let Some((done, total)) = self.counter {
-            text.push_str(&format!(" {done}/{total}"));
+        let limit = width.unwrap_or(80).saturating_sub(1);
+        let glyph_bytes = glyph.len_utf8() + 1;
+        if limit < glyph_bytes {
+            return;
         }
-        text.push_str(&format!(
-            "{dim_on} \u{b7} {}{off}",
-            crate::elapsed::format(elapsed)
-        ));
+        let mut counter = self
+            .counter
+            .map(|(done, total)| format!(" {done}/{total}"))
+            .unwrap_or_default();
+        let mut elapsed_text = format!(" · {}", crate::elapsed::format(elapsed));
+        if glyph_bytes + counter.len() + elapsed_text.len() > limit {
+            counter.clear();
+            elapsed_text = ellipsize(&elapsed_text, limit - glyph_bytes);
+        }
+        let phase = fit_phase(
+            phase,
+            limit - glyph_bytes - counter.len() - elapsed_text.len(),
+        );
+        let text = format!(
+            "{hide}{ERASE_LINE}{glyph_on}{glyph}{off} {phase}{counter}{dim_on}{elapsed_text}{off}"
+        );
         self.emit(text.as_bytes());
         self.hidden = true;
         self.frame += 1;
@@ -344,6 +423,79 @@ mod tests {
     fn painter(enabled: bool) -> (Painter<Sink>, Sink) {
         let sink = Sink::default();
         (Painter::new(sink.clone(), enabled, DELAY), sink)
+    }
+
+    fn plain_frame(text: &str) -> String {
+        regex::Regex::new("\x1b\\[[0-9;?]*[A-Za-z]")
+            .unwrap()
+            .replace_all(text, "")
+            .replace('\r', "")
+    }
+
+    #[test]
+    fn long_frames_fit_eighty_and_forty_columns_without_splitting_styles_or_utf8() {
+        for width in [80, 40] {
+            for color in [false, true] {
+                for phase in [
+                    "step 1/2, 1 remaining [acme/api#1]: deploy acme/api: workflow still running for a very long description",
+                    "3/50 completed, 2 active, 47 remaining [acme/api#123]: verificando publicação 日本語 👩‍💻 é andamento muito longo",
+                ] {
+                    let (p, sink) = painter(true);
+                    let mut p = p.with_color(color);
+                    p.set_phase(phase);
+                    p.tick_at_width(Duration::from_secs(65), Some(width));
+                    let raw = sink.text();
+                    let frame = plain_frame(&raw);
+                    assert!(frame.len() < width, "{width}: {frame:?}");
+                    assert!(!frame.contains('\n'));
+                    assert!(frame.contains(if phase.starts_with("step") {
+                        "[acme/api#1]"
+                    } else {
+                        "[acme/api#123]"
+                    }));
+                    assert!(frame.contains(if phase.starts_with("step") {
+                        "1/2"
+                    } else {
+                        "3/50"
+                    }));
+                    assert!(frame.ends_with(" · 1m 05s"));
+                    assert!(frame.contains('…'));
+                    assert!(!frame.contains('\x1b'));
+                    assert_eq!(raw.contains(CYAN), color);
+                    assert_eq!(raw.contains(DIM), color);
+                    if color {
+                        assert!(raw.ends_with(RESET));
+                    }
+                    p.finish();
+                    assert!(sink.text().ends_with(SHOW_AFTER_ERASE));
+                    assert!(!p.hidden());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shrinking_terminal_recomputes_budget_and_preserves_separate_counter() {
+        let (mut p, sink) = painter(true);
+        p.set_phase("verificando 日本語 👩‍💻 é publicação de dependências com uma descrição longa");
+        p.set_count(12, 34);
+        for width in [80, 40] {
+            let start = sink.len();
+            p.tick_at_width(Duration::from_secs(2), Some(width));
+            let frame = plain_frame(&sink.text()[start..]);
+            assert!(frame.len() < width);
+            assert!(frame.ends_with(" 12/34 · 2.0 s"));
+        }
+    }
+
+    #[test]
+    fn phase_control_characters_cannot_create_another_terminal_line() {
+        let (mut p, sink) = painter(true);
+        p.set_phase("deploy\r\n\t日本語");
+        p.tick_at_width(Duration::from_secs(1), Some(40));
+        let frame = plain_frame(&sink.text());
+        assert!(!frame.contains(['\n', '\r', '\t']));
+        assert!(frame.len() < 40);
     }
 
     #[test]

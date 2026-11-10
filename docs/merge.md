@@ -1,6 +1,6 @@
 # pipetrain merge
 
-`pipetrain merge` runs the merge order that `pipetrain plan` computed: one PR at a time, only while the PR is still ready, and it waits for the deploy of the target branch to finish before it starts the next one. It is the second command that writes to GitHub, after `bundle --apply`.
+`pipetrain merge` follows the dependencies computed by `pipetrain plan`, runs independent repositories up to the configured `max_parallel`, and waits for each PR deployment before releasing its consumers. Setting `max_parallel = 1` preserves sequential execution. It is the second command that writes to GitHub, after `bundle --apply`.
 
 Without `--apply` nothing is written. The dry run prints the steps it would take and the PRs the plan left out, and calls GitHub only to build the plan.
 
@@ -13,7 +13,7 @@ The PR selection flags (`PRS`, `--all`, `--mine`, `--author`, `--org`, `--date`,
 
 ## What it merges
 
-The steps come from the same lines that `plan --emit queue` prints (see [queue-output.md](queue-output.md)), in the same order:
+The steps come from the same lines that `plan --emit queue` prints (see [queue-output.md](queue-output.md)). The report keeps that order; independent steps can finish in another order:
 
 | Queue line | Step |
 |---|---|
@@ -80,7 +80,7 @@ When the PRs of a bundle were retargeted to `deploy/<date>-<base>` (see `bundle 
 
 ## Confirmation and gates
 
-On an interactive terminal, execution shows a spinner with elapsed time after confirmation. Every status retains the current step, total steps, remaining steps and PR identifier, such as `step 3/50, 47 remaining [acme/api#123]: deploy acme/api: 1 of 2 workflow runs still going`. The total includes merge, resume, gate, package wait and deploy PR steps. The status changes during readiness checks, the merge request, deployment workflow discovery, running workflows and the final completion check. The spinner keeps moving between API polls, pauses before gate prompts and clears before final results. `--no-progress`, JSON output, CI and redirected stderr disable the animation. These status updates do not change merge order, checks, polling intervals or resumability.
+On an interactive terminal, execution shows a spinner with elapsed time after confirmation. Sequential status retains the step index and PR identifier. Parallel status reports completed steps, active workers, unfinished steps and PR identifier, such as `3/50 completed, 2 active, 47 remaining [acme/api#123]: deploy acme/api: 1 of 2 workflow runs still going`. An active step is included in the unfinished count. The total includes merge, resume, gate, package wait and deploy PR steps. The status changes during readiness checks, the merge request, deployment workflow discovery, running workflows and the final completion check. The spinner keeps moving between API polls, pauses before gate prompts and clears before final results. `--no-progress`, JSON output, CI and redirected stderr disable the animation. These status updates do not change merge order, checks, polling intervals or resumability.
 
 - `--apply` shows the steps and asks you to type `yes`. `--yes` skips only this question.
 - Every gate and unpublished package wait asks again, even with `--yes`. Without a terminal it does not ask: the step is `stopped` and the run ends.
@@ -163,7 +163,6 @@ These were decided on the conservative side. Each can be loosened later with a n
 2. **Gates under `--yes`.** `--yes` does not answer gates. Is a separate `--gates-confirmed` the right split, or should a CI run be able to pre-approve a named gate (for example by PR id)?
 3. **Open questions.** They block `--apply`. Some questions (a sibling that is not ready, for example) may be acceptable to merge past; is one switch for all of them too coarse?
 4. **Branches that are behind.** A `behind` PR fails the step and asks you to update it. Should `merge` offer `--update-branch`, knowing that it re-triggers the PR's checks and invalidates the plan?
-5. **One deploy at a time across repos.** Merges are strictly sequential, even for PRs of different repos that the plan puts in the same step. Parallel lanes (`max_parallel` in the plan) are not used.
 6. **A deploy that failed after the merge.** pipetrain keeps the record and never reverts. Continuation follows the dependency failure policy below; recovery remains manual.
 
 ## Deployment failure policy
@@ -175,3 +174,39 @@ A failed deploy remains `failed`, keeps its merge SHA and pending state, and mak
 New pending records contain optional `continuation` metadata: `dependents` captures the transitive dependency closure, `has_consumers` records dependency contracts, and `independent` maps independent PR IDs to their planned head SHAs. Resuming uses this snapshot together with the rebuilt graph, because merged PRs can disappear from the plan. A changed or new head without saved proof is blocked. Older state files still load, but a failed deploy without this metadata stops safely. Do not delete or edit pending state to bypass that protection.
 
 Text results use green for completed steps, red for failures, yellow for blocked skips and stopped gates, and gray for normal skips such as already merged PRs or workflows skipped by filters. An all-skipped deploy is a normal `skipped` result with its merge SHA retained and pending record removed after the usual two settled polls. A successful workflow alongside skipped auxiliary workflows remains green; a failed workflow alongside skipped workflows remains red. Colors respect `--color`, `NO_COLOR` and redirected output. JSON remains plain and retains the full report.
+
+## Parallel execution
+
+`max_parallel` bounds active merge and deployment workers across repositories. Each worker has a separate GitHub client while all clients share the request budget, pacing window and observed rate limits. The budget lock is released before sleeping or issuing HTTP requests. Only one worker runs in a repository at a time, including PRs with different base branches. PRs targeting the same repository and base also keep their queue dependency, so a failed deployment blocks later merges into that target.
+
+The executor uses `Plan.items[].after` across lanes. A consumer starts only after its internal prerequisites finish successfully or are legitimately skipped. Existing package publication waits and DDL/infra confirmations remain barriers: active work drains before a prompt, and later work cannot pass it. Deploy PR creation also runs as a barrier. Dependency waits associated with failed consumers are blocked without prompting; independent work remains eligible under the selected failure policy.
+
+The coordinator owns confirmations, progress and the state file. Workers send typed pending/SHA/deploy-PR mutations over a bounded channel and wait for the durable acknowledgement before proceeding. No worker writes the state file directly. `active_jobs` records scheduler steps before dispatch; existing `pending` entries and merge SHAs remain the source for resolving interrupted merges and deployment waits. Recovered pending deployments are reconciled before dispatching new merges. A pending entry without a confirmed merge SHA is checked against GitHub before any replay.
+
+A publisher failure stops new dispatches by default. The skip policy blocks its descendants and continues independent work. A leaf deployment failure continues proven independent work. Readiness failures, uncertain outcomes and coordinator persistence failures stop new dispatches. Workers already running are drained and their results recorded; the executor does not cancel deployment workflows.
+
+The scheduler exposes a coordinator preparation callback after prerequisite completion and before dispatch. A blocked preparation result affects only that consumer and its descendants. Preparation errors stop new dispatches before mutation. This callback does not change package versions or create publication PRs by itself.
+
+## Optional reviewed consumer bumps
+
+`--bump` enables publication-backed consumer preparation; `--no-bump` explicitly
+keeps the default disabled behavior. They cannot be combined. Without `--apply`,
+no bump branch, workspace or PR is created. The dry run and apply confirmation
+state these potential writes and identify candidate consumers without inventing
+versions. `--bump-push-step` changes the exact publisher step name, whose default
+is `Push to GitHub Packages`.
+
+A proved new NuGet publication can prepare one isolated bump branch and draft PR
+per consumer head. The draft targets that consumer's head branch and needs CI
+and review. The consumer and its descendants stay blocked in yellow; independent
+items can continue. A skipped or duplicate publication emits a gray bump skip
+and leaves ordinary consumer checks and gates intact. The coordinator persists
+publication inputs and preparation markers for safe resume and duplicate PR
+protection. See [Publication-backed consumer preparation](publication-bump.md)
+for proof requirements, workspace limits and partial-operation recovery.
+
+The JSON report adds `bump_enabled` when enabled, optional `bump_candidates`, and
+`kind: bump` events with a structured `bump` outcome. These additive fields retain
+schema 1. Events are appended after fixed queue steps and streamed at preparation
+time. A draft requiring review or a partial operation contributes a stopped
+attention event and exit code 5 without changing the dependency graph.

@@ -62,3 +62,13 @@ fn dependency_failure_accepts_only_stop_or_skip() {
     let out = run(&["merge", "--dependency-failure", "continue"]);
     assert_eq!(out.status.code(), Some(2));
 }
+
+#[test]
+fn merge_bump_is_explicit_opt_in_and_conflicts_with_no_bump() {
+    for option in ["--bump", "--no-bump"] {
+        assert!(run(&["merge", option, "--help"]).status.success());
+    }
+    let out = run(&["merge", "--bump", "--no-bump"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("cannot be used"));
+}
