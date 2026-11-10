@@ -21,6 +21,7 @@ pub mod log;
 pub mod manifest;
 pub mod mcp;
 pub mod merge;
+pub mod merge_scheduler;
 pub mod model;
 pub mod plan;
 pub mod planner;

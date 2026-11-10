@@ -25,6 +25,7 @@ use crate::style::{bold, dim, green, red, yellow};
 use crate::workflows::{self, PushRuns};
 
 mod failure;
+mod parallel;
 
 const MERGEABILITY_TRIES: usize = 3;
 const MERGEABILITY_PAUSE: Duration = Duration::from_secs(2);
@@ -859,6 +860,15 @@ pub fn merge_plan(
         });
     }
     report.applied = true;
+    if cfg.max_parallel > 1 {
+        parallel::execute(&env, client, store, hooks, &mut report.steps, &bundles)?;
+        let code = report.exit_code();
+        return Ok(Outcome {
+            report,
+            aborted: false,
+            code,
+        });
+    }
     let mut halted: Option<String> = None;
     let mut failures = failure::DeployFailures::default();
     for index in 0..report.steps.len() {
@@ -1124,7 +1134,7 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
         } else {
             Some(ask(
                 text,
-                "Merge these PRs one at a time, waiting for each deploy? Type yes: ",
+                "Merge these PRs with the configured parallelism, waiting for each deploy? Type yes: ",
             ))
         };
         let proceed = gate(apply, yes, interactive, answer.as_deref()) == Gate::Proceed;

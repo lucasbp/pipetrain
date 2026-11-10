@@ -272,10 +272,11 @@ impl Rig {
         let script = Arc::new(Mutex::new(Script::new()));
         let shared = Arc::clone(&script);
         let server = serve_requests(move |line, payload| respond(&shared, line, payload));
-        let cfg = Config::parse(&format!(
+        let mut cfg = Config::parse(&format!(
             "orgs = [\"acme\"]\n{top}[merge]\npoll_seconds = 1\ntimeout_minutes = 1\nno_run_grace_seconds = 3\n{extra}"
         ))
         .unwrap();
+        cfg.max_parallel = 1;
         Self {
             script,
             server,
@@ -1895,4 +1896,290 @@ fn timeout_stops_even_proven_independent_prs() {
     );
     assert_eq!(rig.puts().len(), 2);
     assert_eq!(run.outcome.code, EXIT_STOPPED);
+}
+
+#[test]
+fn parallel_real_workers_merge_independent_repositories_with_coordinated_state() {
+    let mut rig = Rig::new("no_deploy_repos = [\"acme/api\", \"acme/ui\"]");
+    rig.cfg.max_parallel = 2;
+    let plan = plan_of(
+        vec![
+            pr("acme/api", 1, "feat/1", "main"),
+            pr("acme/ui", 2, "feat/2", "main"),
+        ],
+        Vec::new(),
+    );
+    let run = rig.go(&plan);
+    assert_eq!(run.statuses(), [Status::Done, Status::Done]);
+    assert_eq!(rig.puts().len(), 2);
+    assert!(rig.store.state.pending.is_empty());
+    assert!(rig.store.state.active_jobs.is_empty());
+    assert_eq!(run.observed, 2);
+}
+
+#[test]
+fn parallel_gates_stay_on_coordinator_and_refusal_prevents_later_merge() {
+    let mut rig = Rig::new("no_deploy_repos = [\"acme/api\"]");
+    rig.cfg.max_parallel = 2;
+    let plan = gated_plan();
+    let run = rig.run(&plan, applied(), true, false).unwrap();
+    assert_eq!(rig.puts().len(), 1);
+    assert_eq!(run.gates, 1);
+    assert_eq!(run.outcome.code, EXIT_STOPPED);
+    assert!(
+        run.outcome
+            .report
+            .steps
+            .iter()
+            .any(|step| step.blocked_by.is_some())
+    );
+    assert!(rig.store.state.active_jobs.is_empty());
+}
+
+#[test]
+fn parallel_resume_reconciles_saved_sha_without_repeating_merge() {
+    let mut rig = Rig::new("no_deploy_repos = [\"acme/api\"]");
+    rig.cfg.max_parallel = 2;
+    let plan = plan_on(&[1]);
+    rig.script().merged.insert(1);
+    rig.store
+        .add(pipetrain::merge::Pending {
+            id: "acme/api#1".to_string(),
+            repo: "acme/api".to_string(),
+            base: "main".to_string(),
+            sha: Some(merge_sha(1)),
+            continuation: None,
+        })
+        .unwrap();
+    let run = rig.go(&plan);
+    assert_eq!(run.outcome.code, 0);
+    assert!(rig.puts().is_empty());
+    assert!(rig.store.state.pending.is_empty());
+    assert!(rig.store.state.active_jobs.is_empty());
+}
+
+#[test]
+fn parallel_http_merges_overlap_and_pending_state_is_durable_before_put() {
+    use std::io::Write;
+    use std::net::TcpListener;
+    use std::sync::Condvar;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Instant;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let finished = Arc::new(AtomicBool::new(false));
+    let signal = finished.clone();
+    let overlap = Arc::new((Mutex::new(0usize), Condvar::new()));
+    let server_overlap = overlap.clone();
+    let path = std::env::temp_dir().join(format!(
+        "pipetrain-parallel-{}-{}.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let state_path = path.clone();
+    let server = std::thread::spawn(move || {
+        let script = Arc::new(Mutex::new(Script::new()));
+        std::thread::scope(|scope| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !signal.load(Ordering::SeqCst) && Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let script = script.clone();
+                        let overlap = server_overlap.clone();
+                        let state_path = state_path.clone();
+                        scope.spawn(move || {
+                            stream.set_nonblocking(false).unwrap();
+                            stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                            let request = common::read_request(&mut stream);
+                            let line = request.lines().next().unwrap().trim_end_matches(" HTTP/1.1");
+                            let payload = request.split_once("\r\n\r\n").unwrap().1;
+                            if line.starts_with("PUT ") {
+                                let state: Value = serde_json::from_str(&std::fs::read_to_string(state_path).unwrap()).unwrap();
+                                assert!(!state["pending"].as_array().unwrap().is_empty());
+                                assert!(!state["active_jobs"].as_array().unwrap().is_empty());
+                                let (lock, wake) = &*overlap;
+                                let mut count = lock.lock().unwrap();
+                                *count += 1;
+                                wake.notify_all();
+                                let (count, _) = wake.wait_timeout_while(count, Duration::from_secs(2), |count| *count < 2).unwrap();
+                                assert_eq!(*count, 2, "network requests must overlap");
+                            }
+                            let (status, body) = respond(&script, line, payload);
+                            let body = body.to_string();
+                            let response = format!("HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                            stream.write_all(response.as_bytes()).unwrap();
+                        });
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(1))
+                    }
+                    Err(error) => panic!("{error}"),
+                }
+            }
+        });
+    });
+    let mut cfg = Config::parse("orgs = [\"acme\"]\nmax_parallel = 2\n[merge]\nno_deploy_repos = [\"acme/api\", \"acme/ui\"]").unwrap();
+    cfg.api.max_requests = 50;
+    cfg.api.max_per_minute = 1000;
+    let mut client = Client::with_timeout(
+        "ghp_FAKE0123456789".to_string(),
+        &cfg.api,
+        false,
+        &base,
+        Duration::from_secs(3),
+    );
+    let mut store = Store::open(Some(path.clone())).unwrap();
+    let plan = plan_of(
+        vec![
+            pr("acme/api", 1, "feat/1", "main"),
+            pr("acme/ui", 2, "feat/2", "main"),
+        ],
+        Vec::new(),
+    );
+    let mut confirm = |_: &str| true;
+    let mut gate = |_: &str| panic!("unexpected gate");
+    let mut sleep = |_: Duration| panic!("unexpected coordinator sleep");
+    let mut observe = |_: &StepReport| {};
+    let mut progress = |_: &str| {};
+    let result = merge_plan(
+        &plan,
+        &cfg,
+        &mut client,
+        &applied(),
+        &mut store,
+        &mut Hooks {
+            confirm: &mut confirm,
+            gate: &mut gate,
+            sleep: &mut sleep,
+            observe: &mut observe,
+            progress: &mut progress,
+        },
+    );
+    finished.store(true, Ordering::SeqCst);
+    server.join().unwrap();
+    let outcome = result.unwrap();
+    assert_eq!(outcome.code, 0);
+    assert_eq!(*overlap.0.lock().unwrap(), 2);
+    assert!(store.state.pending.is_empty());
+    assert!(store.state.active_jobs.is_empty());
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn parallel_failed_publication_blocks_wait_and_consumers_without_cancelling_running_work() {
+    for policy in [DependencyFailure::Stop, DependencyFailure::Skip] {
+        let mut rig = Rig::new("no_deploy_repos = [\"acme/sync\", \"acme/portal\", \"acme/auth\"]");
+        rig.cfg.max_parallel = 2;
+        let plan = deployment_plan();
+        fail_deploy(&rig, 1);
+        let run = rig
+            .run(
+                &plan,
+                Settings {
+                    dependency_failure: policy,
+                    ..applied()
+                },
+                true,
+                true,
+            )
+            .unwrap();
+        assert_eq!(run.outcome.code, 1);
+        assert_eq!(
+            run.outcome
+                .report
+                .steps
+                .iter()
+                .find(|step| step.target == "acme/sync#4")
+                .unwrap()
+                .status,
+            Status::Done
+        );
+        assert_eq!(rig.puts().len(), 2);
+        assert_eq!(rig.store.state.pending.len(), 1);
+        assert!(rig.store.state.active_jobs.is_empty());
+        for step in run.outcome.report.steps.iter().filter(|step| {
+            ["acme/portal#2", "acme/auth#3", "acme/auth#5"].contains(&step.target.as_str())
+        }) {
+            assert_eq!(step.status, Status::Skipped);
+            assert!(step.blocked_by.is_some());
+        }
+    }
+    let mut rig = Rig::new("no_deploy_repos = [\"acme/sync\"]");
+    rig.cfg.max_parallel = 2;
+    let mut plan = deployment_plan();
+    let dependency = &mut plan
+        .items
+        .iter_mut()
+        .find(|item| item.number == 2)
+        .unwrap()
+        .after[0];
+    dependency.rule = pipetrain::planner::Rule::Package;
+    dependency.package = Some("Acme.Sdk".to_string());
+    dependency.version = Some("1.2.3".to_string());
+    fail_deploy(&rig, 1);
+    let run = rig
+        .run(
+            &plan,
+            Settings {
+                dependency_failure: DependencyFailure::Skip,
+                ..applied()
+            },
+            true,
+            true,
+        )
+        .unwrap();
+    assert_eq!(run.gates, 0);
+    assert!(
+        run.outcome
+            .report
+            .steps
+            .iter()
+            .any(|step| step.kind == Kind::Wait && step.blocked_by.is_some())
+    );
+    assert_eq!(
+        run.outcome
+            .report
+            .steps
+            .iter()
+            .find(|step| step.target == "acme/sync#4")
+            .unwrap()
+            .status,
+        Status::Done
+    );
+}
+
+#[test]
+fn parallel_legacy_failed_resume_stops_before_dispatching_new_independent_work() {
+    let mut rig = Rig::new("no_deploy_repos = [\"acme/sync\"]");
+    rig.cfg.max_parallel = 2;
+    rig.store
+        .add(pipetrain::merge::Pending {
+            id: "acme/sdk#1".to_string(),
+            repo: "acme/sdk".to_string(),
+            base: "main".to_string(),
+            sha: Some(merge_sha(1)),
+            continuation: None,
+        })
+        .unwrap();
+    fail_deploy(&rig, 1);
+    let plan = plan_of(vec![pr("acme/sync", 4, "feat/4", "main")], Vec::new());
+    let run = rig.go(&plan);
+    assert_eq!(run.outcome.code, 1);
+    assert!(rig.puts().is_empty());
+    assert_eq!(rig.store.state.pending.len(), 1);
+    assert!(
+        run.outcome
+            .report
+            .steps
+            .iter()
+            .find(|step| step.target == "acme/sync#4")
+            .unwrap()
+            .blocked_by
+            .is_some()
+    );
 }

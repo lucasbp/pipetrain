@@ -133,7 +133,7 @@ pub struct DeployPr {
     pub ids: Vec<String>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct State {
     #[serde(default)]
     pub schema: u32,
@@ -141,11 +141,35 @@ pub struct State {
     pub pending: Vec<Pending>,
     #[serde(default)]
     pub deploy_prs: Vec<DeployPr>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_jobs: Vec<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum StoreOperation {
+    Add(Pending),
+    SetSha {
+        id: String,
+        sha: String,
+    },
+    Remove(String),
+    AddDeployPr {
+        slug: String,
+        branch: String,
+        id: String,
+    },
+    RemoveDeployPr {
+        slug: String,
+        branch: String,
+    },
+}
+
+type RemoteStore = Box<dyn FnMut(StoreOperation) -> Result<()> + Send>;
 
 pub struct Store {
     path: Option<PathBuf>,
     pub state: State,
+    remote: Option<RemoteStore>,
 }
 
 pub fn default_state_path() -> Option<PathBuf> {
@@ -159,6 +183,7 @@ impl Store {
         Self {
             path: None,
             state: State::default(),
+            remote: None,
         }
     }
 
@@ -180,7 +205,40 @@ impl Store {
         Ok(Self {
             path: Some(path),
             state,
+            remote: None,
         })
+    }
+
+    pub fn remote(
+        state: State,
+        forward: impl FnMut(StoreOperation) -> Result<()> + Send + 'static,
+    ) -> Self {
+        Self {
+            path: None,
+            state,
+            remote: Some(Box::new(forward)),
+        }
+    }
+
+    fn forward(&mut self, operation: StoreOperation) -> Result<()> {
+        if let Some(remote) = &mut self.remote {
+            remote(operation)?;
+        }
+        Ok(())
+    }
+
+    pub fn apply(&mut self, operation: StoreOperation) -> Result<()> {
+        match operation {
+            StoreOperation::Add(pending) => self.add(pending),
+            StoreOperation::SetSha { id, sha } => self.set_sha(&id, &sha),
+            StoreOperation::Remove(id) => self.remove(&id),
+            StoreOperation::AddDeployPr { slug, branch, id } => {
+                self.add_deploy_pr(&slug, &branch, &id)
+            }
+            StoreOperation::RemoveDeployPr { slug, branch } => {
+                self.remove_deploy_pr(&slug, &branch)
+            }
+        }
     }
 
     pub fn save(&mut self) -> Result<()> {
@@ -198,12 +256,17 @@ impl Store {
     }
 
     pub fn add(&mut self, pending: Pending) -> Result<()> {
+        self.forward(StoreOperation::Add(pending.clone()))?;
         self.state.pending.retain(|p| p.id != pending.id);
         self.state.pending.push(pending);
         self.save()
     }
 
     pub fn set_sha(&mut self, id: &str, sha: &str) -> Result<()> {
+        self.forward(StoreOperation::SetSha {
+            id: id.to_string(),
+            sha: sha.to_string(),
+        })?;
         if let Some(found) = self.state.pending.iter_mut().find(|p| p.id == id) {
             found.sha = Some(sha.to_string());
         }
@@ -211,11 +274,17 @@ impl Store {
     }
 
     pub fn remove(&mut self, id: &str) -> Result<()> {
+        self.forward(StoreOperation::Remove(id.to_string()))?;
         self.state.pending.retain(|p| p.id != id);
         self.save()
     }
 
     pub fn add_deploy_pr(&mut self, slug: &str, branch: &str, id: &str) -> Result<()> {
+        self.forward(StoreOperation::AddDeployPr {
+            slug: slug.to_string(),
+            branch: branch.to_string(),
+            id: id.to_string(),
+        })?;
         match self
             .state
             .deploy_prs
@@ -237,6 +306,10 @@ impl Store {
     }
 
     pub fn remove_deploy_pr(&mut self, slug: &str, branch: &str) -> Result<()> {
+        self.forward(StoreOperation::RemoveDeployPr {
+            slug: slug.to_string(),
+            branch: branch.to_string(),
+        })?;
         self.state
             .deploy_prs
             .retain(|found| !(found.slug == slug && found.branch == branch));
@@ -244,7 +317,7 @@ impl Store {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
     Resume,
@@ -255,7 +328,7 @@ pub enum Kind {
     OpenPr,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
     Planned,
@@ -265,7 +338,7 @@ pub enum Status {
     Stopped,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepReport {
     pub kind: Kind,
     pub target: String,

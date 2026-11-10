@@ -60,6 +60,9 @@ pub enum Event {
 
 pub trait Coordinator {
     fn persist(&mut self, id: &str, status: &Status) -> Result<(), String>;
+    fn prepare(&mut self, _job: &Job) -> Result<Option<Status>, String> {
+        Ok(None)
+    }
     fn confirm(&mut self, job: &Job) -> Result<(), String>;
     fn progress(&mut self, id: &str, message: &str);
     fn checkpoint(&mut self, _id: &str, _data: &str) -> Result<(), String> {
@@ -246,6 +249,33 @@ where
                     }
                     if active_repos.contains(&job.repo) {
                         continue;
+                    }
+                    if !resumed {
+                        match coordinator.prepare(job) {
+                            Ok(None) => {}
+                            Ok(Some(status @ Status::Blocked(_))) => {
+                                changed |= transition(coordinator, &mut report, &job.id, status);
+                                if report.stopped {
+                                    break;
+                                }
+                                continue;
+                            }
+                            Ok(Some(_)) => {
+                                report.coordinator_errors.push(format!(
+                                    "{}: prepare must return Blocked or None",
+                                    job.id
+                                ));
+                                report.stopped = true;
+                                break;
+                            }
+                            Err(error) => {
+                                report
+                                    .coordinator_errors
+                                    .push(format!("{}: {error}", job.id));
+                                report.stopped = true;
+                                break;
+                            }
+                        }
                     }
                     if !resumed
                         && job.barrier
