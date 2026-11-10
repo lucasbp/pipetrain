@@ -21,6 +21,10 @@ pub trait Runner {
     fn run(&mut self, invocation: &Invocation) -> Result<String>;
 }
 
+mod process;
+
+use process::OwnedProcess;
+
 pub struct ProcessRunner;
 
 impl Runner for ProcessRunner {
@@ -35,21 +39,9 @@ impl Runner for ProcessRunner {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(0x08000000);
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            command.process_group(0);
-        }
-        let mut child = command
-            .spawn()
-            .context("cannot start isolated bump operation")?;
-        let stdout = child.stdout.take().expect("piped stdout");
-        let stderr = child.stderr.take().expect("piped stderr");
+        let mut owned = OwnedProcess::spawn(&mut command)?;
+        let stdout = owned.child.stdout.take().expect("piped stdout");
+        let stderr = owned.child.stderr.take().expect("piped stderr");
         let drain = |mut input: Box<dyn Read + Send>| {
             thread::spawn(move || {
                 let mut kept = Vec::new();
@@ -69,37 +61,18 @@ impl Runner for ProcessRunner {
         let err = drain(Box::new(stderr));
         let started = Instant::now();
         let status = loop {
-            if let Some(status) = child.try_wait()? {
+            if let Some(status) = owned.child.try_wait()? {
                 break status;
             }
             if started.elapsed() >= invocation.timeout {
-                #[cfg(windows)]
-                {
-                    use std::os::windows::process::CommandExt;
-                    let _ = Command::new("taskkill")
-                        .args(["/PID", &child.id().to_string(), "/T", "/F"])
-                        .creation_flags(0x08000000)
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null())
-                        .status();
-                }
-                #[cfg(unix)]
-                {
-                    let _ = Command::new("kill")
-                        .args(["-KILL", &format!("-{}", child.id())])
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null())
-                        .status();
-                }
-                let _ = child.kill();
-                let _ = child.wait();
+                owned.terminate();
                 bail!("isolated bump operation timed out; inspect the preserved workspace");
             }
             thread::sleep(Duration::from_millis(50));
         };
         while !out.is_finished() || !err.is_finished() {
             if started.elapsed() >= invocation.timeout {
-                let _ = child.kill();
+                owned.terminate();
                 bail!(
                     "bump output pipes did not close within the operation timeout; workspace preserved"
                 );
