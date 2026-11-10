@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Execution-time GraphQL readiness checks retry temporary unknown mergeability after an earlier merge, rather than failing before the REST retry path. Both checks show progress for up to one minute each and stop resumably if GitHub cannot settle; other blockers remain enforced.
+- Merge previews, confirmations and final summaries warn when a PR targets an intermediate train branch, including a train from an earlier date. Completing those merges or skipping their workflows does not mean the changes reached the release target.
+
 ## 0.8.0
 
 ### Added

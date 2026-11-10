@@ -68,6 +68,9 @@ Small, well understood, in this order:
 
 Bigger or riskier, no order yet:
 
+- User-configurable merge-state storage: local files remain the default, preserving `--state FILE` and existing resume behavior. Users can later opt into their own S3 bucket and prefix with their own AWS credentials. An optional S3 backend is deferred; this stage keeps the existing local storage without provisioning cloud resources.
+- The future S3 backend needs object versioning, an exclusive renewable lock per queue, conditional writes, recovery of interrupted runs and a deliberate migration from local files. Remote persistence or lock failures must stop new side effects; never silently fall back to local storage.
+- The future S3 backend uses the user's AWS credential provider or named profile and accesses S3 directly, without a central hosting account, authorization service or separate application login. Configuration selects the bucket, region, prefix and credential source; never embed AWS secrets in the executable, repository or state. Credential-provider support and retention policy remain to be decided before implementation.
 - Discover orgs and repos from local clones, and use the token Git already stores as a last-resort credential.
 - Conflict resolution in steps: mechanical rules first (lockfiles, version bumps, append-only files), then proposed diffs for the rest that a human approves, then rebase on a throwaway branch that is always reversible.
 - An execution mode that performs the merges. Opt-in, resumable, with a report. Never the default.

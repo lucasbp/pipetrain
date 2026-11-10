@@ -25,12 +25,16 @@ Every other `#` line is a comment and is ignored. A PR the plan did not mark as 
 
 ## What it checks before each merge
 
+The destination is the PR's existing base branch, not a branch derived from today's date. A target matching `train_prefix` is an intermediate train branch: the dry run, confirmation and final summary warn that promotion to the release target still requires a separate reviewed PR. A completed merge or a workflow that does not run on this branch does not prove a production deployment. `--open-pr` only attempts to prepare the promotion PR and never merges it; an unresolved destination or other PRs still targeting the train can require manual follow-up.
+
 Right before each merge it reads the PR again, because the earlier merges can change it. It does not merge, and the step is `failed`, if any of these is true:
 
 - The PR is no longer open, or the plan's rules for a ready PR no longer hold (not approved, checks not green, draft, conflict). With `require_approval = false` a PR with no review decision is not refused for that, `changes requested` still is, and the check is the same function the plan uses.
 - The head commit is not the one the plan saw. The merge request also carries that sha, so GitHub itself refuses a PR that moved in between.
 - The base branch is not the one the plan saw.
-- GitHub's `mergeable_state` is anything but `clean` (`behind`, `dirty`, `blocked`, `unstable`, `draft`, or still unknown after three tries). pipetrain never updates a branch for you.
+- GitHub's `mergeable_state` is anything but `clean` (`behind`, `dirty`, `blocked`, `unstable`, `draft`). pipetrain never updates a branch for you.
+
+When GitHub is still recalculating mergeability, both the GraphQL readiness query and the REST pre-merge check retry up to 12 times with five-second intervals, showing progress. Other blockers such as a lost approval are refused immediately. If either check remains unknown after its one-minute retry window, the step is `stopped` (exit 5), no merge is attempted and the same command can be run again. This handles the transient recalculation after an earlier PR updates the same base without weakening review, checks, head SHA or base protections. This retry applies to execution-time revalidation; a PR already excluded from the initial plan remains excluded.
 
 ## What it waits for
 

@@ -21,6 +21,7 @@ const TRAIN: &str = "deploy/05-11-2026";
 struct Script {
     base: String,
     review: BTreeMap<u64, String>,
+    unknown_reads: BTreeMap<u64, usize>,
     live_state: BTreeMap<u64, String>,
     live_head: BTreeMap<u64, String>,
     put_status: u16,
@@ -62,6 +63,7 @@ impl Script {
         Self {
             base: "main".to_string(),
             review: BTreeMap::new(),
+            unknown_reads: BTreeMap::new(),
             live_state: BTreeMap::new(),
             live_head: BTreeMap::new(),
             put_status: 200,
@@ -166,6 +168,12 @@ fn respond(script: &Mutex<Script>, line: &str, payload: &str) -> (u16, Value) {
             .and_then(Value::as_u64)
             .unwrap();
         let mut node = script.node(number);
+        if let Some(remaining) = script.unknown_reads.get_mut(&number)
+            && *remaining > 0
+        {
+            *remaining -= 1;
+            node["mergeable"] = json!("UNKNOWN");
+        }
         node["repository"]["name"] = body["variables"]["r"].clone();
         node["repository"]["owner"]["login"] = body["variables"]["o"].clone();
         return (200, json!({"data": {"repository": {"pullRequest": node}}}));
@@ -811,14 +819,14 @@ fn a_branch_that_github_no_longer_calls_clean_is_not_merged() {
 }
 
 #[test]
-fn unknown_mergeability_is_asked_again_a_few_times_and_then_fails() {
+fn unknown_mergeability_is_retried_for_a_minute_and_then_stops_without_merging() {
     let mut rig = Rig::new("");
     let plan = plan_on(&[1]);
     rig.script().live_state.insert(1, "unknown".to_string());
 
     let run = rig.go(&plan);
 
-    assert_eq!(run.statuses(), vec![Status::Failed]);
+    assert_eq!(run.statuses(), vec![Status::Stopped]);
     assert!(
         run.step(0).detail.contains("mergeability"),
         "{}",
@@ -830,7 +838,85 @@ fn unknown_mergeability_is_asked_again_a_few_times_and_then_fails() {
         .iter()
         .filter(|line| line.as_str() == "GET /repos/acme/api/pulls/1")
         .count();
-    assert_eq!(reads, 3);
+    assert_eq!(reads, 13);
+    assert_eq!(run.outcome.code, EXIT_STOPPED);
+    assert!(rig.puts().is_empty());
+}
+
+#[test]
+fn graphql_mergeability_recalculation_after_an_earlier_merge_is_retried() {
+    let mut rig = Rig::new("");
+    let plan = plan_on(&[1, 2]);
+    let second = merge_numbers(&plan)[1];
+    rig.script().unknown_reads.insert(second, 3);
+
+    let run = rig.go(&plan);
+
+    assert_eq!(run.statuses(), vec![Status::Done, Status::Done]);
+    assert_eq!(rig.puts().len(), 2);
+    assert!(run.slept >= Duration::from_secs(15));
+    assert!(
+        run.phases
+            .iter()
+            .any(|phase| phase.contains("recalculating"))
+    );
+}
+
+#[test]
+fn graphql_mergeability_timeout_is_resumable_without_a_merge_request() {
+    let mut rig = Rig::new("");
+    let plan = plan_on(&[1]);
+    rig.script().unknown_reads.insert(1, usize::MAX);
+
+    let run = rig.go(&plan);
+
+    assert_eq!(run.statuses(), vec![Status::Stopped]);
+    assert_eq!(run.outcome.code, EXIT_STOPPED);
+    assert_eq!(run.slept, Duration::from_secs(60));
+    assert!(rig.puts().is_empty());
+    assert!(rig.store.state.pending.is_empty());
+}
+
+#[test]
+fn an_old_train_target_is_explicit_in_confirmation_and_final_summary() {
+    let mut rig = Rig::new("");
+    let mut plan = plan_on(&[1]);
+    plan.items[0].base = TRAIN.into();
+    rig.script().base = TRAIN.into();
+    rig.script().workflows.push((
+        "deploy.yml".into(),
+        "on:\n  push:\n    branches: [main]\njobs: {}\n".into(),
+    ));
+
+    let run = rig.go(&plan);
+
+    assert_eq!(run.statuses(), vec![Status::Done]);
+    let confirmation = &run.confirmation_text[0];
+    assert!(confirmation.contains(TRAIN));
+    assert!(confirmation.contains("intermediate train branch"));
+    let summary = render_final(&run.outcome.report, true);
+    assert!(summary.contains("Promotion requires a separate reviewed PR"));
+    assert!(summary.contains("\u{1b}[33m"));
+    assert!(run.step(0).deploy.as_ref().unwrap().contains("not waited"));
+    assert!(
+        !rig.lines()
+            .iter()
+            .any(|line| line == "POST /repos/acme/api/pulls")
+    );
+}
+
+#[test]
+fn unknown_mergeability_does_not_delay_or_bypass_a_lost_approval() {
+    let mut rig = Rig::new("");
+    let plan = plan_on(&[1]);
+    rig.script().unknown_reads.insert(1, usize::MAX);
+    rig.script().review.insert(1, "CHANGES_REQUESTED".into());
+
+    let run = rig.go(&plan);
+
+    assert_eq!(run.statuses(), vec![Status::Failed]);
+    assert_eq!(run.slept, Duration::ZERO);
+    assert!(run.step(0).detail.contains("changes requested"));
     assert!(rig.puts().is_empty());
 }
 

@@ -28,8 +28,10 @@ pub mod bump;
 mod failure;
 mod parallel;
 
-const MERGEABILITY_TRIES: usize = 3;
-const MERGEABILITY_PAUSE: Duration = Duration::from_secs(2);
+const MERGEABILITY_TRIES: usize = 13;
+const MERGEABILITY_PAUSE: Duration = Duration::from_secs(5);
+const TRAIN_NOTICE: &str =
+    "intermediate train branch; promotion to the release target is still required";
 const METHODS: [&str; 3] = ["merge", "squash", "rebase"];
 
 pub struct MergeOptions {
@@ -134,7 +136,7 @@ fn method_of(settings: &Settings, cfg: &Config) -> Result<String> {
     }
 }
 
-fn planned_steps(plan: &Plan) -> Vec<StepReport> {
+fn planned_steps(plan: &Plan, cfg: &Config) -> Vec<StepReport> {
     steps(&emit::queue_lines(plan))
         .into_iter()
         .map(|step| match step {
@@ -143,7 +145,13 @@ fn planned_steps(plan: &Plan) -> Vec<StepReport> {
                     .items
                     .iter()
                     .find(|item| item.id == id)
-                    .map(|item| format!("into {}", item.base))
+                    .map(|item| {
+                        let mut detail = format!("into {}", item.base);
+                        if is_stacked(&item.base, &cfg.train_prefix) {
+                            detail.push_str(&format!("; {TRAIN_NOTICE}"));
+                        }
+                        detail
+                    })
                     .unwrap_or_default();
                 StepReport::new(Kind::Merge, &id, Status::Planned, &detail)
             }
@@ -221,6 +229,10 @@ fn settled_live(
         if !unsettled || tries >= MERGEABILITY_TRIES {
             return Ok(live);
         }
+        (hooks.progress)(&format!(
+            "GitHub is recalculating mergeability of {slug}#{number}; retry {tries}/{} in 5s",
+            MERGEABILITY_TRIES - 1
+        ));
         (hooks.sleep)(MERGEABILITY_PAUSE);
     }
 }
@@ -379,10 +391,31 @@ fn merge_one(
     let key = PrKey::new(&item.org, &item.repo, item.number);
     let slug = key.slug();
     (hooks.progress)(&format!("checking merge readiness of {}", item.id));
-    let pr = match client.pr(&key) {
-        Ok(Some(pr)) => pr,
-        Ok(None) => return fail(report, "not found on GitHub"),
-        Err(error) => return fail(report, format!("{error:#}")),
+    let mut tries = 0;
+    let pr = loop {
+        let pr = match client.pr(&key) {
+            Ok(Some(pr)) => pr,
+            Ok(None) => return fail(report, "not found on GitHub"),
+            Err(error) => return fail(report, format!("{error:#}")),
+        };
+        tries += 1;
+        let mut settled = pr.clone();
+        settled.mergeable_unknown = false;
+        if !pr.mergeable_unknown || !env.cfg.blockers(&settled).is_empty() {
+            break pr;
+        }
+        if tries >= MERGEABILITY_TRIES {
+            return stop(
+                report,
+                "GitHub mergeability is still unknown after 60s; no merge was attempted, run again to resume",
+            );
+        }
+        (hooks.progress)(&format!(
+            "GitHub is recalculating mergeability of {}; retry {tries}/{} in 5s",
+            item.id,
+            MERGEABILITY_TRIES - 1
+        ));
+        (hooks.sleep)(MERGEABILITY_PAUSE);
     };
     if pr.state == PrState::Merged {
         report.status = Status::Skipped;
@@ -425,6 +458,9 @@ fn merge_one(
         );
     }
     if let Some(why) = not_clean(&live.mergeable_state) {
+        if matches!(live.mergeable_state.as_str(), "unknown" | "") {
+            return stop(report, why);
+        }
         return fail(report, why);
     }
     let pending = Pending {
@@ -519,6 +555,9 @@ fn finish_deploy(
             short(sha)
         ),
     };
+    if is_stacked(base, &env.cfg.train_prefix) {
+        report.detail.push_str(&format!("; {TRAIN_NOTICE}"));
+    }
     if matches!(status, Status::Done | Status::Skipped)
         && let Err(error) = store.remove(id)
     {
@@ -838,7 +877,7 @@ pub fn merge_plan(
         applied: false,
         requested: settings.apply,
         stopped: None,
-        steps: planned_steps(plan),
+        steps: planned_steps(plan, cfg),
         not_merging: not_merging(plan),
         questions: emit::question_lines(plan),
     };
@@ -1066,6 +1105,16 @@ fn render_with_steps(report: &Report, color: bool, include_steps: bool) -> Strin
         for step in &report.steps {
             out.push_str(&format!("{}\n", step_text(step, color)));
         }
+    }
+    if report
+        .steps
+        .iter()
+        .any(|step| step.detail.contains(TRAIN_NOTICE))
+    {
+        out.push_str(&format!(
+            "\n{}\n",
+            tint(color, yellow, "warning: this queue includes intermediate train branches. Their names are not today's date or proof of deployment. Promotion requires a separate reviewed PR; --open-pr only attempts to prepare it and never merges it.")
+        ));
     }
     if !report.not_merging.is_empty() {
         out.push_str(&format!(

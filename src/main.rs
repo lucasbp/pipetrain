@@ -79,7 +79,7 @@ enum Command {
     Bundle(BundleArgs),
 
     #[command(
-        about = "Merges the PRs of the plan one at a time, waiting for each deploy; only with --apply, without it nothing is written"
+        about = "Merges PRs into their existing base branches with the configured parallelism and deployment waits; only with --apply, without it nothing is written"
     )]
     Merge(MergeArgs),
 
@@ -669,7 +669,7 @@ struct MergeArgs {
 
     #[arg(
         long,
-        help = "Merge the PRs one at a time, waiting for each deploy; without it nothing is written"
+        help = "Merge PRs into their existing base branches with the configured parallelism and deployment waits; without it nothing is written"
     )]
     apply: bool,
 
