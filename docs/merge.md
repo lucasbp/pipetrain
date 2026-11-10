@@ -113,6 +113,8 @@ no_deploy_repos = ["acme/docs"]
 
 ## Resuming
 
+Text output streams each completed step once. Its final summary counts PRs merged during this invocation separately from earlier merges checked. `done` counts completed steps, including their deploy waits, rather than successful merge requests alone. A PR whose merge succeeded but whose deployment failed stays merged and remains pending in the state file. The JSON output continues to contain every step, its status, merge SHA and deploy result.
+
 Before it merges, pipetrain records the PR in a state file. After the deploy passes it removes the record. A run that is stopped, fails, is interrupted or loses its connection leaves the record, and the next `merge --apply` starts by finishing that wait, before it touches the queue:
 
 - A record without a merge commit (the process ended between the request and the answer) is resolved by asking GitHub whether the PR was merged.
