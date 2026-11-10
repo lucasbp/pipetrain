@@ -79,7 +79,7 @@ enum Command {
     Bundle(BundleArgs),
 
     #[command(
-        about = "Merges the PRs of the plan one at a time, waiting for each deploy; only with --apply, without it nothing is written"
+        about = "Merges PRs into their existing base branches with the configured parallelism and deployment waits; only with --apply, without it nothing is written"
     )]
     Merge(MergeArgs),
 
@@ -669,7 +669,7 @@ struct MergeArgs {
 
     #[arg(
         long,
-        help = "Merge the PRs one at a time, waiting for each deploy; without it nothing is written"
+        help = "Merge PRs into their existing base branches with the configured parallelism and deployment waits; without it nothing is written"
     )]
     apply: bool,
 
@@ -736,7 +736,7 @@ struct MergeArgs {
     #[arg(
         long,
         value_name = "FILE",
-        help = "Where the resume state is kept (default: the user state dir, pipetrain/merge-state.json)"
+        help = "Override the resume state file (default: merge.state_file in the config, then a stable local file per profile)"
     )]
     state: Option<PathBuf>,
 

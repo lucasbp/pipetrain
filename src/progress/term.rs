@@ -121,7 +121,7 @@ mod imp {
 
     fn terminate(code: i32) -> ! {
         if super::super::CURSOR_HIDDEN.swap(false, Ordering::SeqCst) {
-            let bytes = super::super::RESTORE;
+            let bytes = super::super::restoration();
             unsafe { write(STDERR_FD, bytes.as_ptr().cast(), bytes.len()) };
         }
         unsafe { _exit(code) }

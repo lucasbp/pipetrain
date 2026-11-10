@@ -77,6 +77,7 @@ pub struct Config {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MergeConfig {
+    pub state_file: Option<PathBuf>,
     pub method: String,
     pub timeout_minutes: u64,
     pub poll_seconds: u64,
@@ -88,6 +89,7 @@ pub struct MergeConfig {
 impl Default for MergeConfig {
     fn default() -> Self {
         Self {
+            state_file: None,
             method: "merge".to_string(),
             timeout_minutes: 30,
             poll_seconds: 15,

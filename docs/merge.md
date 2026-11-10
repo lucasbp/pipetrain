@@ -25,12 +25,16 @@ Every other `#` line is a comment and is ignored. A PR the plan did not mark as 
 
 ## What it checks before each merge
 
+The destination is the PR's existing base branch, not a branch derived from today's date. A target matching `train_prefix` is an intermediate train branch: the dry run, confirmation and final summary warn that promotion to the release target still requires a separate reviewed PR. A completed merge or a workflow that does not run on this branch does not prove a production deployment. `--open-pr` only attempts to prepare the promotion PR and never merges it; an unresolved destination or other PRs still targeting the train can require manual follow-up.
+
 Right before each merge it reads the PR again, because the earlier merges can change it. It does not merge, and the step is `failed`, if any of these is true:
 
 - The PR is no longer open, or the plan's rules for a ready PR no longer hold (not approved, checks not green, draft, conflict). With `require_approval = false` a PR with no review decision is not refused for that, `changes requested` still is, and the check is the same function the plan uses.
 - The head commit is not the one the plan saw. The merge request also carries that sha, so GitHub itself refuses a PR that moved in between.
 - The base branch is not the one the plan saw.
-- GitHub's `mergeable_state` is anything but `clean` (`behind`, `dirty`, `blocked`, `unstable`, `draft`, or still unknown after three tries). pipetrain never updates a branch for you.
+- GitHub's `mergeable_state` is anything but `clean` (`behind`, `dirty`, `blocked`, `unstable`, `draft`). pipetrain never updates a branch for you.
+
+When GitHub is still recalculating mergeability, both the GraphQL readiness query and the REST pre-merge check retry up to 12 times with five-second intervals, showing progress. Other blockers such as a lost approval are refused immediately. If either check remains unknown after its one-minute retry window, the step is `stopped` (exit 5), no merge is attempted and the same command can be run again. This handles the transient recalculation after an earlier PR updates the same base without weakening review, checks, head SHA or base protections. This retry applies to execution-time revalidation; a PR already excluded from the initial plan remains excluded.
 
 ## What it waits for
 
@@ -80,7 +84,15 @@ When the PRs of a bundle were retargeted to `deploy/<date>-<base>` (see `bundle 
 
 ## Confirmation and gates
 
-On an interactive terminal, execution shows a spinner with elapsed time after confirmation. Sequential status retains the step index and PR identifier. Parallel status reports completed steps, active workers, unfinished steps and PR identifier, such as `3/50 completed, 2 active, 47 remaining [acme/api#123]: deploy acme/api: 1 of 2 workflow runs still going`. An active step is included in the unfinished count. The total includes merge, resume, gate, package wait and deploy PR steps. The status changes during readiness checks, the merge request, deployment workflow discovery, running workflows and the final completion check. The spinner keeps moving between API polls, pauses before gate prompts and clears before final results. `--no-progress`, JSON output, CI and redirected stderr disable the animation. These status updates do not change merge order, checks, polling intervals or resumability.
+On an interactive terminal, execution shows up to three live lines after confirmation: queue counts and elapsed time, the current organization/repository/PR and destination branch in bold when styling is enabled, and the current operation or deployment detail. Each line fits the current terminal width. For example:
+
+```text
+⠋ 3/50 completed, 2 active, 47 remaining · 1m 12s
+  acme/api#123 → main
+  deploy acme/api: 1 of 2 workflow runs still going
+```
+
+Sequential status retains the step index; parallel status reports completed steps, active workers and unfinished steps. An active step is included in the unfinished count. The total includes merge, resume, gate, package wait and deploy PR steps. The status changes during readiness checks, the merge request, deployment workflow discovery, running workflows and the final completion check. The spinner keeps moving between API polls, pauses before gate prompts and clears before final results. `--no-progress`, JSON output, CI and redirected stderr disable the animation. These status updates do not change merge order, checks, polling intervals or resumability. Cancellation does not undo merges already accepted by GitHub; durable pending records remain available for recovery.
 
 - `--apply` shows the steps and asks you to type `yes`. `--yes` skips only this question.
 - Every gate and unpublished package wait asks again, even with `--yes`. Without a terminal it does not ask: the step is `stopped` and the run ends.
@@ -123,7 +135,18 @@ Before it merges, pipetrain records the PR in a state file. After the deploy pas
 - A record whose deploy failed is checked again, so re-running the workflow and then running `merge` again continues.
 - The plan itself is not saved. It is built again, so merged PRs are gone from it and the queue continues from the first one still open.
 
-The state file is `pipetrain/merge-state.json` in the user state directory (the local data directory on Windows). `--state FILE` chooses another one. A state file that cannot be read is an error, never a reset.
+State is local and durable by default. Named profiles use `pipetrain/queues/<profile-key>/merge-state.json` in the user state directory (the local data directory on Windows). The selected canonical profile name identifies one stable queue across repositories and invocations; aliases and case changes do not create another queue. Simple names use their lowercase form. Other UTF-8 bytes are percent-encoded, including dots, path separators and percent signs; Windows reserved names escape their first byte. Different names cannot collide through replacement of punctuation. The implicit `default` profile retains `pipetrain/merge-state.json`.
+
+Path precedence is `--state FILE`, then `merge.state_file` from the selected configuration, then the automatic profile path. Relative configured paths resolve from the loaded config file's directory; relative `--state` paths retain their command-line working-directory meaning. The effective path is shown once on stderr except with `--json` or `--no-progress`. No state contents are printed. A missing user directory is an error unless a path override is provided; production commands never silently use memory-only storage.
+
+To persist a custom path without repeating a command flag:
+
+```toml
+[profile.acme.merge]
+state_file = 'queues/acme.json'
+```
+
+Without a path override, unfinished work in the legacy global state blocks a named profile before any GitHub writes, even if a profile state already exists. Choose that legacy file explicitly with `--state` or `merge.state_file`, reconcile it, and then deliberately choose how to continue. Pending deploys, queued deploy PRs, active jobs and dependency bump journals are checked. State is never automatically migrated, deleted or combined. An empty legacy state is left in place. An unreadable or invalid state file is an error, never a reset.
 
 ## Exit codes
 

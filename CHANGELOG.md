@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.8.1
+
+### Added
+
+- Interactive merge progress separates queue counts, the current organization/repository/PR and operation details into up to three live lines. The target is bold when terminal styling is enabled, and each line fits the current terminal width.
+
+- Named profiles automatically keep one durable merge queue across repositories and invocations. `--state` remains an override, and `merge.state_file` can persist a custom location in application configuration. Relative configured locations resolve from that configuration file, and unfinished legacy state blocks an automatic switch instead of being ignored.
+
+### Fixed
+
+- Execution-time GraphQL readiness checks retry temporary unknown mergeability after an earlier merge, rather than failing before the REST retry path. Both checks show progress for up to one minute each and stop resumably if GitHub cannot settle; other blockers remain enforced.
+- Merge previews, confirmations and final summaries warn when a PR targets an intermediate train branch, including a train from an earlier date. Completing those merges or skipping their workflows does not mean the changes reached the release target.
+
 ## 0.8.0
 
 ### Added

@@ -1,7 +1,10 @@
 mod term;
 
+#[cfg(test)]
+mod multiline;
+
 use std::io::{IsTerminal, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, Once, TryLockError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -12,6 +15,9 @@ const REDRAW: Duration = Duration::from_millis(80);
 pub(crate) const HIDE_CURSOR: &str = "\x1b[?25l";
 pub(crate) const ERASE_LINE: &str = "\r\x1b[2K";
 const RESTORE: &[u8] = b"\r\x1b[2K\x1b[?25h";
+const RESTORE_BLOCK: &[u8] = b"\r\x1b[0J\x1b[?25h";
+const ERASE_BLOCK: &str = "\r\x1b[0J";
+const BOLD: &str = "\x1b[1m";
 pub(crate) const CYAN: &str = "\x1b[36m";
 pub(crate) const DIM: &str = "\x1b[2m";
 pub(crate) const RESET: &str = "\x1b[0m";
@@ -20,6 +26,7 @@ type Active = Option<Painter<Box<dyn Write + Send>>>;
 
 static ACTIVE: Mutex<Active> = Mutex::new(None);
 static CURSOR_HIDDEN: AtomicBool = AtomicBool::new(false);
+static DRAWN_LINES: AtomicUsize = AtomicUsize::new(0);
 static PANIC_HOOK: Once = Once::new();
 
 pub struct Painter<W: Write> {
@@ -31,6 +38,7 @@ pub struct Painter<W: Write> {
     hidden: bool,
     enabled: bool,
     color: bool,
+    drawn_lines: usize,
 }
 
 fn ellipsize(text: &str, budget: usize) -> String {
@@ -106,6 +114,7 @@ impl<W: Write> Painter<W> {
             hidden: false,
             enabled,
             color: false,
+            drawn_lines: 0,
         }
     }
 
@@ -119,7 +128,17 @@ impl<W: Write> Painter<W> {
     }
 
     pub fn set_phase(&mut self, text: &str) {
-        self.phase = Some(text.to_string());
+        self.phase = Some(
+            text.chars()
+                .map(|character| {
+                    if character != '\n' && character.is_control() {
+                        ' '
+                    } else {
+                        character
+                    }
+                })
+                .collect(),
+        );
         self.counter = None;
     }
 
@@ -148,7 +167,14 @@ impl<W: Write> Painter<W> {
         let limit = width.unwrap_or(80).saturating_sub(1);
         let glyph_bytes = glyph.len_utf8() + 1;
         if limit < glyph_bytes {
+            self.finish();
             return;
+        }
+        let mut lines = phase.split('\n').take(3);
+        let header = lines.next().unwrap_or_default();
+        let mut extra: Vec<&str> = lines.collect();
+        if limit < 24 {
+            extra.truncate(1);
         }
         let mut counter = self
             .counter
@@ -160,23 +186,52 @@ impl<W: Write> Painter<W> {
             elapsed_text = ellipsize(&elapsed_text, limit - glyph_bytes);
         }
         let phase = fit_phase(
-            phase,
+            header,
             limit - glyph_bytes - counter.len() - elapsed_text.len(),
         );
-        let text = format!(
-            "{hide}{ERASE_LINE}{glyph_on}{glyph}{off} {phase}{counter}{dim_on}{elapsed_text}{off}"
+        let erase = self.erase();
+        let mut text = format!(
+            "{hide}{erase}{glyph_on}{glyph}{off} {phase}{counter}{dim_on}{elapsed_text}{off}"
         );
+        for (index, line) in extra.iter().enumerate() {
+            let fitted = ellipsize(line, limit);
+            let style = if self.color {
+                if index == 0 { BOLD } else { DIM }
+            } else {
+                ""
+            };
+            text.push_str(&format!("\r\n{ERASE_LINE}{style}{fitted}{off}"));
+        }
+        if !extra.is_empty() {
+            text.push_str(&format!("\x1b[{}A\r", extra.len()));
+        }
+        let drawn_lines = extra.len() + 1;
         self.emit(text.as_bytes());
         self.hidden = true;
+        self.drawn_lines = drawn_lines;
         self.frame += 1;
+    }
+
+    fn erase(&self) -> &'static str {
+        if self.drawn_lines > 1 {
+            ERASE_BLOCK
+        } else {
+            ERASE_LINE
+        }
     }
 
     pub fn finish(&mut self) {
         if !self.hidden {
             return;
         }
-        self.emit(RESTORE);
+        let restore = if self.drawn_lines > 1 {
+            RESTORE_BLOCK
+        } else {
+            RESTORE
+        };
+        self.emit(restore);
         self.hidden = false;
+        self.drawn_lines = 0;
     }
 
     pub fn line(&mut self, text: &str) {
@@ -189,16 +244,23 @@ impl<W: Write> Painter<W> {
         let _ = write!(stream, "{text}");
         let text = String::from_utf8_lossy(&stream.into_inner()).into_owned();
         let out = if self.hidden {
-            format!("{ERASE_LINE}{text}\n")
+            format!("{}{text}\n", self.erase())
         } else {
             format!("{text}\n")
         };
         self.emit(out.as_bytes());
+        self.drawn_lines = 0;
     }
 
     fn emit(&mut self, bytes: &[u8]) {
         let _ = self.writer.write_all(bytes);
         let _ = self.writer.flush();
+    }
+}
+
+impl<W: Write> Drop for Painter<W> {
+    fn drop(&mut self) {
+        self.finish();
     }
 }
 
@@ -210,9 +272,17 @@ pub(crate) fn restore_into<W: Write>(writer: &mut W) -> bool {
     if !CURSOR_HIDDEN.swap(false, Ordering::SeqCst) {
         return false;
     }
-    let _ = writer.write_all(RESTORE);
+    let _ = writer.write_all(restoration());
     let _ = writer.flush();
     true
+}
+
+fn restoration() -> &'static [u8] {
+    if DRAWN_LINES.swap(0, Ordering::SeqCst) > 1 {
+        RESTORE_BLOCK
+    } else {
+        RESTORE
+    }
 }
 
 pub fn terminal_width() -> Option<usize> {
@@ -221,6 +291,9 @@ pub fn terminal_width() -> Option<usize> {
 
 pub(crate) fn mark_cursor_hidden(hidden: bool) {
     CURSOR_HIDDEN.store(hidden, Ordering::SeqCst);
+    if !hidden {
+        DRAWN_LINES.store(0, Ordering::SeqCst);
+    }
 }
 
 pub(crate) fn prepare_terminal() -> bool {
@@ -285,6 +358,7 @@ impl Progress {
                     Some(painter) => {
                         painter.tick(started.elapsed());
                         CURSOR_HIDDEN.store(painter.hidden(), Ordering::SeqCst);
+                        DRAWN_LINES.store(painter.drawn_lines, Ordering::SeqCst);
                     }
                     None => return,
                 }
@@ -307,6 +381,7 @@ impl Drop for Progress {
                 painter.finish();
             }
             CURSOR_HIDDEN.store(false, Ordering::SeqCst);
+            DRAWN_LINES.store(0, Ordering::SeqCst);
         }
         handle.thread().unpark();
         let _ = handle.join();
@@ -327,7 +402,10 @@ pub fn count(done: usize, total: usize) {
 
 pub fn line(text: &str) {
     match active().as_mut() {
-        Some(painter) => painter.line(text),
+        Some(painter) => {
+            painter.line(text);
+            DRAWN_LINES.store(painter.drawn_lines, Ordering::SeqCst);
+        }
         None => anstream::eprintln!("{text}"),
     }
 }
@@ -489,13 +567,14 @@ mod tests {
     }
 
     #[test]
-    fn phase_control_characters_cannot_create_another_terminal_line() {
+    fn only_explicit_newlines_create_another_terminal_line() {
         let (mut p, sink) = painter(true);
         p.set_phase("deploy\r\n\t日本語");
         p.tick_at_width(Duration::from_secs(1), Some(40));
         let frame = plain_frame(&sink.text());
-        assert!(!frame.contains(['\n', '\r', '\t']));
-        assert!(frame.len() < 40);
+        assert!(!frame.contains(['\r', '\t']));
+        assert_eq!(frame.lines().count(), 2);
+        assert!(frame.lines().all(|line| line.len() < 40));
     }
 
     #[test]
@@ -720,6 +799,48 @@ mod tests {
         assert_eq!(out, RESTORE);
         assert!(!restore_into(&mut out));
         assert_eq!(out, RESTORE);
+    }
+
+    #[test]
+    fn signal_fallback_clears_the_multiline_block_and_restores_only_once() {
+        let _serial = serial();
+        CURSOR_HIDDEN.store(true, Ordering::SeqCst);
+        DRAWN_LINES.store(3, Ordering::SeqCst);
+        let mut out = Vec::new();
+        assert!(restore_into(&mut out));
+        assert_eq!(out, RESTORE_BLOCK);
+        assert_eq!(DRAWN_LINES.load(Ordering::SeqCst), 0);
+        assert!(!restore_into(&mut out));
+        assert_eq!(out, RESTORE_BLOCK);
+    }
+
+    #[test]
+    fn progress_lifecycle_tracks_multiline_frames_and_cleans_up_after_a_result() {
+        let _serial = serial();
+        let sink = Sink::default();
+        let progress = Progress::start_into(
+            Box::new(sink.clone()),
+            Duration::ZERO,
+            Duration::from_millis(5),
+            true,
+        );
+        phase("1/2 completed\nacme/api#1 → main\nwaiting for deploy");
+        thread::sleep(Duration::from_millis(120));
+        assert_eq!(DRAWN_LINES.load(Ordering::SeqCst), 3);
+        line("done: acme/api#1");
+        phase("2/2 completed\nacme/web#2 → main\nchecking readiness");
+        thread::sleep(Duration::from_millis(120));
+        drop(progress);
+        assert!(
+            sink.text()
+                .contains(&format!("{ERASE_BLOCK}done: acme/api#1\n"))
+        );
+        assert!(
+            sink.text()
+                .ends_with(std::str::from_utf8(RESTORE_BLOCK).unwrap())
+        );
+        assert!(!CURSOR_HIDDEN.load(Ordering::SeqCst));
+        assert_eq!(DRAWN_LINES.load(Ordering::SeqCst), 0);
     }
 
     #[test]

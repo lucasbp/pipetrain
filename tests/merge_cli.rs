@@ -18,6 +18,8 @@ fn merge_help_lists_apply_gates_and_timeout() {
     assert!(stdout.contains("--apply"), "stdout: {stdout}");
     assert!(stdout.contains("--gates-confirmed"), "stdout: {stdout}");
     assert!(stdout.contains("--timeout-minutes"), "stdout: {stdout}");
+    assert!(stdout.contains("merge.state_file"), "stdout: {stdout}");
+    assert!(stdout.contains("per profile"), "stdout: {stdout}");
 }
 
 #[test]

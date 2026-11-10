@@ -19,6 +19,36 @@ use serde_json::{Value, json};
 
 const FAKE: &str = "ghp_FAKE0123456789";
 
+#[test]
+fn merge_state_file_is_supported_in_flat_shared_and_profile_specific_config() {
+    let flat = Config::parse("[merge]\nstate_file = 'queues/local.json'\n").unwrap();
+    assert_eq!(
+        flat.merge.state_file,
+        Some(PathBuf::from("queues/local.json"))
+    );
+    let profiles = ProfileSet::parse(
+        "[merge]\nstate_file = 'shared.json'\n[profile.acme]\norgs = ['acme']\n[profile.globex]\norgs = ['globex']\n[profile.globex.merge]\nstate_file = 'globex.json'\n[profile.other]\norgs = ['other']\n[profile.other.merge]\nmethod = 'squash'\n",
+    ).unwrap();
+    assert_eq!(
+        profiles.find("acme").unwrap().config.merge.state_file,
+        Some(PathBuf::from("shared.json"))
+    );
+    assert_eq!(
+        profiles.find("globex").unwrap().config.merge.state_file,
+        Some(PathBuf::from("globex.json"))
+    );
+    assert!(
+        profiles
+            .find("other")
+            .unwrap()
+            .config
+            .merge
+            .state_file
+            .is_none()
+    );
+    assert!(Config::parse("[merge]\nstate_file = 12\n").is_err());
+}
+
 const MULTI: &str = r#"
 default_profile = "acme"
 max_parallel = 3
