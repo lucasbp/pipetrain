@@ -545,17 +545,17 @@ fn progress_identifies_the_current_pr_and_deploy_confirmation_in_queue_order() {
     assert!(
         run.phases[..second_step_at]
             .iter()
-            .all(|text| text.starts_with("step 1/2, 1 remaining [acme/api#1]:"))
+            .all(|text| text.starts_with("step 1/2, 1 remaining\nacme/api#1 → main\n"))
     );
     assert!(
         run.phases[second_step_at..]
             .iter()
-            .all(|text| text.starts_with("step 2/2, 0 remaining [acme/api#2]:"))
+            .all(|text| text.starts_with("step 2/2, 0 remaining\nacme/api#2 → main\n"))
     );
     assert!(
         run.phases
             .iter()
-            .any(|text| text == "step 1/2, 1 remaining [acme/api#1]: starting")
+            .any(|text| text == "step 1/2, 1 remaining\nacme/api#1 → main\nstarting")
     );
     assert!(
         run.phases
@@ -894,6 +894,11 @@ fn an_old_train_target_is_explicit_in_confirmation_and_final_summary() {
     let confirmation = &run.confirmation_text[0];
     assert!(confirmation.contains(TRAIN));
     assert!(confirmation.contains("intermediate train branch"));
+    assert!(
+        run.phases.iter().all(|phase| {
+            phase.lines().nth(1) == Some(format!("acme/api#1 → {TRAIN}").as_str())
+        })
+    );
     let summary = render_final(&run.outcome.report, true);
     assert!(summary.contains("Promotion requires a separate reviewed PR"));
     assert!(summary.contains("\u{1b}[33m"));
@@ -2010,6 +2015,14 @@ fn parallel_real_workers_merge_independent_repositories_with_coordinated_state()
     assert!(rig.store.state.pending.is_empty());
     assert!(rig.store.state.active_jobs.is_empty());
     assert_eq!(run.observed, 2);
+    assert!(!run.phases.is_empty());
+    for phase in &run.phases {
+        let rows: Vec<_> = phase.lines().collect();
+        assert_eq!(rows.len(), 3, "{phase}");
+        assert!(rows[0].contains("completed"));
+        assert!(["acme/api#1 → main", "acme/ui#2 → main"].contains(&rows[1]));
+        assert!(!rows[2].is_empty());
+    }
 }
 
 #[test]

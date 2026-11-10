@@ -84,7 +84,15 @@ When the PRs of a bundle were retargeted to `deploy/<date>-<base>` (see `bundle 
 
 ## Confirmation and gates
 
-On an interactive terminal, execution shows a spinner with elapsed time after confirmation. Sequential status retains the step index and PR identifier. Parallel status reports completed steps, active workers, unfinished steps and PR identifier, such as `3/50 completed, 2 active, 47 remaining [acme/api#123]: deploy acme/api: 1 of 2 workflow runs still going`. An active step is included in the unfinished count. The total includes merge, resume, gate, package wait and deploy PR steps. The status changes during readiness checks, the merge request, deployment workflow discovery, running workflows and the final completion check. The spinner keeps moving between API polls, pauses before gate prompts and clears before final results. `--no-progress`, JSON output, CI and redirected stderr disable the animation. These status updates do not change merge order, checks, polling intervals or resumability.
+On an interactive terminal, execution shows up to three live lines after confirmation: queue counts and elapsed time, the current organization/repository/PR and destination branch in bold when styling is enabled, and the current operation or deployment detail. Each line fits the current terminal width. For example:
+
+```text
+⠋ 3/50 completed, 2 active, 47 remaining · 1m 12s
+  acme/api#123 → main
+  deploy acme/api: 1 of 2 workflow runs still going
+```
+
+Sequential status retains the step index; parallel status reports completed steps, active workers and unfinished steps. An active step is included in the unfinished count. The total includes merge, resume, gate, package wait and deploy PR steps. The status changes during readiness checks, the merge request, deployment workflow discovery, running workflows and the final completion check. The spinner keeps moving between API polls, pauses before gate prompts and clears before final results. `--no-progress`, JSON output, CI and redirected stderr disable the animation. These status updates do not change merge order, checks, polling intervals or resumability. Cancellation does not undo merges already accepted by GitHub; durable pending records remain available for recovery.
 
 - `--apply` shows the steps and asks you to type `yes`. `--yes` skips only this question.
 - Every gate and unpublished package wait asks again, even with `--yes`. Without a terminal it does not ask: the step is `stopped` and the run ends.

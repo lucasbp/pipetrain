@@ -123,6 +123,26 @@ fn short(sha: &str) -> String {
     sha.chars().take(7).collect()
 }
 
+fn progress_target(plan: &Plan, state: &State, step: &StepReport) -> String {
+    let base = match step.kind {
+        Kind::Merge => plan
+            .items
+            .iter()
+            .find(|item| item.id == step.target)
+            .map(|item| item.base.as_str()),
+        Kind::Resume => state
+            .pending
+            .iter()
+            .find(|pending| pending.id == step.target)
+            .map(|pending| pending.base.as_str()),
+        _ => None,
+    };
+    match base {
+        Some(base) => format!("{} → {base}", step.target),
+        None => step.target.clone(),
+    }
+}
+
 fn method_of(settings: &Settings, cfg: &Config) -> Result<String> {
     let method = settings
         .method
@@ -939,10 +959,10 @@ pub fn merge_plan(
             step.blocked_by = Some(blocked.id);
         } else {
             let total = report.steps.len();
-            let target = step.target.clone();
+            let target = progress_target(plan, &store.state, &step);
             let mut progress = |text: &str| {
                 (hooks.progress)(&format!(
-                    "step {}/{total}, {} remaining [{target}]: {text}",
+                    "step {}/{total}, {} remaining\n{target}\n{text}",
                     index + 1,
                     total - index - 1
                 ));

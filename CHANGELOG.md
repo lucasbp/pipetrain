@@ -4,6 +4,8 @@
 
 ### Added
 
+- Interactive merge progress separates queue counts, the current organization/repository/PR and operation details into up to three live lines. The target is bold when terminal styling is enabled, and each line fits the current terminal width.
+
 - Named profiles automatically keep one durable merge queue across repositories and invocations. `--state` remains an override, and `merge.state_file` can persist a custom location in application configuration. Relative configured locations resolve from that configuration file, and unfinished legacy state blocks an automatic switch instead of being ignored.
 
 ### Fixed

@@ -182,10 +182,10 @@ impl scheduler::Coordinator for Coordinator<'_, '_> {
                 .values()
                 .filter(|status| **status == scheduler::Status::Running)
                 .count();
+            let target = progress_target(self.env.plan, &self.store.state, &self.steps[index]);
             (self.hooks.progress)(&format!(
-                "{completed}/{total} completed, {active} active, {} remaining [{}]: {message}",
+                "{completed}/{total} completed, {active} active, {} remaining\n{target}\n{message}",
                 total - completed,
-                self.steps[index].target
             ));
         }
     }
