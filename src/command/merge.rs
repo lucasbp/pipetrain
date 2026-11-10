@@ -24,6 +24,7 @@ use crate::planner::Item;
 use crate::style::{bold, dim, green, red, yellow};
 use crate::workflows::{self, PushRuns};
 
+pub mod bump;
 mod failure;
 mod parallel;
 
@@ -42,6 +43,8 @@ pub struct MergeOptions {
     pub state: Option<PathBuf>,
     pub open_pr: bool,
     pub dependency_failure: DependencyFailure,
+    pub bump: bool,
+    pub bump_options: bump::Options,
 }
 
 pub struct Settings {
@@ -52,6 +55,8 @@ pub struct Settings {
     pub timeout: Option<Duration>,
     pub open_pr: bool,
     pub dependency_failure: DependencyFailure,
+    pub bump: bool,
+    pub bump_options: bump::Options,
 }
 
 pub struct Hooks<'a> {
@@ -819,6 +824,16 @@ pub fn merge_plan(
         readings: RefCell::new(BTreeMap::new()),
     };
     let mut report = Report {
+        bump_enabled: settings.bump,
+        bump_candidates: if settings.bump {
+            plan.items
+                .iter()
+                .filter(|item| bump::applicable(item, store.state.bump.as_ref()))
+                .map(|item| item.id.clone())
+                .collect()
+        } else {
+            Vec::new()
+        },
         schema: SCHEMA,
         applied: false,
         requested: settings.apply,
@@ -860,7 +875,7 @@ pub fn merge_plan(
         });
     }
     report.applied = true;
-    if cfg.max_parallel > 1 {
+    if cfg.max_parallel > 1 || settings.bump {
         parallel::execute(&env, client, store, hooks, &mut report.steps, &bundles)?;
         let code = report.exit_code();
         return Ok(Outcome {
@@ -920,6 +935,7 @@ pub fn merge_plan(
                     Some(item) => merge_one(&env, item, client, store, &mut step_hooks, &mut step),
                     None => fail(&mut step, "it is not in the plan"),
                 },
+                Kind::Bump => fail(&mut step, "bump events are managed by the coordinator"),
                 Kind::Gate | Kind::Wait => gate_step(&env, &mut step_hooks, &mut step),
                 Kind::OpenPr => match bundles.get(&step.target) {
                     Some(bundled) => {
@@ -981,6 +997,7 @@ pub fn merge_plan(
 fn step_text(step: &StepReport, color: bool) -> String {
     let what = match step.kind {
         Kind::Resume => format!("wait for the deploy of {}", step.target),
+        Kind::Bump => format!("prepare dependency bump for {}", step.target),
         Kind::Merge => format!("merge {}", step.target),
         Kind::Gate => format!("gate: {}", step.target),
         Kind::Wait => format!("wait: {}", step.target),
@@ -1034,6 +1051,13 @@ fn render_with_steps(report: &Report, color: bool, include_steps: bool) -> Strin
     if !report.applied && !report.requested && report.stopped.is_none() {
         let banner = "dry run, nothing was merged; pass --apply to do it";
         out.push_str(&format!("{}\n\n", tint(color, yellow, banner)));
+    }
+    if report.bump_enabled && include_steps {
+        out.push_str("--bump enabled: with --apply this run may create isolated bump branches and draft PRs targeting consumer heads, then block those consumers for CI and review. Dry runs perform no writes.\n");
+        for target in &report.bump_candidates {
+            out.push_str(&format!("potential dependency bump: {target} (only after a new publication is verified; no version chosen yet)\n"));
+        }
+        out.push('\n');
     }
     if report.steps.is_empty() {
         out.push_str(&format!("{}\n", tint(color, dim, "nothing to merge")));
@@ -1124,6 +1148,8 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
             .map(|minutes| Duration::from_secs(minutes.saturating_mul(60))),
         open_pr: opts.open_pr,
         dependency_failure: opts.dependency_failure,
+        bump: opts.bump,
+        bump_options: opts.bump_options.clone(),
     };
     let (apply, yes) = (opts.apply, opts.yes);
     let live = crate::progress::detect(!opts.plan.progress, json, false);
@@ -1134,7 +1160,11 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
         } else {
             Some(ask(
                 text,
-                "Merge these PRs with the configured parallelism, waiting for each deploy? Type yes: ",
+                if opts.bump {
+                    "Merge these PRs and prepare draft dependency bump PRs where publication is proved, blocking consumers for CI and review? Type yes: "
+                } else {
+                    "Merge these PRs with the configured parallelism, waiting for each deploy? Type yes: "
+                },
             ))
         };
         let proceed = gate(apply, yes, interactive, answer.as_deref()) == Gate::Proceed;

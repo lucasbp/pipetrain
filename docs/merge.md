@@ -186,3 +186,27 @@ The coordinator owns confirmations, progress and the state file. Workers send ty
 A publisher failure stops new dispatches by default. The skip policy blocks its descendants and continues independent work. A leaf deployment failure continues proven independent work. Readiness failures, uncertain outcomes and coordinator persistence failures stop new dispatches. Workers already running are drained and their results recorded; the executor does not cancel deployment workflows.
 
 The scheduler exposes a coordinator preparation callback after prerequisite completion and before dispatch. A blocked preparation result affects only that consumer and its descendants. Preparation errors stop new dispatches before mutation. This callback does not change package versions or create publication PRs by itself.
+
+## Optional reviewed consumer bumps
+
+`--bump` enables publication-backed consumer preparation; `--no-bump` explicitly
+keeps the default disabled behavior. They cannot be combined. Without `--apply`,
+no bump branch, workspace or PR is created. The dry run and apply confirmation
+state these potential writes and identify candidate consumers without inventing
+versions. `--bump-push-step` changes the exact publisher step name, whose default
+is `Push to GitHub Packages`.
+
+A proved new NuGet publication can prepare one isolated bump branch and draft PR
+per consumer head. The draft targets that consumer's head branch and needs CI
+and review. The consumer and its descendants stay blocked in yellow; independent
+items can continue. A skipped or duplicate publication emits a gray bump skip
+and leaves ordinary consumer checks and gates intact. The coordinator persists
+publication inputs and preparation markers for safe resume and duplicate PR
+protection. See [Publication-backed consumer preparation](publication-bump.md)
+for proof requirements, workspace limits and partial-operation recovery.
+
+The JSON report adds `bump_enabled` when enabled, optional `bump_candidates`, and
+`kind: bump` events with a structured `bump` outcome. These additive fields retain
+schema 1. Events are appended after fixed queue steps and streamed at preparation
+time. A draft requiring review or a partial operation contributes a stopped
+attention event and exit code 5 without changing the dependency graph.

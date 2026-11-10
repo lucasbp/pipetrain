@@ -223,7 +223,10 @@ fn respond(script: &Mutex<Script>, line: &str, payload: &str) -> (u16, Value) {
             .and_then(|query| query.split('&').next())
             .unwrap_or("");
         let runs = script.runs_by_sha.get(sha).unwrap_or(&script.runs);
-        return (200, json!({"workflow_runs": runs}));
+        return (
+            200,
+            json!({"total_count": runs.len(), "workflow_runs": runs}),
+        );
     }
     (404, json!({"message": "not found"}))
 }
@@ -232,6 +235,7 @@ struct Run {
     phases: Vec<String>,
     outcome: Outcome,
     confirms: usize,
+    confirmation_text: Vec<String>,
     gates: usize,
     slept: Duration,
     observed: usize,
@@ -308,13 +312,15 @@ impl Rig {
             &self.server.base,
         );
         let mut confirms = 0;
+        let mut confirmation_text = Vec::new();
         let mut gates = 0;
         let mut slept = Duration::ZERO;
         let mut observed = 0;
         let mut phases = Vec::new();
         let outcome = {
-            let mut confirm_hook = |_: &str| {
+            let mut confirm_hook = |text: &str| {
                 confirms += 1;
+                confirmation_text.push(text.to_string());
                 confirm
             };
             let mut gate_hook = |_: &str| {
@@ -344,6 +350,7 @@ impl Rig {
             phases,
             outcome,
             confirms,
+            confirmation_text,
             gates,
             slept,
             observed,
@@ -405,6 +412,8 @@ fn applied() -> Settings {
         timeout: None,
         open_pr: false,
         dependency_failure: DependencyFailure::Stop,
+        bump: false,
+        bump_options: Default::default(),
     }
 }
 
@@ -2182,4 +2191,137 @@ fn parallel_legacy_failed_resume_stops_before_dispatching_new_independent_work()
             .blocked_by
             .is_some()
     );
+}
+
+#[test]
+fn bump_dry_run_keeps_state_and_github_untouched() {
+    let mut rig = Rig::new("");
+    let run = rig
+        .run(
+            &deployment_plan(),
+            Settings {
+                bump: true,
+                ..dry()
+            },
+            true,
+            true,
+        )
+        .unwrap();
+    assert!(
+        run.outcome
+            .report
+            .steps
+            .iter()
+            .all(|step| step.status == Status::Planned)
+    );
+    assert!(rig.store.state.bump.is_none());
+    assert!(rig.puts().is_empty());
+    let text = render(&run.outcome.report, false);
+    assert!(text.contains("Dry runs perform no writes"));
+    assert!(text.contains("draft PRs targeting consumer heads"));
+    let declined = rig
+        .run(
+            &deployment_plan(),
+            Settings {
+                bump: true,
+                ..applied()
+            },
+            false,
+            true,
+        )
+        .unwrap();
+    assert!(declined.confirmation_text[0].contains("isolated bump branches and draft PRs"));
+    assert!(rig.store.state.bump.is_none());
+    assert!(rig.puts().is_empty());
+}
+
+#[test]
+fn bump_partial_preparation_blocks_its_consumer_but_continues_independent_work() {
+    use pipetrain::consumer_bump::journal::{Journal, Preparation};
+    let mut rig = Rig::new("no_deploy_repos = [\"acme/auth\", \"acme/sync\"]");
+    let mut auth = pr("acme/auth", 3, "feat/3", "main");
+    auth.body.clear();
+    let mut later = pr("acme/auth", 5, "feat/5", "main");
+    later.body = "depends-on: acme/auth#3".into();
+    let mut plan = plan_of(
+        vec![auth, pr("acme/sync", 4, "feat/4", "main"), later],
+        Vec::new(),
+    );
+    for item in &mut plan.items {
+        item.stage = item.number as usize;
+    }
+    let mut journal = Journal::default();
+    journal.consumers.insert(
+        "acme/auth#3".into(),
+        Preparation {
+            repository: "acme/auth".into(),
+            number: 3,
+            head_branch: "feat/3".into(),
+            head_sha: "1".repeat(40),
+            bump_branch: "pipetrain/bump/3-nonce".into(),
+            workspace_root: "isolated".into(),
+            completed: false,
+            publication_fingerprint: String::new(),
+            prepared: None,
+        },
+    );
+    rig.store.state.bump = Some(journal);
+    let run = rig
+        .run(
+            &plan,
+            Settings {
+                bump: true,
+                ..applied()
+            },
+            true,
+            true,
+        )
+        .unwrap();
+    assert_eq!(run.step(0).status, Status::Skipped);
+    assert_eq!(run.step(1).status, Status::Done);
+    assert_eq!(run.step(2).status, Status::Skipped);
+    assert_eq!(run.step(3).kind, Kind::Bump);
+    assert_eq!(run.step(3).status, Status::Stopped);
+    assert_eq!(run.outcome.code, EXIT_STOPPED);
+    assert_eq!(rig.puts().len(), 1);
+    assert!(run.step(0).detail.contains("prior bump preparation"));
+    let json = serde_json::to_value(&run.outcome.report).unwrap();
+    assert_eq!(json["steps"][3]["bump"]["outcome"], "attention");
+}
+
+#[test]
+fn bump_all_skipped_publisher_does_not_skip_its_consumer_or_create_review_work() {
+    let mut rig = Rig::new("no_deploy_repos = [\"acme/portal\"]");
+    let mut plan = deployment_plan();
+    plan.items
+        .retain(|item| item.number == 1 || item.number == 2);
+    let consumer = plan.items.iter_mut().find(|item| item.number == 2).unwrap();
+    consumer.after[0].package = Some("Acme.SDK".into());
+    rig.script().runs = vec![run_json("publish", "completed", Some("skipped"))];
+    let run = rig
+        .run(
+            &plan,
+            Settings {
+                bump: true,
+                ..applied()
+            },
+            true,
+            true,
+        )
+        .unwrap();
+    assert_eq!(
+        run.statuses(),
+        vec![Status::Skipped, Status::Done, Status::Skipped]
+    );
+    assert_eq!(run.step(2).kind, Kind::Bump);
+    assert_eq!(run.outcome.code, 0);
+    assert_eq!(rig.puts().len(), 2);
+    let journal = rig.store.state.bump.as_ref().unwrap();
+    assert!(journal.publishers["acme/sdk#1"].deploy_confirmed);
+    assert_eq!(
+        journal.publishers["acme/sdk#1"].merge_sha.as_deref(),
+        Some(merge_sha(1).as_str())
+    );
+    assert!(journal.consumers.is_empty());
+    assert!(rig.store.state.pending.is_empty());
 }

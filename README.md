@@ -848,3 +848,11 @@ cargo test --locked
 ## License
 
 MIT, by Lucas Passos. See [LICENSE](LICENSE).
+
+`pipetrain merge --bump` can prepare draft dependency bump PRs only after proving
+a new publication from a publisher merged by the recorded queue execution. It is
+off by default; `--no-bump` explicitly disables it. `--apply` and confirmation are
+required for writes. Consumers stay blocked for CI and review, while independent
+items can continue. Skipped/duplicate publication does not create a bump PR or
+skip the consumer. See [publication-backed preparation](docs/publication-bump.md)
+for exact feed evidence, isolated workspaces and durable resume.

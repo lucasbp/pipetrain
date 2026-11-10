@@ -17,6 +17,9 @@ struct Coordinator<'a, 'h> {
     bundles: &'a BTreeMap<String, Bundled>,
     failures: failure::DeployFailures,
     states: BTreeMap<String, scheduler::Status>,
+    control_client: Client,
+    events: Vec<StepReport>,
+    bump_checked: BTreeMap<String, Option<String>>,
 }
 
 fn step_index(job_id: &str) -> Result<usize, String> {
@@ -83,16 +86,74 @@ impl scheduler::Coordinator for Coordinator<'_, '_> {
 
     fn prepare(&mut self, job: &Job) -> Result<Option<scheduler::Status>, String> {
         let index = step_index(&job.id)?;
-        Ok(self
-            .failures
-            .blocker(
-                index,
-                self.steps,
-                self.env.plan,
-                self.bundles,
-                &self.store.state,
-            )
-            .map(|blocked| scheduler::Status::Blocked(blocked.id)))
+        if let Some(blocked) = self.failures.blocker(
+            index,
+            self.steps,
+            self.env.plan,
+            self.bundles,
+            &self.store.state,
+        ) {
+            return Ok(Some(scheduler::Status::Blocked(blocked.id)));
+        }
+        if self.env.settings.bump {
+            let item = match self.steps[index].kind {
+                Kind::Merge => self
+                    .env
+                    .plan
+                    .items
+                    .iter()
+                    .find(|item| item.id == self.steps[index].target),
+                Kind::Wait => self.steps[index + 1..]
+                    .iter()
+                    .find(|step| step.kind == Kind::Merge)
+                    .and_then(|step| {
+                        self.env
+                            .plan
+                            .items
+                            .iter()
+                            .find(|item| item.id == step.target)
+                    }),
+                _ => None,
+            };
+            if let Some(item) =
+                item.filter(|item| bump::applicable(item, self.store.state.bump.as_ref()))
+            {
+                if let Some(reason) = self.bump_checked.get(&item.id) {
+                    return Ok(reason.clone().map(scheduler::Status::Blocked));
+                }
+                (self.hooks.progress)(&format!(
+                    "verifying publication and preparing bump for {}",
+                    item.id
+                ));
+                let outcome = bump::prepare(
+                    item,
+                    &mut self.control_client,
+                    &self.env.settings.bump_options,
+                    self.store,
+                );
+                let (status, detail, blocked) = match &outcome {
+                    bump::Outcome::Skipped { reason } => (Status::Skipped, reason.clone(), None),
+                    bump::Outcome::NeedsReview {
+                        pull_request_url, ..
+                    } => {
+                        let reason =
+                            format!("consumer bump needs CI and review: {pull_request_url}");
+                        (Status::Stopped, reason.clone(), Some(reason))
+                    }
+                    bump::Outcome::Attention { reason } => {
+                        (Status::Stopped, reason.clone(), Some(reason.clone()))
+                    }
+                };
+                let mut event = StepReport::new(Kind::Bump, &item.id, status, &detail);
+                event.bump =
+                    Some(serde_json::to_value(outcome).map_err(|error| error.to_string())?);
+                (self.hooks.observe)(&event);
+                self.events.push(event);
+                self.bump_checked.insert(item.id.clone(), blocked.clone());
+                return Ok(blocked.map(scheduler::Status::Blocked));
+            }
+        }
+        Ok(None)
     }
 
     fn confirm(&mut self, job: &Job) -> Result<(), String> {
@@ -149,6 +210,14 @@ impl scheduler::Coordinator for Coordinator<'_, '_> {
                 };
                 if !valid {
                     return Err("checkpoint does not belong to this step".to_string());
+                }
+                if self.env.settings.bump {
+                    bump::track(
+                        self.env.plan,
+                        self.store,
+                        &self.env.settings.bump_options,
+                        &operation,
+                    );
                 }
                 self.store
                     .apply(operation)
@@ -270,7 +339,7 @@ pub(super) fn execute(
     client: &Client,
     store: &mut Store,
     hooks: &mut Hooks,
-    steps: &mut [StepReport],
+    steps: &mut Vec<StepReport>,
     bundles: &BTreeMap<String, Bundled>,
 ) -> Result<()> {
     store.state.active_jobs.clear();
@@ -290,6 +359,9 @@ pub(super) fn execute(
         bundles,
         failures: failure::DeployFailures::default(),
         states: BTreeMap::new(),
+        control_client: client.fork(),
+        events: Vec::new(),
+        bump_checked: BTreeMap::new(),
     };
     let plan = env.plan;
     let cfg = env.cfg;
@@ -433,5 +505,7 @@ pub(super) fn execute(
             result.coordinator_errors.join("; ")
         );
     }
+    let events = std::mem::take(&mut coordinator.events);
+    steps.extend(events);
     Ok(())
 }

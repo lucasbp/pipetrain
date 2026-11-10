@@ -5,6 +5,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
 pub mod backend;
+pub mod journal;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Consumer {

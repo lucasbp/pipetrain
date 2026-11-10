@@ -135,6 +135,8 @@ pub struct DeployPr {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct State {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bump: Option<crate::consumer_bump::journal::Journal>,
     #[serde(default)]
     pub schema: u32,
     #[serde(default)]
@@ -321,6 +323,7 @@ impl Store {
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
     Resume,
+    Bump,
     Merge,
     Gate,
     Wait,
@@ -350,6 +353,8 @@ pub struct StepReport {
     pub deploy: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocked_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bump: Option<serde_json::Value>,
 }
 
 impl StepReport {
@@ -362,6 +367,7 @@ impl StepReport {
             merge_sha: None,
             deploy: None,
             blocked_by: None,
+            bump: None,
         }
     }
 }
@@ -374,6 +380,10 @@ pub struct NotMerging {
 
 #[derive(Debug, Serialize)]
 pub struct Report {
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub bump_enabled: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub bump_candidates: Vec<String>,
     pub schema: u32,
     pub applied: bool,
     #[serde(skip)]

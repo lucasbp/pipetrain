@@ -697,6 +697,23 @@ struct MergeArgs {
 
     #[arg(
         long,
+        conflicts_with = "no_bump",
+        help = "Prepare reviewed consumer bump PRs after a newly published NuGet dependency; requires --apply for writes"
+    )]
+    bump: bool,
+
+    #[arg(
+        long,
+        conflicts_with = "bump",
+        help = "Disable consumer bump preparation (the default)"
+    )]
+    no_bump: bool,
+
+    #[arg(long, default_value = merge::bump::DEFAULT_PUSH_STEP, help = "Exact successful workflow step proving a NuGet push for --bump")]
+    bump_push_step: String,
+
+    #[arg(
+        long,
         requires = "apply",
         help = "Merge even though the plan has open questions (the default stops before merging anything)"
     )]
@@ -904,6 +921,11 @@ fn run_merge(args: MergeArgs) -> Result<i32> {
         yes: args.yes,
         gates_confirmed: args.gates_confirmed,
         dependency_failure: args.dependency_failure,
+        bump: args.bump && !args.no_bump,
+        bump_options: merge::bump::Options {
+            push_step: args.bump_push_step,
+            ..Default::default()
+        },
         allow_questions: args.allow_questions,
         method: args.method,
         timeout_minutes: args.timeout_minutes,
