@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Named profiles automatically keep one durable merge queue across repositories and invocations. `--state` remains an override, and `merge.state_file` can persist a custom location in application configuration. Relative configured locations resolve from that configuration file, and unfinished legacy state blocks an automatic switch instead of being ignored.
+
 ### Fixed
 
 - Execution-time GraphQL readiness checks retry temporary unknown mergeability after an earlier merge, rather than failing before the REST retry path. Both checks show progress for up to one minute each and stop resumably if GitHub cannot settle; other blockers remain enforced.

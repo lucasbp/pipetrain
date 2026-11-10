@@ -127,7 +127,18 @@ Before it merges, pipetrain records the PR in a state file. After the deploy pas
 - A record whose deploy failed is checked again, so re-running the workflow and then running `merge` again continues.
 - The plan itself is not saved. It is built again, so merged PRs are gone from it and the queue continues from the first one still open.
 
-The state file is `pipetrain/merge-state.json` in the user state directory (the local data directory on Windows). `--state FILE` chooses another one. A state file that cannot be read is an error, never a reset.
+State is local and durable by default. Named profiles use `pipetrain/queues/<profile-key>/merge-state.json` in the user state directory (the local data directory on Windows). The selected canonical profile name identifies one stable queue across repositories and invocations; aliases and case changes do not create another queue. Simple names use their lowercase form. Other UTF-8 bytes are percent-encoded, including dots, path separators and percent signs; Windows reserved names escape their first byte. Different names cannot collide through replacement of punctuation. The implicit `default` profile retains `pipetrain/merge-state.json`.
+
+Path precedence is `--state FILE`, then `merge.state_file` from the selected configuration, then the automatic profile path. Relative configured paths resolve from the loaded config file's directory; relative `--state` paths retain their command-line working-directory meaning. The effective path is shown once on stderr except with `--json` or `--no-progress`. No state contents are printed. A missing user directory is an error unless a path override is provided; production commands never silently use memory-only storage.
+
+To persist a custom path without repeating a command flag:
+
+```toml
+[profile.acme.merge]
+state_file = 'queues/acme.json'
+```
+
+Without a path override, unfinished work in the legacy global state blocks a named profile before any GitHub writes, even if a profile state already exists. Choose that legacy file explicitly with `--state` or `merge.state_file`, reconcile it, and then deliberately choose how to continue. Pending deploys, queued deploy PRs, active jobs and dependency bump journals are checked. State is never automatically migrated, deleted or combined. An empty legacy state is left in place. An unreadable or invalid state file is an error, never a reset.
 
 ## Exit codes
 

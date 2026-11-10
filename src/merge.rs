@@ -8,6 +8,10 @@ use serde::{Deserialize, Serialize};
 use crate::emit::PAUSE_LINE;
 use crate::github::Run;
 
+mod storage;
+
+pub use storage::resolve_state_path;
+
 pub const SCHEMA: u32 = 1;
 pub const STOPPED: &str = "stopped after an earlier failure";
 pub const EXIT_STOPPED: i32 = 5;

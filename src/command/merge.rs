@@ -16,7 +16,7 @@ use crate::emit;
 use crate::github::{Client, LivePr, PrWrite};
 use crate::merge::{
     DependencyFailure, Kind, NotMerging, Pending, Report, SCHEMA, STOPPED, State, Status, Step,
-    StepReport, Store, Verdict, default_state_path, judge, steps, wait_is_published,
+    StepReport, Store, Verdict, judge, resolve_state_path, steps, wait_is_published,
 };
 use crate::model::{PrKey, PrState};
 use crate::plan::Plan;
@@ -1186,7 +1186,15 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
     let started = Instant::now();
     let json = opts.plan.json;
     let (built, mut client, cfg) = build_plan_with_config(&opts.plan)?;
-    let mut store = Store::open(opts.state.clone().or_else(default_state_path))?;
+    let state_path = resolve_state_path(
+        opts.state.as_deref(),
+        cfg.merge.state_file.as_deref(),
+        built.profile.as_ref().map(|profile| profile.name.as_str()),
+    )?;
+    let mut store = Store::open(Some(state_path.clone()))?;
+    if !json && opts.plan.progress {
+        eprintln!("state: {}", state_path.display());
+    }
     let settings = Settings {
         apply: opts.apply,
         gates_confirmed: opts.gates_confirmed,

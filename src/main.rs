@@ -736,7 +736,7 @@ struct MergeArgs {
     #[arg(
         long,
         value_name = "FILE",
-        help = "Where the resume state is kept (default: the user state dir, pipetrain/merge-state.json)"
+        help = "Override the resume state file (default: merge.state_file in the config, then a stable local file per profile)"
     )]
     state: Option<PathBuf>,
 
