@@ -68,7 +68,7 @@ pipetrain merge --apply --open-pr
 
 When the PRs of a bundle were retargeted to `deploy/<date>-<base>` (see `bundle --apply`), the plan merges them into that branch one by one. With `--open-pr`, after the last PR of each such bundle is merged and its wait is over, one more step opens the PR `deploy/<date>-<base>` into the base, with the branch name as title and the merged PRs in the body. It never merges that PR. The step is listed as planned in a dry run.
 
-- It only runs when every step before it ended `done` or `skipped`. A failed or stopped step halts the run, and the open step is `skipped` with `stopped after an earlier failure`.
+- It only runs when every step before it ended `done` or `skipped`. A blocking failure or stopped step halts the run. After a leaf deploy failure, only bundles with proven independent members may open; affected bundles remain blocked.
 - It does not duplicate: when an open PR from that branch into the base exists, or GitHub answers that one already exists, the step is `skipped`. When the deploy PR is itself in the queue, it is not opened either.
 - The base is not in the PR the bundle left behind, so it is found by name: the one branch of the repo whose name, written the way `bundle` writes a suffix, equals the suffix of the deploy branch. None or several matches, or an old unsuffixed `deploy/<date>` with no PR, fail the step with `open the PR by hand`.
 - It survives an interrupted run. With `--open-pr`, every PR merged into a train branch is recorded in the state file under its repo and branch. The record is removed once the step is settled: the PR was opened, one already existed, the deploy PR is in the queue, or the branch no longer exists. A run that ended after the last merge and before the step leaves the record, and the next `merge --apply --open-pr` plans the step again at the end of the queue, even when nothing is left to merge. A record that is left because the step failed stays too, so the next run tries again.
@@ -117,7 +117,7 @@ no_deploy_repos = ["acme/docs"]
 
 Text output streams each completed step once. Its final summary counts PRs merged during this invocation separately from earlier merges checked. `done` counts completed steps, including their deploy waits, rather than successful merge requests alone. A PR whose merge succeeded but whose deployment failed stays merged and remains pending in the state file. The JSON output continues to contain every step, its status, merge SHA and deploy result.
 
-Before it merges, pipetrain records the PR in a state file. After the deploy passes it removes the record. A run that is stopped, fails, is interrupted or loses its connection leaves the record, and the next `merge --apply` starts by finishing that wait, before it touches the queue:
+Before it merges, pipetrain records the PR in a state file. After the deploy passes, or all detected workflow runs are skipped, it removes the record. A run that is stopped, fails, is interrupted or loses its connection leaves the record, and the next `merge --apply` starts by finishing that wait, before it touches the queue:
 
 - A record without a merge commit (the process ended between the request and the answer) is resolved by asking GitHub whether the PR was merged.
 - A record whose deploy failed is checked again, so re-running the workflow and then running `merge` again continues.
@@ -147,7 +147,7 @@ The state file is `pipetrain/merge-state.json` in the user state directory (the 
 | `not_merging` | `{id, reasons[]}[]` | PRs the plan left out and why. |
 | `questions` | string[] | The `? ...` lines of the plan. |
 
-A step is `{kind, target, status, detail}` plus `merge_sha` and `deploy` when they apply. `kind` is `resume`, `merge`, `gate`, `wait` or `open-pr`. `status` is `planned`, `done`, `skipped`, `failed` or `stopped`; after a stop or a failure the steps that did not run are `skipped` with the detail `stopped after an earlier failure`.
+A step is `{kind, target, status, detail}` plus `merge_sha`, `deploy` and `blocked_by` when they apply. `blocked_by` identifies the failed PR responsible for a blocked step. `kind` is `resume`, `merge`, `gate`, `wait` or `open-pr`. `status` is `planned`, `done`, `skipped`, `failed` or `stopped`; after a global stop the steps that did not run are `skipped` with the detail `stopped after an earlier failure`. Dependency and same-target skips include a specific reason.
 
 ## Not part of it
 
@@ -164,4 +164,14 @@ These were decided on the conservative side. Each can be loosened later with a n
 3. **Open questions.** They block `--apply`. Some questions (a sibling that is not ready, for example) may be acceptable to merge past; is one switch for all of them too coarse?
 4. **Branches that are behind.** A `behind` PR fails the step and asks you to update it. Should `merge` offer `--update-branch`, knowing that it re-triggers the PR's checks and invalidates the plan?
 5. **One deploy at a time across repos.** Merges are strictly sequential, even for PRs of different repos that the plan puts in the same step. Parallel lanes (`max_parallel` in the plan) are not used.
-6. **A deploy that failed after the merge.** pipetrain stops and keeps the record; it does not revert. Whether to roll forward or back is not something a tool should guess.
+6. **A deploy that failed after the merge.** pipetrain keeps the record and never reverts. Continuation follows the dependency failure policy below; recovery remains manual.
+
+## Deployment failure policy
+
+A failed deploy remains `failed`, keeps its merge SHA and pending state, and makes the invocation exit with 1. A leaf failure continues only PRs whose independence is proved by the plan. PRs on the same repo and base, direct consumers and transitive dependents are blocked with their failed prerequisite named. Graph edges and ordering constraints remain in place.
+
+`--dependency-failure stop` is the default: a deploy failure with downstream dependency consumers stops the whole remaining queue. `--dependency-failure skip` blocks affected consumers and continues proven independent PRs. Neither policy changes the global stop for merge/readiness failures, unconfirmed gates, timeouts or uncertain deployment outcomes. Associated package waits and late gates are skipped when their consumer is blocked; unrelated gates still require confirmation.
+
+New pending records contain optional `continuation` metadata: `dependents` captures the transitive dependency closure, `has_consumers` records dependency contracts, and `independent` maps independent PR IDs to their planned head SHAs. Resuming uses this snapshot together with the rebuilt graph, because merged PRs can disappear from the plan. A changed or new head without saved proof is blocked. Older state files still load, but a failed deploy without this metadata stops safely. Do not delete or edit pending state to bypass that protection.
+
+Text results use green for completed steps, red for failures, yellow for blocked skips and stopped gates, and gray for normal skips such as already merged PRs or workflows skipped by filters. An all-skipped deploy is a normal `skipped` result with its merge SHA retained and pending record removed after the usual two settled polls. A successful workflow alongside skipped auxiliary workflows remains green; a failed workflow alongside skipped workflows remains red. Colors respect `--color`, `NO_COLOR` and redirected output. JSON remains plain and retains the full report.

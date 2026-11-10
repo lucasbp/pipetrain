@@ -6,6 +6,9 @@
 
 - Interactive `merge --apply` now shows a spinner and elapsed time while checking PR readiness, merging and waiting for deployment workflows. It pauses for gate prompts and respects `--no-progress`, JSON, CI and redirected stderr.
 
+- Leaf deployment failures now continue proven independent PRs while preserving the failed status and pending state. Dependency publisher failures stop by default; `--dependency-failure skip` blocks consumers and continues independent PRs. New resume metadata preserves dependency safety; failed legacy records stop safely.
+- Streamed results honor terminal colors: successful steps green, failures red, blocked or stopped steps yellow, and normal skips gray. All-skipped workflow runs settle as normal skips without hiding failures in other workflows.
+
 ## 0.7.3
 
 ### Fixed

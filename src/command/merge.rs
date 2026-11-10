@@ -15,14 +15,16 @@ use crate::config::Config;
 use crate::emit;
 use crate::github::{Client, LivePr, PrWrite};
 use crate::merge::{
-    Kind, NotMerging, Pending, Report, SCHEMA, STOPPED, State, Status, Step, StepReport, Store,
-    Verdict, default_state_path, judge, steps, wait_is_published,
+    DependencyFailure, Kind, NotMerging, Pending, Report, SCHEMA, STOPPED, State, Status, Step,
+    StepReport, Store, Verdict, default_state_path, judge, steps, wait_is_published,
 };
 use crate::model::{PrKey, PrState};
 use crate::plan::Plan;
 use crate::planner::Item;
 use crate::style::{bold, dim, green, red, yellow};
 use crate::workflows::{self, PushRuns};
+
+mod failure;
 
 const MERGEABILITY_TRIES: usize = 3;
 const MERGEABILITY_PAUSE: Duration = Duration::from_secs(2);
@@ -38,6 +40,7 @@ pub struct MergeOptions {
     pub timeout_minutes: Option<u64>,
     pub state: Option<PathBuf>,
     pub open_pr: bool,
+    pub dependency_failure: DependencyFailure,
 }
 
 pub struct Settings {
@@ -47,6 +50,7 @@ pub struct Settings {
     pub method: Option<String>,
     pub timeout: Option<Duration>,
     pub open_pr: bool,
+    pub dependency_failure: DependencyFailure,
 }
 
 pub struct Hooks<'a> {
@@ -65,6 +69,7 @@ pub struct Outcome {
 }
 
 struct Env<'a> {
+    plan: &'a Plan,
     cfg: &'a Config,
     settings: &'a Settings,
     method: &'a str,
@@ -99,6 +104,7 @@ struct Limits {
 
 enum Deploy {
     Passed(usize),
+    Skipped(usize),
     Failed(String),
     TimedOut(String),
     NoRun(Duration),
@@ -231,13 +237,19 @@ fn wait_for_deploy(
         };
         match judge(&runs) {
             Verdict::Failed(text) => return Deploy::Failed(text),
-            Verdict::Passed(count) => {
+            verdict @ (Verdict::Passed(count) | Verdict::Skipped(count)) => {
+                let skipped = matches!(verdict, Verdict::Skipped(_));
                 if settled == Some(count) {
-                    return Deploy::Passed(count);
+                    return if skipped {
+                        Deploy::Skipped(count)
+                    } else {
+                        Deploy::Passed(count)
+                    };
                 }
                 settled = Some(count);
+                let conclusion = if skipped { "skipped" } else { "passed" };
                 (hooks.progress)(&format!(
-                    "deploy {slug}: {count} workflows passed, confirming completion"
+                    "deploy {slug}: {count} workflows {conclusion}, confirming completion"
                 ));
             }
             Verdict::Waiting(text) => {
@@ -310,6 +322,12 @@ fn deploy_phase(
         Deploy::Passed(count) => (
             Status::Done,
             said(format!("deploy passed ({count} workflow runs)")),
+        ),
+        Deploy::Skipped(count) => (
+            Status::Skipped,
+            said(format!(
+                "deploy skipped (all {count} workflow runs were skipped)"
+            )),
         ),
         Deploy::Failed(text) => (Status::Failed, said(format!("deploy failed: {text}"))),
         Deploy::TimedOut(last) => (
@@ -408,6 +426,7 @@ fn merge_one(
         repo: slug.clone(),
         base: item.base.clone(),
         sha: None,
+        continuation: Some(failure::continuation(env.plan, item)),
     };
     if let Err(error) = store.add(pending) {
         return fail(report, format!("cannot save the merge state: {error:#}"));
@@ -487,13 +506,14 @@ fn finish_deploy(
     report.status = status;
     report.detail = match status {
         Status::Done => format!("merged {} into {base}", short(sha)),
+        Status::Skipped => format!("merged {} into {base}, deploy skipped", short(sha)),
         Status::Failed => format!("merged {} into {base}, but the deploy failed", short(sha)),
         _ => format!(
             "merged {} into {base}, but the deploy did not finish",
             short(sha)
         ),
     };
-    if status == Status::Done
+    if matches!(status, Status::Done | Status::Skipped)
         && let Err(error) = store.remove(id)
     {
         stop(report, format!("cannot update the merge state: {error:#}"));
@@ -791,6 +811,7 @@ pub fn merge_plan(
 ) -> Result<Outcome> {
     let method = method_of(settings, cfg)?;
     let env = Env {
+        plan,
         cfg,
         settings,
         method: &method,
@@ -838,12 +859,20 @@ pub fn merge_plan(
         });
     }
     report.applied = true;
-    let mut halted = false;
+    let mut halted: Option<String> = None;
+    let mut failures = failure::DeployFailures::default();
     for index in 0..report.steps.len() {
         let mut step = report.steps[index].clone();
-        if halted {
+        if let Some(blocker) = &halted {
             step.status = Status::Skipped;
             step.detail = STOPPED.to_string();
+            step.blocked_by = Some(blocker.clone());
+        } else if let Some(blocked) =
+            failures.blocker(index, &report.steps, plan, &bundles, &store.state)
+        {
+            step.status = Status::Skipped;
+            step.detail = blocked.detail;
+            step.blocked_by = Some(blocked.id);
         } else {
             let total = report.steps.len();
             let target = step.target.clone();
@@ -898,7 +927,35 @@ pub fn merge_plan(
                     None => fail(&mut step, "the bundle is not in this run"),
                 },
             }
-            halted = matches!(step.status, Status::Failed | Status::Stopped);
+            if step.status == Status::Failed
+                && step.merge_sha.is_some()
+                && matches!(step.kind, Kind::Merge | Kind::Resume)
+            {
+                let pending = store
+                    .state
+                    .pending
+                    .iter()
+                    .find(|pending| pending.id == step.target);
+                match pending {
+                    Some(pending) if pending.continuation.is_some() => {
+                        let has_consumers = failures.record(pending, plan);
+                        if has_consumers && settings.dependency_failure == DependencyFailure::Stop {
+                            step.detail.push_str(
+                                "; dependent PRs require this deploy (--dependency-failure stop)",
+                            );
+                            halted = Some(step.target.clone());
+                        }
+                    }
+                    _ => {
+                        step.detail.push_str(
+                            "; the saved state has no independence proof, stopping safely",
+                        );
+                        halted = Some(step.target.clone());
+                    }
+                }
+            } else if matches!(step.status, Status::Failed | Status::Stopped) {
+                halted = Some(step.target.clone());
+            }
         }
         (hooks.observe)(&step);
         report.steps[index] = step;
@@ -937,7 +994,18 @@ fn step_text(step: &StepReport, color: bool) -> String {
     match step.status {
         Status::Planned => format!("{what}{suffix}"),
         Status::Done => format!("{} {what}{suffix}{deploy}", tint(color, green, "done:")),
-        Status::Skipped => format!("{} {what}{suffix}", tint(color, dim, "skipped:")),
+        Status::Skipped => format!(
+            "{} {what}{suffix}{deploy}",
+            tint(
+                color,
+                if step.blocked_by.is_some() {
+                    yellow
+                } else {
+                    dim
+                },
+                "skipped:"
+            )
+        ),
         Status::Failed => format!("{} {what}{suffix}{deploy}", tint(color, red, "failed:")),
         Status::Stopped => format!("{} {what}{suffix}{deploy}", tint(color, yellow, "stopped:")),
     }
@@ -1045,6 +1113,7 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
             .timeout_minutes
             .map(|minutes| Duration::from_secs(minutes.saturating_mul(60))),
         open_pr: opts.open_pr,
+        dependency_failure: opts.dependency_failure,
     };
     let (apply, yes) = (opts.apply, opts.yes);
     let live = crate::progress::detect(!opts.plan.progress, json, false);
@@ -1082,7 +1151,7 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
     let mut pause = |wait: Duration| std::thread::sleep(wait);
     let mut observe = |step: &StepReport| {
         if !json {
-            crate::progress::line(&step_text(step, false));
+            crate::progress::line(&step_text(step, true));
         }
     };
     let mut progress = |text: &str| crate::progress::phase(text);

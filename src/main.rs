@@ -689,6 +689,14 @@ struct MergeArgs {
 
     #[arg(
         long,
+        value_enum,
+        default_value = "stop",
+        help = "After a dependency publisher deploy fails: stop the queue, or skip blocked PRs and continue proven independent items"
+    )]
+    dependency_failure: pipetrain::merge::DependencyFailure,
+
+    #[arg(
+        long,
         requires = "apply",
         help = "Merge even though the plan has open questions (the default stops before merging anything)"
     )]
@@ -895,6 +903,7 @@ fn run_merge(args: MergeArgs) -> Result<i32> {
         apply: args.apply,
         yes: args.yes,
         gates_confirmed: args.gates_confirmed,
+        dependency_failure: args.dependency_failure,
         allow_questions: args.allow_questions,
         method: args.method,
         timeout_minutes: args.timeout_minutes,
