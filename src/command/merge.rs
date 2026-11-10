@@ -54,6 +54,7 @@ pub struct Hooks<'a> {
     pub gate: &'a mut dyn FnMut(&str) -> bool,
     pub sleep: &'a mut dyn FnMut(Duration),
     pub observe: &'a mut dyn FnMut(&StepReport),
+    pub progress: &'a mut dyn FnMut(&str),
 }
 
 #[derive(Debug)]
@@ -217,7 +218,7 @@ fn wait_for_deploy(
     slug: &str,
     sha: &str,
     limits: &Limits,
-    sleep: &mut dyn FnMut(Duration),
+    hooks: &mut Hooks,
 ) -> Deploy {
     let poll = limits.poll.max(Duration::from_millis(1));
     let mut waited = Duration::ZERO;
@@ -235,13 +236,18 @@ fn wait_for_deploy(
                     return Deploy::Passed(count);
                 }
                 settled = Some(count);
+                (hooks.progress)(&format!(
+                    "deploy {slug}: {count} workflows passed, confirming completion"
+                ));
             }
             Verdict::Waiting(text) => {
                 settled = None;
                 last = text;
+                (hooks.progress)(&format!("deploy {slug}: {last}"));
             }
             Verdict::NoRuns => {
                 settled = None;
+                (hooks.progress)(&format!("deploy {slug}: waiting for a workflow to start"));
                 if waited >= limits.grace {
                     return Deploy::NoRun(limits.grace);
                 }
@@ -250,7 +256,7 @@ fn wait_for_deploy(
         if waited >= limits.timeout {
             return Deploy::TimedOut(last);
         }
-        sleep(poll);
+        (hooks.sleep)(poll);
         waited += poll;
     }
 }
@@ -263,6 +269,7 @@ fn deploy_phase(
     base: &str,
     sha: &str,
 ) -> (Status, String) {
+    (hooks.progress)(&format!("checking deploy workflows for {slug}@{base}"));
     if !env.cfg.merge.waits_for_deploy(slug) {
         return (
             Status::Done,
@@ -299,7 +306,7 @@ fn deploy_phase(
         poll: Duration::from_secs(env.cfg.merge.poll_seconds.max(1)),
         grace: Duration::from_secs(env.cfg.merge.no_run_grace_seconds),
     };
-    match wait_for_deploy(client, slug, sha, &limits, &mut *hooks.sleep) {
+    match wait_for_deploy(client, slug, sha, &limits, hooks) {
         Deploy::Passed(count) => (
             Status::Done,
             said(format!("deploy passed ({count} workflow runs)")),
@@ -347,6 +354,7 @@ fn merge_one(
 ) {
     let key = PrKey::new(&item.org, &item.repo, item.number);
     let slug = key.slug();
+    (hooks.progress)(&format!("checking merge readiness of {}", item.id));
     let pr = match client.pr(&key) {
         Ok(Some(pr)) => pr,
         Ok(None) => return fail(report, "not found on GitHub"),
@@ -404,6 +412,7 @@ fn merge_one(
     if let Err(error) = store.add(pending) {
         return fail(report, format!("cannot save the merge state: {error:#}"));
     }
+    (hooks.progress)(&format!("merging {} into {}", item.id, item.base));
     let merge_sha = match client.merge_pr(&slug, item.number, &item.sha, env.method) {
         Ok(sha) => sha,
         Err(error) => match confirm_merge(client, &slug, item.number) {
@@ -836,6 +845,23 @@ pub fn merge_plan(
             step.status = Status::Skipped;
             step.detail = STOPPED.to_string();
         } else {
+            let total = report.steps.len();
+            let target = step.target.clone();
+            let mut progress = |text: &str| {
+                (hooks.progress)(&format!(
+                    "step {}/{total}, {} remaining [{target}]: {text}",
+                    index + 1,
+                    total - index - 1
+                ));
+            };
+            let mut step_hooks = Hooks {
+                confirm: &mut *hooks.confirm,
+                gate: &mut *hooks.gate,
+                sleep: &mut *hooks.sleep,
+                observe: &mut *hooks.observe,
+                progress: &mut progress,
+            };
+            (step_hooks.progress)("starting");
             match step.kind {
                 Kind::Resume => {
                     let pending = store
@@ -846,16 +872,16 @@ pub fn merge_plan(
                         .cloned();
                     match pending {
                         Some(pending) => {
-                            resume_one(&env, &pending, client, store, hooks, &mut step);
+                            resume_one(&env, &pending, client, store, &mut step_hooks, &mut step);
                         }
                         None => fail(&mut step, "the saved state no longer lists it"),
                     }
                 }
                 Kind::Merge => match plan.items.iter().find(|item| item.id == step.target) {
-                    Some(item) => merge_one(&env, item, client, store, hooks, &mut step),
+                    Some(item) => merge_one(&env, item, client, store, &mut step_hooks, &mut step),
                     None => fail(&mut step, "it is not in the plan"),
                 },
-                Kind::Gate | Kind::Wait => gate_step(&env, hooks, &mut step),
+                Kind::Gate | Kind::Wait => gate_step(&env, &mut step_hooks, &mut step),
                 Kind::OpenPr => match bundles.get(&step.target) {
                     Some(bundled) => {
                         let settled = open_deploy_pr(&env, plan, bundled, client, &mut step);
@@ -1021,6 +1047,8 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
         open_pr: opts.open_pr,
     };
     let (apply, yes) = (opts.apply, opts.yes);
+    let live = crate::progress::detect(!opts.plan.progress, json, false);
+    let display = RefCell::new(None);
     let mut confirm = |text: &str| {
         let answer = if yes {
             None
@@ -1030,9 +1058,14 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
                 "Merge these PRs one at a time, waiting for each deploy? Type yes: ",
             ))
         };
-        gate(apply, yes, interactive, answer.as_deref()) == Gate::Proceed
+        let proceed = gate(apply, yes, interactive, answer.as_deref()) == Gate::Proceed;
+        if proceed {
+            *display.borrow_mut() = Some(crate::progress::Progress::start(live));
+        }
+        proceed
     };
     let mut at_gate = |text: &str| {
+        display.borrow_mut().take();
         if !interactive {
             return false;
         }
@@ -1040,21 +1073,28 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
             &format!("Gate: {text}"),
             "Type yes once that is done, anything else stops here: ",
         );
-        answer.trim() == "yes"
+        let proceed = answer.trim() == "yes";
+        if proceed {
+            *display.borrow_mut() = Some(crate::progress::Progress::start(live));
+        }
+        proceed
     };
     let mut pause = |wait: Duration| std::thread::sleep(wait);
     let mut observe = |step: &StepReport| {
         if !json {
-            eprintln!("{}", step_text(step, false));
+            crate::progress::line(&step_text(step, false));
         }
     };
+    let mut progress = |text: &str| crate::progress::phase(text);
     let mut hooks = Hooks {
         confirm: &mut confirm,
         gate: &mut at_gate,
         sleep: &mut pause,
         observe: &mut observe,
+        progress: &mut progress,
     };
     let outcome = merge_plan(&built, &cfg, &mut client, &settings, &mut store, &mut hooks)?;
+    display.borrow_mut().take();
     if outcome.aborted {
         eprintln!("aborted, nothing was merged");
         return Ok(outcome.code);

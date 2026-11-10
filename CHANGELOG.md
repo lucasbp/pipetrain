@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Interactive `merge --apply` now shows a spinner and elapsed time while checking PR readiness, merging and waiting for deployment workflows. It pauses for gate prompts and respects `--no-progress`, JSON, CI and redirected stderr.
+
 ## 0.7.3
 
 ### Fixed

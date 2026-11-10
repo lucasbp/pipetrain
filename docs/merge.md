@@ -80,6 +80,8 @@ When the PRs of a bundle were retargeted to `deploy/<date>-<base>` (see `bundle 
 
 ## Confirmation and gates
 
+On an interactive terminal, execution shows a spinner with elapsed time after confirmation. Every status retains the current step, total steps, remaining steps and PR identifier, such as `step 3/50, 47 remaining [acme/api#123]: deploy acme/api: 1 of 2 workflow runs still going`. The total includes merge, resume, gate, package wait and deploy PR steps. The status changes during readiness checks, the merge request, deployment workflow discovery, running workflows and the final completion check. The spinner keeps moving between API polls, pauses before gate prompts and clears before final results. `--no-progress`, JSON output, CI and redirected stderr disable the animation. These status updates do not change merge order, checks, polling intervals or resumability.
+
 - `--apply` shows the steps and asks you to type `yes`. `--yes` skips only this question.
 - Every gate and unpublished package wait asks again, even with `--yes`. Without a terminal it does not ask: the step is `stopped` and the run ends.
 - `--gates-confirmed` answers all of them for you. Use it on the run that follows the gate you did by hand, or when you already did the DDL and infra changes.

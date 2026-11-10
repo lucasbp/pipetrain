@@ -212,6 +212,7 @@ fn respond(script: &Mutex<Script>, line: &str, payload: &str) -> (u16, Value) {
 }
 
 struct Run {
+    phases: Vec<String>,
     outcome: Outcome,
     confirms: usize,
     gates: usize,
@@ -292,6 +293,7 @@ impl Rig {
         let mut gates = 0;
         let mut slept = Duration::ZERO;
         let mut observed = 0;
+        let mut phases = Vec::new();
         let outcome = {
             let mut confirm_hook = |_: &str| {
                 confirms += 1;
@@ -303,11 +305,13 @@ impl Rig {
             };
             let mut sleep_hook = |pause: Duration| slept += pause;
             let mut observe_hook = |_: &StepReport| observed += 1;
+            let mut progress_hook = |text: &str| phases.push(text.to_string());
             let mut hooks = Hooks {
                 confirm: &mut confirm_hook,
                 gate: &mut gate_hook,
                 sleep: &mut sleep_hook,
                 observe: &mut observe_hook,
+                progress: &mut progress_hook,
             };
             merge_plan(
                 plan,
@@ -319,6 +323,7 @@ impl Rig {
             )?
         };
         Ok(Run {
+            phases,
             outcome,
             confirms,
             gates,
@@ -473,6 +478,104 @@ fn last_position(lines: &[String], needle: &str) -> usize {
 }
 
 #[test]
+fn progress_identifies_the_current_pr_and_deploy_confirmation_in_queue_order() {
+    let mut rig = Rig::new("");
+    let plan = plan_on(&[1, 2]);
+    let order = merge_numbers(&plan);
+    let run = rig.go(&plan);
+    let first = format!("merging acme/api#{} into main", order[0]);
+    let second = format!("merging acme/api#{} into main", order[1]);
+    let first_at = run
+        .phases
+        .iter()
+        .position(|text| text.ends_with(&first))
+        .unwrap();
+    let second_at = run
+        .phases
+        .iter()
+        .position(|text| text.ends_with(&second))
+        .unwrap();
+    let confirmed_at = run
+        .phases
+        .iter()
+        .position(|text| text.contains("confirming completion"))
+        .unwrap();
+    assert!(first_at < confirmed_at && confirmed_at < second_at);
+    let second_step_at = run
+        .phases
+        .iter()
+        .position(|text| text.starts_with("step 2/2,"))
+        .unwrap();
+    assert!(
+        run.phases[..second_step_at]
+            .iter()
+            .all(|text| text.starts_with("step 1/2, 1 remaining [acme/api#1]:"))
+    );
+    assert!(
+        run.phases[second_step_at..]
+            .iter()
+            .all(|text| text.starts_with("step 2/2, 0 remaining [acme/api#2]:"))
+    );
+    assert!(
+        run.phases
+            .iter()
+            .any(|text| text == "step 1/2, 1 remaining [acme/api#1]: starting")
+    );
+    assert!(
+        run.phases
+            .iter()
+            .any(|text| text.contains("checking merge readiness"))
+    );
+    assert!(
+        run.phases
+            .iter()
+            .any(|text| text.ends_with("checking deploy workflows for acme/api@main"))
+    );
+}
+
+#[test]
+fn progress_shows_running_workflows_and_waiting_for_the_first_run() {
+    let plan = plan_on(&[1]);
+    let mut running = Rig::new("");
+    running.script().runs = vec![run_json("deploy", "in_progress", None)];
+    let run = running
+        .run(
+            &plan,
+            Settings {
+                timeout: Some(Duration::from_secs(1)),
+                ..applied()
+            },
+            true,
+            true,
+        )
+        .unwrap();
+    assert!(
+        run.phases
+            .iter()
+            .any(|text| text.ends_with("deploy acme/api: 1 of 1 workflow runs still going"))
+    );
+
+    let mut absent = Rig::new("");
+    absent.script().runs = Vec::new();
+    let run = absent.go(&plan);
+    assert!(
+        run.phases
+            .iter()
+            .any(|text| text.ends_with("deploy acme/api: waiting for a workflow to start"))
+    );
+    assert_eq!(run.step(0).status, Status::Stopped);
+}
+
+#[test]
+fn declined_confirmation_emits_no_execution_progress() {
+    let mut rig = Rig::new("");
+    let plan = plan_on(&[1]);
+    let run = rig.run(&plan, applied(), false, true).unwrap();
+    assert!(run.phases.is_empty());
+    assert!(rig.puts().is_empty());
+}
+
+#[test]
 fn a_dry_run_lists_the_steps_in_queue_order_and_writes_nothing() {
     let mut rig = Rig::new("");
     let plan = plan_on(&[1, 2]);
@@ -502,6 +605,7 @@ fn a_dry_run_lists_the_steps_in_queue_order_and_writes_nothing() {
     assert_eq!(run.outcome.code, 0);
     assert_eq!(run.confirms, 0);
     assert!(rig.puts().is_empty());
+    assert!(run.phases.is_empty());
     let text = render(&run.outcome.report, false);
     assert!(text.contains("dry run"), "{text}");
     assert!(text.contains("pass --apply"), "{text}");
