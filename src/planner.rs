@@ -285,7 +285,7 @@ impl<'a> Builder<'a> {
         self.link(from, to, rule, reason, true);
         let tagged = self.graph.preds[to]
             .iter_mut()
-            .find(|e| e.from == from && e.rule == rule && e.package.is_none());
+            .find(|e| e.from == from && e.package.is_none());
         if let Some(edge) = tagged {
             edge.package = Some(package.to_string());
             edge.version = version.map(str::to_string);

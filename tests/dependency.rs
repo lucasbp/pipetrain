@@ -3,8 +3,10 @@ use std::collections::BTreeMap;
 mod common;
 
 use common::pr;
+use pipetrain::command::merge::bump;
 use pipetrain::config::{Config, Rules};
 use pipetrain::emit;
+use pipetrain::merge::{Pending, Store, StoreOperation};
 use pipetrain::model::Pr;
 use pipetrain::plan::{self, Gathered};
 use pipetrain::planner::{self, PlanInput, Planned};
@@ -81,10 +83,10 @@ fn codes(planned: &Planned) -> Vec<&str> {
     planned.questions.iter().map(|q| q.code.as_str()).collect()
 }
 
-fn queue(cfg: &Config, prs: Vec<Pr>, manifests: &[Manifest]) -> Vec<String> {
+fn build(cfg: &Config, prs: Vec<Pr>, manifests: &[Manifest]) -> plan::Plan {
     let rules = Rules::new(cfg).unwrap();
     let (publishers, references) = scan(manifests);
-    let built = plan::build(
+    plan::build(
         &rules,
         Gathered {
             generated_at: "2026-10-30T09:00:00-03:00".to_string(),
@@ -105,8 +107,11 @@ fn queue(cfg: &Config, prs: Vec<Pr>, manifests: &[Manifest]) -> Vec<String> {
             requests: 1,
             rate_remaining: Some(4000),
         },
-    );
-    emit::queue_lines(&built)
+    )
+}
+
+fn queue(cfg: &Config, prs: Vec<Pr>, manifests: &[Manifest]) -> Vec<String> {
+    emit::queue_lines(&build(cfg, prs, manifests))
 }
 
 fn position(lines: &[String], id: &str) -> usize {
@@ -121,6 +126,60 @@ fn util_and_sdk_prs() -> Vec<Pr> {
         pr("acme/sdk", 1, "feat/a", "master"),
         pr("acme/util", 2, "feat/b", "master"),
     ]
+}
+
+fn assert_package_survives_winning_rule(cfg: &Config, prs: Vec<Pr>, rule: &str) {
+    let plan = build(cfg, prs, &util_and_sdk());
+    let consumer = plan
+        .items
+        .iter()
+        .find(|item| item.id == "acme/sdk#1")
+        .unwrap();
+    let contracts: Vec<_> = consumer
+        .after
+        .iter()
+        .filter(|dep| dep.id == "acme/util#2")
+        .collect();
+    assert_eq!(contracts.len(), 1);
+    assert_eq!(contracts[0].rule.as_str(), rule);
+    assert_eq!(contracts[0].package.as_deref(), Some("acme.util"));
+    assert!(bump::applicable(consumer, None));
+    let lines = emit::queue_lines(&plan);
+    assert!(position(&lines, "acme/util#2") < position(&lines, "acme/sdk#1"));
+    let mut store = Store::in_memory();
+    bump::track(
+        &plan,
+        &mut store,
+        &bump::Options::default(),
+        &StoreOperation::Add(Pending {
+            id: "acme/util#2".into(),
+            repo: "acme/util".into(),
+            base: "master".into(),
+            sha: None,
+            continuation: None,
+        }),
+    );
+    let journal = store.state.bump.unwrap();
+    assert_eq!(journal.publishers["acme/util#2"].packages, ["acme.util"]);
+    assert_eq!(journal.contracts[&consumer.id].len(), 1);
+    assert_eq!(journal.contracts[&consumer.id][0].package, "acme.util");
+    assert_eq!(
+        journal.contracts[&consumer.id][0].publisher_id,
+        "acme/util#2"
+    );
+}
+
+#[test]
+fn explicit_depends_on_keeps_its_rule_and_package_for_consumer_bumps() {
+    let mut prs = util_and_sdk_prs();
+    prs[0].body = "Depends-On: acme/util#2".into();
+    assert_package_survives_winning_rule(&config(""), prs, "depends-on");
+}
+
+#[test]
+fn explicit_config_order_keeps_its_rule_and_package_for_consumer_bumps() {
+    let cfg = config("[[order]]\nrepos = [\"acme/util\", \"acme/sdk\"]\n");
+    assert_package_survives_winning_rule(&cfg, util_and_sdk_prs(), "order");
 }
 
 #[test]
