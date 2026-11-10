@@ -2194,6 +2194,30 @@ fn parallel_legacy_failed_resume_stops_before_dispatching_new_independent_work()
 }
 
 #[test]
+fn bump_dry_run_does_not_offer_author_hidden_consumers() {
+    let mut rig = Rig::new("");
+    let mut plan = deployment_plan();
+    let consumer = plan.items.iter_mut().find(|item| item.number == 2).unwrap();
+    consumer.after[0].package = Some("Acme.SDK".into());
+    let hidden = consumer.id.clone();
+    consumer.hidden = true;
+    let run = rig
+        .run(
+            &plan,
+            Settings {
+                bump: true,
+                ..dry()
+            },
+            true,
+            true,
+        )
+        .unwrap();
+    assert!(!run.outcome.report.bump_candidates.contains(&hidden));
+    assert!(rig.puts().is_empty());
+    assert!(rig.store.state.bump.is_none());
+}
+
+#[test]
 fn bump_dry_run_keeps_state_and_github_untouched() {
     let mut rig = Rig::new("");
     let run = rig

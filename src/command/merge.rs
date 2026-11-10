@@ -828,7 +828,7 @@ pub fn merge_plan(
         bump_candidates: if settings.bump {
             plan.items
                 .iter()
-                .filter(|item| bump::applicable(item, store.state.bump.as_ref()))
+                .filter(|item| !item.hidden && bump::applicable(item, store.state.bump.as_ref()))
                 .map(|item| item.id.clone())
                 .collect()
         } else {

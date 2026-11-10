@@ -121,10 +121,7 @@ impl scheduler::Coordinator for Coordinator<'_, '_> {
                 if let Some(reason) = self.bump_checked.get(&item.id) {
                     return Ok(reason.clone().map(scheduler::Status::Blocked));
                 }
-                (self.hooks.progress)(&format!(
-                    "verifying publication and preparing bump for {}",
-                    item.id
-                ));
+                self.progress(&job.id, "verifying publication and preparing consumer bump");
                 let outcome = bump::prepare(
                     item,
                     &mut self.control_client,

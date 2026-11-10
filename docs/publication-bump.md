@@ -7,6 +7,12 @@ branches and draft PRs before any operation. The standalone bump command and MCP
 bump tool remain read-only. Enabling preparation cannot bypass publication proof,
 dependency ordering, CI, or human review.
 
+Automatic preparation is limited to selected consumer PRs already eligible for
+the merge plan. PRs excluded for missing approval, failing checks or other
+readiness blockers are not edited by this option. Author-hidden PRs are not bump
+targets. Those consumers require a separate reviewed preparation before joining
+the queue. Bump audit events are additional to the queue-job progress count.
+
 ## Publication evidence
 
 `publication::verify` accepts the publisher execution, its workflow run, the
