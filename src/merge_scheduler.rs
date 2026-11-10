@@ -40,7 +40,7 @@ pub enum FailurePolicy {
     SkipDescendants,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub enum Event {
     Transition {
         id: String,
@@ -51,12 +51,20 @@ pub enum Event {
         id: String,
         message: String,
     },
+    Checkpoint {
+        id: String,
+        data: String,
+        reply: SyncSender<Result<(), String>>,
+    },
 }
 
 pub trait Coordinator {
     fn persist(&mut self, id: &str, status: &Status) -> Result<(), String>;
     fn confirm(&mut self, job: &Job) -> Result<(), String>;
     fn progress(&mut self, id: &str, message: &str);
+    fn checkpoint(&mut self, _id: &str, _data: &str) -> Result<(), String> {
+        Err("coordinator does not support worker checkpoints".to_string())
+    }
 }
 
 #[derive(Clone)]
@@ -66,6 +74,20 @@ pub struct Progress {
 }
 
 impl Progress {
+    pub fn checkpoint(&self, data: impl Into<String>) -> Result<(), String> {
+        let (reply, receive) = mpsc::sync_channel(1);
+        self.sender
+            .send(Event::Checkpoint {
+                id: self.id.clone(),
+                data: data.into(),
+                reply,
+            })
+            .map_err(|_| "scheduler stopped receiving checkpoints".to_string())?;
+        receive
+            .recv()
+            .map_err(|_| "scheduler did not acknowledge checkpoint".to_string())?
+    }
+
     pub fn send(&self, message: impl Into<String>) -> Result<(), String> {
         self.sender
             .send(Event::Progress {
@@ -293,6 +315,14 @@ where
             }
             match receiver.recv() {
                 Ok(Event::Progress { id, message }) => coordinator.progress(&id, &message),
+                Ok(Event::Checkpoint { id, data, reply }) => {
+                    let result = coordinator.checkpoint(&id, &data);
+                    if let Err(error) = &result {
+                        report.coordinator_errors.push(format!("{id}: {error}"));
+                        report.stopped = true;
+                    }
+                    let _ = reply.send(result);
+                }
                 Ok(Event::Transition { id, status, fatal }) => {
                     let job = jobs.iter().find(|job| job.id == id).unwrap();
                     active.remove(&id);

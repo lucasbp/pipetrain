@@ -14,6 +14,8 @@ struct Recorder {
     progress: Vec<String>,
     fail_persist: Option<String>,
     fail_result: bool,
+    checkpoints: Arc<Mutex<BTreeSet<String>>>,
+    fail_checkpoint: bool,
 }
 
 impl Coordinator for Recorder {
@@ -32,6 +34,13 @@ impl Coordinator for Recorder {
     }
     fn confirm(&mut self, job: &Job) -> Result<(), String> {
         self.confirmations.push(job.id.clone());
+        Ok(())
+    }
+    fn checkpoint(&mut self, id: &str, _data: &str) -> Result<(), String> {
+        if self.fail_checkpoint {
+            return Err("checkpoint failed".to_string());
+        }
+        self.checkpoints.lock().unwrap().insert(id.to_string());
         Ok(())
     }
     fn progress(&mut self, id: &str, message: &str) {
@@ -366,4 +375,38 @@ fn failed_result_persistence_remains_running_for_next_invocation() {
     assert!(report.stopped);
     assert_eq!(report.states["a"], Status::Running);
     assert_eq!(report.coordinator_errors.len(), 1);
+}
+
+#[test]
+fn checkpoint_ack_precedes_effect_and_failure_prevents_effect() {
+    for fail_checkpoint in [false, true] {
+        let mut recorder = Recorder {
+            fail_checkpoint,
+            ..Recorder::default()
+        };
+        let persisted = recorder.checkpoints.clone();
+        let effects = AtomicUsize::new(0);
+        let report = run(
+            &[job("a", "acme/a", &[])],
+            BTreeMap::new(),
+            1,
+            FailurePolicy::StopOnPublisher,
+            &mut recorder,
+            |job, _, progress| {
+                progress.checkpoint("pending").map_err(|message| Failure {
+                    message,
+                    fatal: true,
+                })?;
+                assert!(persisted.lock().unwrap().contains(&job.id));
+                effects.fetch_add(1, Ordering::SeqCst);
+                Ok(Completion::Done)
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            effects.load(Ordering::SeqCst),
+            usize::from(!fail_checkpoint)
+        );
+        assert_eq!(report.stopped, fail_checkpoint);
+    }
 }
