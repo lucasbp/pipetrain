@@ -508,10 +508,8 @@ impl<'a> Builder<'a> {
 
     fn apply_layers(&mut self) {
         let mut sets: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-        for i in 0..self.prs.len() {
-            sets.entry(self.prs[i].head_ref.clone())
-                .or_default()
-                .push(i);
+        for (i, pr) in self.prs.iter().enumerate() {
+            sets.entry(pr.head_ref.clone()).or_default().push(i);
         }
         for (branch, members) in sets {
             let repos: HashSet<String> = members
