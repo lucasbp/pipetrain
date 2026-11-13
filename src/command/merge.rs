@@ -28,6 +28,7 @@ use crate::workflows::{self, PushRuns};
 pub mod bump;
 mod failure;
 mod parallel;
+mod recovery;
 
 const MERGEABILITY_TRIES: usize = 13;
 const MERGEABILITY_PAUSE: Duration = Duration::from_secs(5);
@@ -302,6 +303,19 @@ fn wait_for_deploy(
             Ok(reading) => reading,
             Err(error) => break Deploy::Unreadable(error.to_string()),
         };
+        let observed = runs
+            .iter()
+            .map(|run| format!("{}: {}", run.name, run.url))
+            .collect::<Vec<_>>()
+            .join("; ");
+        (hooks.progress)(&format!(
+            "deploy {slug} at SHA {sha}: {}",
+            if observed.is_empty() {
+                "no run yet"
+            } else {
+                &observed
+            }
+        ));
         let mut verdict = if let Some(prediction) = expected {
             if let PushRuns::Expected {
                 workflows,
@@ -351,8 +365,8 @@ fn wait_for_deploy(
             }
             Verdict::Waiting(text) => {
                 settled = None;
-                last = text;
-                (hooks.progress)(&format!("deploy {slug}: {last}"));
+                (hooks.progress)(&format!("deploy {slug}: {text}"));
+                last = format!("{text}; SHA {sha}; {observed}");
             }
             Verdict::NoRuns => {
                 settled = None;
@@ -418,7 +432,7 @@ fn deploy_phase(
         wait_for_deploy(client, slug, sha, &limits, hooks, prediction, report);
     let said = |text: String| {
         let mut parts: Vec<String> = note.iter().cloned().collect();
-        parts.push(text);
+        parts.push(format!("SHA {sha}: {text}"));
         parts.extend(report.expected_runs.iter().map(|run| {
             format!(
                 "expected workflow {} ({}): {}",
@@ -733,6 +747,11 @@ fn resume_one(
         sha: &sha,
     };
     finish_deploy(env, &landed, client, store, hooks, report);
+    if report.status == Status::Failed {
+        let mut recovered = pending.clone();
+        recovered.sha = Some(sha);
+        recovery::resolve(env, &recovered, client, store, hooks, report);
+    }
 }
 
 fn gate_step(env: &Env, hooks: &mut Hooks, report: &mut StepReport) {
@@ -1324,7 +1343,7 @@ fn render_with_steps(report: &Report, color: bool, include_steps: bool) -> Strin
         if report.steps.iter().any(|step| {
             step.merge_sha.is_some() && matches!(step.status, Status::Failed | Status::Stopped)
         }) {
-            out.push_str("The PR is already merged and its deploy is still pending in the state file. Fix or re-run the workflow, then repeat the same command with the same --state to resume. The merge will not be repeated.\n");
+            out.push_str("The PR is already merged and its deploy is still pending in the state file. Inspect it with pipetrain state show. Repeat the command with the same --state to resume. Resume checks the saved SHA and run, then a later deploy containing that SHA if the saved deploy failed. Repeating without a changed run or a later successful deploy will not fix a failed deploy. An intentional local discard requires pipetrain state discard with a reason. The merge will not be repeated.\n");
         }
     }
     out

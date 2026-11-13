@@ -201,6 +201,8 @@ pipetrain plan [OPTIONS] [PRS]...
 | `pipetrain bundle --apply` | Creates the deploy branch (`deploy/<date>-<base>`), retargets the bundled PRs and, with `--open-pr`, opens the deploy PR. Asks for confirmation unless `--yes` is given. See [Applying the bundle suggestion](#applying-the-bundle-suggestion). |
 | `pipetrain merge` | Dry run of the merge: the steps it would take in the order of the plan. Writes nothing. Takes the same PR arguments and options as `plan`. |
 | `pipetrain merge --apply` | Merges the PRs of the plan one at a time and waits for each deploy before the next. Asks for confirmation unless `--yes` is given. See [Merging the queue](#merging-the-queue). |
+| `pipetrain state show --json` | Inspects local merge state, pending ages, deploy PRs, active jobs and audit history. Uses the same `--state`, `--profile` and `--config` selection as merge. See [State inspection and recovery](docs/state.md). |
+| `pipetrain state discard <id> --reason <text>` | Discards one pending record locally with an audit entry, without confirming a deploy. Requires typing `yes`, or `--yes` without a terminal. Never writes to GitHub. |
 | `pipetrain feed <PACKAGE> [--version <V>]` | Read-only: tells whether a package version is published in its NuGet or npm feed; `--wait` blocks until it is. See [Checking a package feed](#checking-a-package-feed). |
 | `pipetrain bump <PACKAGE> [--to <V>]` | Dry run only: shows which manifests of the scanned repos would move to a version of a package. Writes nothing and has no `--apply`. See [Bumping a package](#bumping-a-package-dry-run). |
 | `pipetrain profiles` | Read-only: lists the profiles, their orgs and folders, and which one applies from the current folder. |

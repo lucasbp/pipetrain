@@ -235,6 +235,48 @@ pub struct DeployPr {
     pub ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditAction {
+    Discarded,
+    ResolvedByLaterDeploy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Resolution {
+    pub status: AuditAction,
+    pub sha: String,
+    pub runs: Vec<ExpectedRun>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditEntry {
+    pub id: String,
+    pub repo: String,
+    pub base: String,
+    pub sha: Option<String>,
+    pub action: AuditAction,
+    pub reason: String,
+    pub recorded_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<Resolution>,
+}
+
+impl AuditEntry {
+    pub fn new(pending: &Pending, action: AuditAction, reason: String) -> Self {
+        Self {
+            id: pending.id.clone(),
+            repo: pending.repo.clone(),
+            base: pending.base.clone(),
+            sha: pending.sha.clone(),
+            action,
+            reason,
+            recorded_at: chrono::Utc::now().to_rfc3339(),
+            resolution: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct State {
     #[serde(default)]
@@ -255,6 +297,8 @@ pub struct State {
     pub deploy_prs: Vec<DeployPr>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub active_jobs: Vec<String>,
+    #[serde(default)]
+    pub audit: Vec<AuditEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -265,6 +309,7 @@ pub enum StoreOperation {
         sha: String,
     },
     Remove(String),
+    Archive(AuditEntry),
     AddDeployPr {
         slug: String,
         branch: String,
@@ -328,6 +373,7 @@ impl Store {
             StoreOperation::Add(pending) => self.add(pending),
             StoreOperation::SetSha { id, sha } => self.set_sha(&id, &sha),
             StoreOperation::Remove(id) => self.remove(&id),
+            StoreOperation::Archive(entry) => self.archive(entry),
             StoreOperation::AddDeployPr { slug, branch, id } => {
                 self.add_deploy_pr(&slug, &branch, &id)
             }
@@ -359,6 +405,29 @@ impl Store {
         self.forward(StoreOperation::Remove(id.to_string()))?;
         self.state.pending.retain(|p| p.id != id);
         self.save()
+    }
+
+    pub fn archive(&mut self, entry: AuditEntry) -> Result<()> {
+        if !self.state.pending.iter().any(|pending| {
+            pending.id == entry.id
+                && pending.repo == entry.repo
+                && pending.base == entry.base
+                && pending.sha == entry.sha
+        }) {
+            anyhow::bail!(
+                "pending record {} no longer matches the audit entry",
+                entry.id
+            );
+        }
+        self.forward(StoreOperation::Archive(entry.clone()))?;
+        let previous = self.state.clone();
+        self.state.pending.retain(|pending| pending.id != entry.id);
+        self.state.audit.push(entry);
+        if let Err(error) = self.save() {
+            self.state = previous;
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub fn add_deploy_pr(&mut self, slug: &str, branch: &str, id: &str) -> Result<()> {
@@ -439,6 +508,8 @@ pub struct StepReport {
     pub deploy_prediction: Option<crate::workflows::PushRuns>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub expected_runs: Vec<ExpectedRun>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<Resolution>,
 }
 
 impl StepReport {
@@ -454,6 +525,7 @@ impl StepReport {
             bump: None,
             deploy_prediction: None,
             expected_runs: Vec::new(),
+            resolution: None,
         }
     }
 }

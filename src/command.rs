@@ -35,6 +35,7 @@ pub mod order;
 pub mod orgs;
 pub mod profiles;
 mod resolve;
+pub mod state;
 pub mod update;
 
 const MAX_EXTERNAL_REFS: usize = 20;

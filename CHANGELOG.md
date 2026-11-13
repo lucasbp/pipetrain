@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add local `state show` inspection in text and JSON, using merge state path and profile selection without contacting GitHub.
+- Add confirmed `state discard` with a required reason, the merge state lock and atomic audit history; discarded records never count as confirmed deploys.
+- Resume failed deploys through a later successful deploy only with ancestry proof, complete expected workflow evidence and two settled readings; save the later SHA and run URLs in audit and additive report resolution fields.
+- Resume progress and failure messages identify the saved SHA and runs, explaining when repeating an unchanged failed deploy cannot help.
 - Merge state schema 2 records queue identity, profile and UTC timestamps; legacy schemas 0 and 1 upgrade on save, while newer schemas are refused without changing the file.
 - Merge apply holds an exclusive process lock beside the state file, reloads under the lock and uses unique temporary files for atomic state replacement.
 - Merge dry runs, confirmations and JSON show state origin, file age and inherited pending records, with warning-only stale markers controlled by `merge.stale_pending_hours` (default 24).

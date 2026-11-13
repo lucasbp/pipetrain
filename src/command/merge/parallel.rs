@@ -199,6 +199,7 @@ impl scheduler::Coordinator for Coordinator<'_, '_> {
             Checkpoint::State(operation) => {
                 let valid = match &operation {
                     StoreOperation::Add(pending) => pending.id == *target,
+                    StoreOperation::Archive(entry) => entry.id == *target,
                     StoreOperation::SetSha { id, .. } | StoreOperation::Remove(id) => id == target,
                     StoreOperation::AddDeployPr { id, .. } => id == target,
                     StoreOperation::RemoveDeployPr { slug, branch } => {

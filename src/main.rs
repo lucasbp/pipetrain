@@ -16,6 +16,7 @@ use pipetrain::command::merge::{self, MergeOptions};
 use pipetrain::command::order::{self, OrderOptions};
 use pipetrain::command::orgs::{self, OrgsOptions};
 use pipetrain::command::profiles::{self, ProfilesOptions};
+use pipetrain::command::state;
 use pipetrain::command::update::{self, UpdateOptions};
 use pipetrain::command::{PlanOptions, plan};
 use pipetrain::doctor::{self, DoctorOptions};
@@ -61,7 +62,7 @@ fn suppression(cli: &Cli) -> Suppress {
         _ => (false, false, false),
     };
     Suppress {
-        flag: cli.no_update_check,
+        flag: cli.no_update_check || matches!(cli.command, Command::State(_)),
         json,
         emit_queue,
         is_update,
@@ -82,6 +83,9 @@ enum Command {
         about = "Merges PRs into their existing base branches with the configured parallelism and deployment waits; only with --apply, without it nothing is written"
     )]
     Merge(MergeArgs),
+
+    #[command(about = "Inspect or discard local merge state with audit history")]
+    State(state::StateArgs),
 
     #[command(
         about = "Read-only: checks the token, the API, the rate limit, the config and the orgs"
@@ -976,6 +980,7 @@ fn run_command(command: Command) -> Result<i32> {
         Command::Plan(args) => run_plan(args),
         Command::Bundle(args) => run_bundle(args),
         Command::Merge(args) => run_merge(args),
+        Command::State(args) => state::run(args),
         Command::Profiles(args) => profiles::run(ProfilesOptions {
             config: args.config,
         }),
@@ -1053,7 +1058,7 @@ fn command_name(command: &Command) -> Option<&'static str> {
         Command::Feed(_) => "feed",
         Command::Bump(_) => "bump",
         Command::Update(_) => "update",
-        Command::Log(_) | Command::Mcp(_) => return None,
+        Command::Log(_) | Command::Mcp(_) | Command::State(_) => return None,
     })
 }
 

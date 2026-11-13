@@ -46,6 +46,8 @@ struct Script {
     open_prs: Vec<Value>,
     into_train: Vec<Value>,
     branch_missing: bool,
+    later_tip: Option<String>,
+    compare_status: String,
     post_status: u16,
     post_message: String,
 }
@@ -98,6 +100,8 @@ impl Script {
             open_prs: Vec::new(),
             into_train: Vec::new(),
             branch_missing: false,
+            later_tip: None,
+            compare_status: "diverged".into(),
             post_status: 201,
             post_message: String::new(),
         }
@@ -233,7 +237,13 @@ fn respond(script: &Mutex<Script>, line: &str, payload: &str) -> (u16, Value) {
         if script.branch_missing {
             return (404, json!({"message": "Not Found"}));
         }
-        return (200, json!({"object": {"sha": "c".repeat(40)}}));
+        return (
+            200,
+            json!({"object": {"sha": script.later_tip.clone().unwrap_or_else(|| "c".repeat(40))}}),
+        );
+    }
+    if line.starts_with("GET /repos/acme/api/compare/") {
+        return (200, json!({"status": script.compare_status}));
     }
     if line.starts_with("GET /repos/acme/api/pulls?") {
         if line.contains("&head=") {
@@ -3473,6 +3483,270 @@ fn legacy_pending_json_keeps_neutral_and_missing_path_compatibility() {
     );
     assert!(run.step(0).expected_runs.is_empty());
     assert!(state.reopen().state.pending.is_empty());
+}
+
+fn failed_deploy_on_disk(rig: &mut Rig) -> FilterState {
+    let state = FilterState::attach(rig);
+    rig.script().runs = vec![run_json("deploy", "completed", Some("failure"))];
+    let failed = rig.go(&plan_on(&[1]));
+    assert_eq!(failed.step(0).status, Status::Failed);
+    rig.store = state.reopen();
+    state
+}
+
+#[test]
+fn later_descendant_deploy_resolves_with_audit_and_unblocks_same_target() {
+    for parallelism in [1, 2] {
+        let mut rig = Rig::new("");
+        let state = failed_deploy_on_disk(&mut rig);
+        rig.cfg.max_parallel = parallelism;
+        let tip = "d".repeat(40);
+        {
+            let mut script = rig.script();
+            script.later_tip = Some(tip.clone());
+            script.compare_status = "ahead".into();
+            let failed_runs = script.runs.clone();
+            script.runs_by_sha.insert(merge_sha(1), failed_runs);
+            script.runs_by_sha.insert(tip.clone(), green());
+            script.runs = green();
+        }
+        let resumed = rig.go(&plan_on(&[2]));
+        assert_eq!(
+            resumed.outcome.code,
+            0,
+            "{}",
+            render(&resumed.outcome.report, false)
+        );
+        assert_eq!(resumed.step(0).status, Status::Done);
+        assert_eq!(
+            resumed.step(0).merge_sha.as_deref(),
+            Some(merge_sha(1).as_str())
+        );
+        assert!(
+            resumed
+                .said(0)
+                .contains("resolved by a later deploy of ddddddd")
+        );
+        assert_eq!(resumed.step(1).status, Status::Done);
+        let report = serde_json::to_value(resumed.step(0)).unwrap();
+        assert_eq!(report["resolution"]["status"], "resolved_by_later_deploy");
+        assert_eq!(report["resolution"]["sha"], tip);
+        assert_eq!(
+            report["resolution"]["runs"][0]["html_url"],
+            "https://example.test/acme/api/actions/runs/deploy"
+        );
+        let saved = state.reopen();
+        assert!(saved.state.pending.is_empty());
+        let audit = serde_json::to_value(&saved.state.audit).unwrap();
+        assert_eq!(audit.as_array().unwrap().len(), 1);
+        assert_eq!(audit[0]["action"], "resolved_by_later_deploy");
+        assert_eq!(audit[0]["sha"], merge_sha(1));
+        assert_eq!(audit[0]["resolution"], report["resolution"]);
+        chrono::DateTime::parse_from_rfc3339(audit[0]["recorded_at"].as_str().unwrap()).unwrap();
+    }
+}
+
+#[test]
+fn unrelated_later_commit_does_not_resolve_or_poll_its_green_deploy() {
+    let mut rig = Rig::new("");
+    let state = failed_deploy_on_disk(&mut rig);
+    let tip = "d".repeat(40);
+    rig.script().later_tip = Some(tip.clone());
+    rig.script().runs_by_sha.insert(tip.clone(), green());
+    let resumed = rig.go(&plan_on(&[]));
+    assert_eq!(resumed.step(0).status, Status::Failed);
+    assert!(resumed.said(0).contains("does not contain saved SHA"));
+    assert!(
+        !rig.lines()
+            .iter()
+            .any(|line| line.contains(&format!("head_sha={tip}")))
+    );
+    assert_eq!(state.reopen().state.pending.len(), 1);
+    assert!(state.reopen().state.audit.is_empty());
+}
+
+#[test]
+fn unchanged_failed_deploy_names_sha_run_and_explains_repeating_will_not_help() {
+    let mut rig = Rig::new("");
+    let state = failed_deploy_on_disk(&mut rig);
+    rig.script().later_tip = Some(merge_sha(1));
+    let resumed = rig.go(&plan_on(&[]));
+    let text = resumed.said(0);
+    assert!(text.contains(&merge_sha(1)));
+    assert!(text.contains("https://example.test/acme/api/actions/runs/deploy"));
+    assert!(text.contains("no later commit exists; repeating unchanged will not help"));
+    assert_eq!(state.reopen().state.pending.len(), 1);
+    assert!(state.reopen().state.audit.is_empty());
+}
+
+#[test]
+fn later_deploy_needs_complete_expected_success_and_run_evidence() {
+    for case in [
+        "auxiliary",
+        "failed",
+        "running",
+        "skipped",
+        "incomplete",
+        "missing_url",
+        "chain",
+    ] {
+        let mut rig = Rig::new("");
+        let state = failed_deploy_on_disk(&mut rig);
+        let tip = "d".repeat(40);
+        let mut runs = green();
+        match case {
+            "auxiliary" => runs[0]["path"] = json!(".github/workflows/lint.yml"),
+            "failed" => runs[0]["conclusion"] = json!("failure"),
+            "running" => {
+                runs[0]["status"] = json!("in_progress");
+                runs[0]["conclusion"] = Value::Null;
+            }
+            "skipped" => runs[0]["conclusion"] = json!("skipped"),
+            "incomplete" => rig.script().run_total = Some(101),
+            "missing_url" => runs[0]["html_url"] = json!(""),
+            "chain" => {
+                rig.store.state.pending[0].deploy_prediction =
+                    Some(pipetrain::workflows::PushRuns::Expected {
+                        workflows: vec![".github/workflows/deploy.yml".into()],
+                        chained_workflows: vec![".github/workflows/promote.yml".into()],
+                        untracked_chains: Vec::new(),
+                    });
+                rig.store.save().unwrap();
+            }
+            _ => unreachable!(),
+        }
+        rig.script().later_tip = Some(tip.clone());
+        rig.script().compare_status = "ahead".into();
+        rig.script().runs_by_sha.insert(tip, runs);
+        let resumed = rig.go(&plan_on(&[]));
+        assert_eq!(resumed.step(0).status, Status::Failed, "{case}");
+        assert!(resumed.step(0).resolution.is_none(), "{case}");
+        assert_eq!(state.reopen().state.pending.len(), 1, "{case}");
+        assert!(state.reopen().state.audit.is_empty(), "{case}");
+    }
+}
+
+#[test]
+fn legacy_pending_resolves_later_deploy_using_all_push_runs() {
+    let mut rig = Rig::new("");
+    let state = failed_deploy_on_disk(&mut rig);
+    rig.store.state.pending[0].deploy_prediction = None;
+    rig.store.save().unwrap();
+    let tip = "d".repeat(40);
+    rig.script().later_tip = Some(tip.clone());
+    rig.script().compare_status = "ahead".into();
+    rig.script().runs_by_sha.insert(tip.clone(), green());
+    let resumed = rig.go(&plan_on(&[]));
+    assert_eq!(resumed.step(0).status, Status::Done);
+    assert!(
+        rig.lines()
+            .iter()
+            .filter(|line| line.contains(&format!("head_sha={tip}")))
+            .all(|line| line.contains("event=push"))
+    );
+    assert_eq!(state.reopen().state.audit.len(), 1);
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn later_resolution_requires_two_passed_readings() {
+    let mut rig = Rig::new("");
+    let state = failed_deploy_on_disk(&mut rig);
+    rig.script().later_tip = Some("d".repeat(40));
+    rig.script().compare_status = "ahead".into();
+    rig.script().run_readings = [
+        vec![run_json("deploy", "completed", Some("failure"))],
+        green(),
+        vec![run_json("deploy", "in_progress", None)],
+    ]
+    .into();
+    let resumed = rig.go(&plan_on(&[]));
+    assert_eq!(resumed.step(0).status, Status::Failed);
+    assert!(resumed.step(0).resolution.is_none());
+    assert_eq!(state.reopen().state.pending.len(), 1);
+    assert!(state.reopen().state.audit.is_empty());
+}
+
+#[test]
+fn later_resolution_tracks_saved_chains_after_recovering_unknown_merge_sha() {
+    let mut rig = Rig::new("");
+    let state = failed_deploy_on_disk(&mut rig);
+    rig.store.state.pending[0].sha = None;
+    rig.store.state.pending[0].deploy_prediction = Some(pipetrain::workflows::PushRuns::Expected {
+        workflows: vec![".github/workflows/deploy.yml".into()],
+        chained_workflows: vec![".github/workflows/promote.yml".into()],
+        untracked_chains: Vec::new(),
+    });
+    rig.store.save().unwrap();
+    let tip = "d".repeat(40);
+    let mut promote = run_json("promote", "completed", Some("success"));
+    promote["path"] = json!(".github/workflows/promote.yml");
+    let mut lint = run_json("lint", "completed", Some("failure"));
+    lint["path"] = json!(".github/workflows/lint.yml");
+    rig.script().later_tip = Some(tip.clone());
+    rig.script().compare_status = "ahead".into();
+    let mut runs = green();
+    runs.extend([promote, lint]);
+    rig.script().runs_by_sha.insert(tip.clone(), runs);
+    let resumed = rig.go(&plan_on(&[]));
+    assert_eq!(resumed.step(0).status, Status::Done);
+    assert_eq!(resumed.step(0).resolution.as_ref().unwrap().runs.len(), 2);
+    let saved = state.reopen();
+    assert_eq!(
+        saved.state.audit[0].sha.as_deref(),
+        Some(merge_sha(1).as_str())
+    );
+    assert!(saved.state.pending.is_empty());
+    assert!(
+        rig.lines()
+            .iter()
+            .filter(|line| line.contains(&format!("head_sha={tip}")))
+            .all(|line| !line.contains("event=push"))
+    );
+}
+
+#[test]
+fn discarded_record_is_audited_and_never_resumed_or_reported_as_confirmed() {
+    let mut rig = Rig::new("");
+    let state = failed_deploy_on_disk(&mut rig);
+    rig.store = Store::in_memory();
+    let config = state.directory.join("config.toml");
+    std::fs::write(&config, "orgs = [\"acme\"]").unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_pipetrain"))
+        .args([
+            "state",
+            "discard",
+            "acme/api#1",
+            "--reason",
+            "superseded incident",
+            "--yes",
+            "--state",
+        ])
+        .arg(state.directory.join("state.json"))
+        .arg("--config")
+        .arg(config)
+        .env("PIPETRAIN_NO_UPDATE_CHECK", "1")
+        .env("PIPETRAIN_LOG", "0")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    rig.store = state.reopen();
+    assert!(rig.store.state.pending.is_empty());
+    let audit = serde_json::to_value(&rig.store.state.audit).unwrap();
+    assert_eq!(audit[0]["action"], "discarded");
+    assert_eq!(audit[0]["reason"], "superseded incident");
+    assert_eq!(audit[0]["sha"], merge_sha(1));
+    assert!(audit[0].get("resolution").is_none());
+    let before = rig.lines().len();
+    let resumed = rig.go(&plan_on(&[]));
+    assert!(resumed.outcome.report.steps.is_empty());
+    assert_eq!(rig.lines().len(), before);
+    assert!(!render(&resumed.outcome.report, false).contains("deploy passed"));
 }
 
 #[test]
