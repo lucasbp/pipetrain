@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Merge accepts a stacked parent's changed head only with recorded child merge evidence, planned-SHA ancestry and fresh readiness for that exact head; lost approval or pending checks stop with the next step, and the merge request uses the verified SHA.
+- Plan notes, merge dry runs and confirmations show complete selected stack chains and explain that children land into the parent branch before the parent is revalidated.
+
 - Interactive merge progress retains one row per active PR with its base, phase and elapsed time; waiting excludes active work, and the header separates merge acceptance, deploy confirmation and failures.
 - Merge dry runs and confirmations show the configured parallelism upper bound and the existing one-worker-per-repository restriction, including different bases.
 - Merge text summaries and additive JSON summary, max_parallel and deploy_outcome fields distinguish merged PRs from deploys confirmed, dispensed, indeterminate, resolved by a later deploy, skipped and failed.

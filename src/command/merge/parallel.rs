@@ -372,6 +372,7 @@ pub(super) fn execute(
     let cfg = env.cfg;
     let settings = env.settings;
     let method = env.method;
+    let stacked = env.stacked.clone();
     let result = scheduler::run(
         &jobs,
         states,
@@ -399,6 +400,7 @@ pub(super) fn execute(
                 settings,
                 method,
                 readings: RefCell::new(BTreeMap::new()),
+                stacked: stacked.clone(),
             };
             let mut confirm = |_: &str| false;
             let mut gate = |_: &str| false;

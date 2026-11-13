@@ -29,6 +29,7 @@ pub mod bump;
 mod failure;
 mod parallel;
 mod recovery;
+mod stacked;
 
 const MERGEABILITY_TRIES: usize = 13;
 const MERGEABILITY_PAUSE: Duration = Duration::from_secs(5);
@@ -86,6 +87,7 @@ struct Env<'a> {
     settings: &'a Settings,
     method: &'a str,
     readings: RefCell<BTreeMap<PushReadingKey, PushRuns>>,
+    stacked: stacked::Evidence,
 }
 
 impl Env<'_> {
@@ -191,6 +193,12 @@ fn planned_steps(plan: &Plan, cfg: &Config) -> Vec<StepReport> {
                     .find(|item| item.id == id)
                     .map(|item| {
                         let mut detail = format!("into {}", item.base);
+                        if let Some(chain) = crate::planner::stacked_chain(item, &plan.items) {
+                            detail.push_str(&format!(
+                                "; stack: {chain}; {}",
+                                crate::planner::STACKED_STRATEGY
+                            ));
+                        }
                         if is_stacked(&item.base, &cfg.train_prefix) {
                             detail.push_str(&format!("; {TRAIN_NOTICE}"));
                         }
@@ -556,6 +564,17 @@ fn merge_one(
     let reasons = env.cfg.blockers(&pr);
     if !reasons.is_empty() {
         let readiness = pr.readiness(reasons);
+        if env.stacked.has_child(item) {
+            return stop(
+                report,
+                format!(
+                    "no longer ready after its stacked child landed: {}; next: {}; re-approve {} after its stacked child landed",
+                    readiness.causes.join(", "),
+                    readiness.next_step,
+                    item.id
+                ),
+            );
+        }
         return fail(
             report,
             format!(
@@ -577,15 +596,24 @@ fn merge_one(
     if !live.open {
         return fail(report, "it is closed");
     }
-    if live.head_sha != item.sha {
-        return fail(
-            report,
-            format!(
-                "the branch moved after the plan ({} to {}): run the plan again",
-                short(&item.sha),
-                short(&live.head_sha)
-            ),
-        );
+    if live.head_sha != item.sha || pr.head_sha != item.sha {
+        let accepted = pr.head_sha == live.head_sha
+            && match env.stacked.accepts(item, client, &live.head_sha) {
+                Ok(accepted) => accepted,
+                Err(error) => {
+                    return fail(report, format!("cannot verify stacked head: {error:#}"));
+                }
+            };
+        if !accepted {
+            return fail(
+                report,
+                format!(
+                    "the branch moved after the plan ({} to {}): run the plan again",
+                    short(&item.sha),
+                    short(&live.head_sha)
+                ),
+            );
+        }
     }
     if live.base != item.base {
         return fail(
@@ -615,7 +643,7 @@ fn merge_one(
         return fail(report, format!("cannot save the merge state: {error:#}"));
     }
     (hooks.progress)(&format!("merging {} into {}", item.id, item.base));
-    let merge_sha = match client.merge_pr(&slug, item.number, &item.sha, env.method) {
+    let merge_sha = match client.merge_pr(&slug, item.number, &live.head_sha, env.method) {
         Ok(sha) => sha,
         Err(error) => match confirm_merge(client, &slug, item.number) {
             Ok(Some(sha)) => sha,
@@ -642,6 +670,7 @@ fn merge_one(
             ),
         );
     }
+    env.stacked.record(item, &live.head_sha, &merge_sha);
     if env.settings.open_pr
         && is_stacked(&item.base, &env.cfg.train_prefix)
         && let Err(error) = store.add_deploy_pr(&slug, &item.base, &item.id)
@@ -663,7 +692,7 @@ fn merge_one(
             "checking deploy workflows for {slug}@{}",
             item.base
         ));
-        let prediction = env.push_reading(client, &key, &item.base, &merge_sha, &item.sha);
+        let prediction = env.push_reading(client, &key, &item.base, &merge_sha, &live.head_sha);
         report.deploy_prediction = Some(prediction.clone());
         if let Some(mut pending) = store
             .state
@@ -1044,6 +1073,7 @@ pub fn merge_plan(
         settings,
         method: &method,
         readings: RefCell::new(BTreeMap::new()),
+        stacked: stacked::Evidence::default(),
     };
     let mut report = Report {
         max_parallel: cfg.max_parallel,

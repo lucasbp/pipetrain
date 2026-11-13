@@ -57,6 +57,312 @@ fn merge_sha(number: u64) -> String {
     format!("{:040x}", 0x1000 + number)
 }
 
+fn stacked_plan(depth: u64) -> Plan {
+    plan_of(
+        (1..=depth)
+            .map(|number| {
+                let base = if number == 1 {
+                    "main".to_string()
+                } else {
+                    format!("feat/{}", number - 1)
+                };
+                let mut item = pr("acme/api", number, &format!("feat/{number}"), &base);
+                item.default_branch = "main".into();
+                item
+            })
+            .collect(),
+        Vec::new(),
+    )
+}
+
+fn stacked_rig(mode: &str, depth: u64, parallel: usize) -> Rig {
+    let mut rig = Rig::new("no_deploy_repos = ['acme/api']");
+    rig.cfg.max_parallel = parallel;
+    for number in 2..=depth {
+        rig.script()
+            .bases
+            .insert(number, format!("feat/{}", number - 1));
+    }
+    let shared = rig.script.clone();
+    let mode = mode.to_string();
+    rig.server = serve_requests(move |line, payload| {
+        if line.starts_with("GET /repos/acme/api/compare/") {
+            return (
+                200,
+                json!({
+                    "status": if mode == "missing-ancestor" { "diverged" } else { "ahead" },
+                    "ahead_by": if mode == "distant-descendant" { 2 } else { 1 },
+                }),
+            );
+        }
+        if line.starts_with("GET /repos/acme/api/git/commits/") {
+            return (
+                200,
+                json!({"parents": [
+                    {"sha": format!("{:040x}", 1)},
+                    {"sha": if mode == "unrelated" || mode == "wrong-parents" { "e".repeat(40) } else { format!("{:040x}", 2) }},
+                ]}),
+            );
+        }
+        let (status, mut body) = respond(&shared, line, payload);
+        if line == "PUT /repos/acme/api/pulls/2/merge"
+            && matches!(
+                mode.as_str(),
+                "descendant" | "wrong-parents" | "distant-descendant"
+            )
+        {
+            body["sha"] = json!(format!("{:040x}", 2));
+        }
+        let number = if line == "POST /graphql" {
+            serde_json::from_str::<Value>(payload).unwrap()["variables"]["n"].as_u64()
+        } else {
+            line.strip_prefix("GET /repos/acme/api/pulls/")
+                .and_then(|number| number.parse::<u64>().ok())
+        };
+        if let Some(number) = number {
+            let script = shared.lock().unwrap();
+            let child = script
+                .merged
+                .iter()
+                .rev()
+                .find(|child| script.bases.get(child) == Some(&format!("feat/{number}")));
+            if let Some(child) = child {
+                let head = if matches!(
+                    mode.as_str(),
+                    "unrelated" | "descendant" | "wrong-parents" | "distant-descendant"
+                ) {
+                    "d".repeat(40)
+                } else {
+                    merge_sha(if mode == "rollback" { 2 } else { *child })
+                };
+                if line == "POST /graphql" {
+                    let node = &mut body["data"]["repository"]["pullRequest"];
+                    if mode != "stale-review-snapshot" {
+                        node["headRefOid"] = json!(head);
+                    }
+                    if mode == "lost-approval" {
+                        node["reviewDecision"] = json!("REVIEW_REQUIRED");
+                        node["latestOpinionatedReviews"]["nodes"] = json!([]);
+                    }
+                    if mode == "checks-pending" {
+                        node["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["state"] =
+                            json!("PENDING");
+                    }
+                } else {
+                    body["head"]["sha"] = json!(head);
+                    if mode == "base-changed" {
+                        body["base"]["ref"] = json!("other");
+                    }
+                }
+            }
+        }
+        (status, body)
+    });
+    rig
+}
+
+#[test]
+fn stacked_child_and_parent_merge_with_revalidation_and_verified_sha() {
+    for parallel in [1, 2] {
+        let mut rig = stacked_rig("landed", 2, parallel);
+        let state = FilterState::attach(&mut rig);
+        let run = rig.go(&stacked_plan(2));
+        assert_eq!(run.statuses(), vec![Status::Done, Status::Done]);
+        assert_eq!(
+            rig.puts(),
+            vec![
+                "PUT /repos/acme/api/pulls/2/merge",
+                "PUT /repos/acme/api/pulls/1/merge"
+            ]
+        );
+        assert_eq!(
+            rig.body("PUT /repos/acme/api/pulls/1/merge")["sha"],
+            merge_sha(2)
+        );
+        let lines = rig.lines();
+        let child = position(&lines, "PUT /repos/acme/api/pulls/2/merge");
+        let parent = position(&lines, "PUT /repos/acme/api/pulls/1/merge");
+        assert!(
+            lines[child + 1..parent]
+                .iter()
+                .any(|line| line == "POST /graphql")
+        );
+        assert!(
+            lines[child + 1..parent]
+                .iter()
+                .any(|line| line.contains("/compare/"))
+        );
+        assert!(state.reopen().state.pending.is_empty());
+    }
+}
+
+#[test]
+fn stacked_parent_lost_approval_stops_with_reapprove_next_step() {
+    let mut rig = stacked_rig("lost-approval", 2, 1);
+    let state = FilterState::attach(&mut rig);
+    let run = rig.go(&stacked_plan(2));
+    assert_eq!(run.statuses(), vec![Status::Done, Status::Stopped]);
+    assert!(run.said(1).contains("review required"));
+    assert!(
+        run.said(1)
+            .contains("re-approve acme/api#1 after its stacked child landed")
+    );
+    assert_eq!(rig.puts().len(), 1);
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn stacked_parent_pending_checks_stop_with_cause_and_next_step() {
+    let mut rig = stacked_rig("checks-pending", 2, 1);
+    let state = FilterState::attach(&mut rig);
+    let run = rig.go(&stacked_plan(2));
+    assert_eq!(run.step(1).status, Status::Stopped);
+    assert!(run.said(1).contains("checks pending"));
+    assert!(run.said(1).contains("wait for checks to complete"));
+    assert_eq!(rig.puts().len(), 1);
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn stacked_parent_unrelated_push_is_refused() {
+    let mut rig = stacked_rig("unrelated", 2, 1);
+    let state = FilterState::attach(&mut rig);
+    let run = rig.go(&stacked_plan(2));
+    assert_eq!(run.step(1).status, Status::Failed);
+    assert!(run.said(1).contains("branch moved after the plan"));
+    assert_eq!(rig.puts().len(), 1);
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn stacked_parent_requires_planned_ancestor_matching_snapshot_and_unchanged_base() {
+    for mode in [
+        "missing-ancestor",
+        "stale-review-snapshot",
+        "base-changed",
+        "wrong-parents",
+        "distant-descendant",
+    ] {
+        let mut rig = stacked_rig(mode, 2, 1);
+        let state = FilterState::attach(&mut rig);
+        let run = rig.go(&stacked_plan(2));
+        assert_eq!(run.step(1).status, Status::Failed, "{mode}");
+        assert_eq!(rig.puts().len(), 1, "{mode}");
+        assert!(state.reopen().state.pending.is_empty());
+    }
+}
+
+#[test]
+fn stacked_parent_direct_descendant_requires_exact_merge_parents() {
+    let mut rig = stacked_rig("descendant", 2, 1);
+    let state = FilterState::attach(&mut rig);
+    let run = rig.go(&stacked_plan(2));
+    assert_eq!(run.statuses(), vec![Status::Done, Status::Done]);
+    assert_eq!(
+        rig.body("PUT /repos/acme/api/pulls/1/merge")["sha"],
+        "d".repeat(40)
+    );
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn three_pr_stack_shows_full_chain_in_plan_and_preview_and_merges_in_order() {
+    let plan = stacked_plan(3);
+    let chain = "acme/api#3 → feat/2 (#2) → feat/1 (#1) → main";
+    let strategy = "children land into the parent branch first; the parent is revalidated after";
+    assert!(pipetrain::render::text(&plan).contains(chain));
+    assert!(pipetrain::render::text(&plan).contains(strategy));
+    let json = serde_json::to_value(&plan).unwrap();
+    assert!(
+        json["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|note| note.as_str().unwrap().contains(chain))
+    );
+    let mut rig = stacked_rig("landed", 3, 2);
+    let state = FilterState::attach(&mut rig);
+    let preview = rig.run(&plan, dry(), true, true).unwrap();
+    let text = render(&preview.outcome.report, false);
+    assert!(text.contains(chain));
+    assert!(text.contains(strategy));
+    assert!(rig.puts().is_empty());
+    let run = rig.go(&plan);
+    assert_eq!(run.statuses(), vec![Status::Done; 3]);
+    assert!(run.confirmation_text[0].contains(chain));
+    assert_eq!(
+        rig.puts(),
+        vec![
+            "PUT /repos/acme/api/pulls/3/merge",
+            "PUT /repos/acme/api/pulls/2/merge",
+            "PUT /repos/acme/api/pulls/1/merge"
+        ]
+    );
+    assert_eq!(
+        rig.body("PUT /repos/acme/api/pulls/2/merge")["sha"],
+        merge_sha(3)
+    );
+    assert_eq!(
+        rig.body("PUT /repos/acme/api/pulls/1/merge")["sha"],
+        merge_sha(2)
+    );
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn stacked_orphan_feature_base_keeps_preflight_warning_in_plan_and_preview() {
+    let mut orphan = pr("acme/api", 2, "feat/2", "feat/1");
+    orphan.default_branch = "main".into();
+    let plan = plan_of(vec![orphan], Vec::new());
+    assert!(pipetrain::render::text(&plan).contains("base not landed"));
+    let mut rig = stacked_rig("landed", 2, 1);
+    let state = FilterState::attach(&mut rig);
+    let preview = rig.run(&plan, dry(), true, true).unwrap();
+    assert!(render(&preview.outcome.report, false).contains("base not landed"));
+    assert!(rig.puts().is_empty());
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn stacked_siblings_require_the_latest_recorded_child_result() {
+    for mode in ["landed", "rollback"] {
+        let mut ready = prs(&[1], "main");
+        ready.extend(prs(&[2, 3], "feat/1"));
+        let plan = plan_of(ready, Vec::new());
+        let mut rig = stacked_rig(mode, 3, 2);
+        rig.script().bases.insert(3, "feat/1".into());
+        let state = FilterState::attach(&mut rig);
+        let run = rig.go(&plan);
+        assert_eq!(run.step(0).status, Status::Done);
+        assert_eq!(run.step(1).status, Status::Done);
+        if mode == "landed" {
+            assert_eq!(run.step(2).status, Status::Done);
+            assert_eq!(
+                rig.body("PUT /repos/acme/api/pulls/1/merge")["sha"],
+                merge_sha(3)
+            );
+        } else {
+            assert_eq!(run.step(2).status, Status::Failed);
+            assert_eq!(rig.puts().len(), 2);
+        }
+        assert!(state.reopen().state.pending.is_empty());
+    }
+}
+
+#[test]
+fn stacked_parent_workflow_prediction_uses_verified_head() {
+    let mut rig = stacked_rig("landed", 2, 1);
+    rig.cfg.merge.no_deploy_repos.clear();
+    let state = FilterState::attach(&mut rig);
+    let run = rig.go(&stacked_plan(2));
+    assert_eq!(run.statuses(), vec![Status::Done, Status::Done]);
+    assert!(matches!(
+        run.step(1).deploy_prediction,
+        Some(pipetrain::workflows::PushRuns::Expected { .. })
+    ));
+    assert!(state.reopen().state.pending.is_empty());
+}
+
 fn run_json(name: &str, status: &str, conclusion: Option<&str>) -> Value {
     json!({
         "name": name,
