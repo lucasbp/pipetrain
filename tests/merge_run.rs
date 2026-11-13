@@ -32,6 +32,13 @@ struct Script {
     runs_by_sha: BTreeMap<String, Vec<Value>>,
     bases: BTreeMap<u64, String>,
     workflows: Vec<(String, String)>,
+    files: Vec<Value>,
+    file_total: Option<u64>,
+    file_pages: BTreeMap<u64, Vec<Value>>,
+    files_by_pr: BTreeMap<u64, Vec<Value>>,
+    metadata_missing_total: bool,
+    tree_truncated: bool,
+    tree_body: Option<Value>,
     tree_status: u16,
     branches: Vec<String>,
     open_prs: Vec<Value>,
@@ -73,7 +80,14 @@ impl Script {
             runs: green(),
             runs_by_sha: BTreeMap::new(),
             bases: BTreeMap::new(),
-            workflows: Vec::new(),
+            workflows: vec![("deploy.yml".into(), "on: push".into())],
+            files: vec![json!({"filename": "src/app.rs", "status": "modified"})],
+            file_total: None,
+            file_pages: BTreeMap::new(),
+            files_by_pr: BTreeMap::new(),
+            metadata_missing_total: false,
+            tree_truncated: false,
+            tree_body: None,
             tree_status: 200,
             branches: vec!["main".to_string(), "feat/x".to_string()],
             open_prs: Vec::new(),
@@ -85,13 +99,16 @@ impl Script {
     }
 
     fn tree(&self) -> Value {
+        if let Some(body) = &self.tree_body {
+            return body.clone();
+        }
         let mut entries: Vec<Value> = self
             .workflows
             .iter()
             .map(|(name, _)| json!({"type": "blob", "path": format!(".github/workflows/{name}")}))
             .collect();
         entries.push(json!({"type": "blob", "path": "README.md"}));
-        json!({"tree": entries, "truncated": false})
+        json!({"tree": entries, "truncated": self.tree_truncated})
     }
 
     fn blobs(&self) -> Value {
@@ -143,7 +160,11 @@ impl Script {
             "head": {"sha": head},
             "base": {"ref": self.bases.get(&number).unwrap_or(&self.base)},
             "mergeable_state": state,
+            "changed_files": self.file_total.unwrap_or(self.files_by_pr.get(&number).unwrap_or(&self.files).len() as u64),
         });
+        if self.metadata_missing_total {
+            body.as_object_mut().unwrap().remove("changed_files");
+        }
         if merged {
             body["merge_commit_sha"] = json!(merge_sha(number));
         }
@@ -220,6 +241,22 @@ fn respond(script: &Mutex<Script>, line: &str, payload: &str) -> (u16, Value) {
             script.post_status,
             json!({"message": script.post_message, "number": 99}),
         );
+    }
+    if let Some((prefix, page)) = line.split_once("/files?per_page=100&page=") {
+        let number = prefix.rsplit('/').next().unwrap().parse::<u64>().unwrap();
+        let page = page.parse::<u64>().unwrap();
+        let files = script.file_pages.get(&page).cloned().unwrap_or_else(|| {
+            script
+                .files_by_pr
+                .get(&number)
+                .unwrap_or(&script.files)
+                .iter()
+                .skip((page as usize - 1) * 100)
+                .take(100)
+                .cloned()
+                .collect()
+        });
+        return (200, json!(files));
     }
     if let Some(rest) = line.strip_prefix("GET /repos/acme/api/pulls/") {
         return (200, script.live(rest.parse().unwrap()));
@@ -1070,7 +1107,7 @@ fn a_deploy_that_never_ends_stops_and_the_next_run_resumes_without_merging_again
 }
 
 #[test]
-fn no_run_for_the_push_stops_with_a_pointer_to_no_deploy_repos() {
+fn no_run_for_a_push_workflow_stops_without_suggesting_no_deploy_repos() {
     let mut rig = Rig::new("");
     let plan = plan_on(&[1, 2]);
     rig.script().runs = Vec::new();
@@ -1079,7 +1116,7 @@ fn no_run_for_the_push_stops_with_a_pointer_to_no_deploy_repos() {
 
     assert_eq!(run.statuses(), vec![Status::Stopped, Status::Skipped]);
     assert!(
-        run.said(0).contains("merge.no_deploy_repos"),
+        !run.said(0).contains("merge.no_deploy_repos"),
         "{}",
         run.said(0)
     );
@@ -1112,6 +1149,7 @@ const PULLS: &str = "POST /repos/acme/api/pulls";
 fn bundle_rig(extra: &str) -> (Rig, Plan) {
     let rig = Rig::new(extra);
     rig.script().base = BUNDLE.to_string();
+    rig.script().workflows.clear();
     rig.script().runs = Vec::new();
     (rig, plan_of(prs(&[1, 2], BUNDLE), Vec::new()))
 }
@@ -1140,7 +1178,7 @@ fn a_train_branch_is_not_waited_for_when_no_workflow_runs_on_a_push_to_it() {
     assert_eq!(run.statuses(), vec![Status::Done, Status::Done]);
     assert!(
         run.said(0)
-            .contains("not waited: workflows read, none runs on push to deploy/05-11-2026-main"),
+            .contains("none runs on push to deploy/05-11-2026-main"),
         "{}",
         run.said(0)
     );
@@ -1155,12 +1193,16 @@ fn a_repo_without_workflow_files_is_not_waited_for_on_a_train_branch() {
     let run = rig.go(&plan);
 
     assert_eq!(run.statuses(), vec![Status::Done, Status::Done]);
-    assert!(run.said(0).contains("none runs on push"), "{}", run.said(0));
+    assert!(
+        run.said(0).contains("no workflow in the repo runs on push"),
+        "{}",
+        run.said(0)
+    );
     assert_eq!(rig.polls(), 0);
 }
 
 #[test]
-fn the_workflows_are_read_once_per_repo_and_branch_in_a_run() {
+fn workflow_readings_are_keyed_by_the_merge_sha() {
     let (mut rig, plan) = bundle_rig("");
 
     rig.go(&plan);
@@ -1170,7 +1212,7 @@ fn the_workflows_are_read_once_per_repo_and_branch_in_a_run() {
         .iter()
         .filter(|line| line.starts_with("GET /repos/acme/api/git/trees/"))
         .count();
-    assert_eq!(trees, 1);
+    assert_eq!(trees, 2);
 }
 
 #[test]
@@ -1183,8 +1225,9 @@ fn a_train_branch_is_waited_for_when_a_workflow_runs_on_a_push_to_it() {
 
     assert_eq!(run.statuses(), vec![Status::Done, Status::Done]);
     assert!(
-        run.said(0)
-            .contains("workflow deploy.yml runs on push to deploy/05-11-2026-main"),
+        run.said(0).contains(
+            "workflow .github/workflows/deploy.yml runs on push to deploy/05-11-2026-main"
+        ),
         "{}",
         run.said(0)
     );
@@ -2057,6 +2100,7 @@ fn parallel_resume_reconciles_saved_sha_without_repeating_merge() {
             base: "main".to_string(),
             sha: Some(merge_sha(1)),
             continuation: None,
+            deploy_prediction: None,
         })
         .unwrap();
     let run = rig.go(&plan);
@@ -2272,6 +2316,7 @@ fn parallel_legacy_failed_resume_stops_before_dispatching_new_independent_work()
             base: "main".to_string(),
             sha: Some(merge_sha(1)),
             continuation: None,
+            deploy_prediction: None,
         })
         .unwrap();
     fail_deploy(&rig, 1);
@@ -2447,4 +2492,454 @@ fn bump_all_skipped_publisher_does_not_skip_its_consumer_or_create_review_work()
     );
     assert!(journal.consumers.is_empty());
     assert!(rig.store.state.pending.is_empty());
+}
+struct FilterState {
+    directory: std::path::PathBuf,
+}
+
+impl FilterState {
+    fn attach(rig: &mut Rig) -> Self {
+        let directory = std::env::temp_dir().join(format!(
+            "pipetrain-deploy-filters-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        rig.store = Store::open(Some(directory.join("state.json"))).unwrap();
+        Self { directory }
+    }
+
+    fn reopen(&self) -> Store {
+        Store::open(Some(self.directory.join("state.json"))).unwrap()
+    }
+}
+
+impl Drop for FilterState {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}
+
+fn path_workflow(filters: &str) -> Vec<(String, String)> {
+    vec![("deploy.yml".into(), format!("on:\n  push:\n{filters}"))]
+}
+
+#[test]
+fn main_paths_miss_dispenses_without_polling() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    rig.script().workflows = path_workflow("    branches: main\n    paths: ['service/**']");
+    rig.script().runs.clear();
+    let run = rig.go(&plan_on(&[1]));
+    assert_eq!(run.step(0).status, Status::Done);
+    assert_eq!(rig.polls(), 0);
+    assert_eq!(run.slept, Duration::ZERO);
+    assert!(run.said(0).contains("paths"));
+    assert!(run.said(0).contains(".github/workflows/deploy.yml"));
+    assert!(run.said(0).contains("src/app.rs"));
+    assert!(!run.said(0).contains("merge.no_deploy_repos"));
+    let value = serde_json::to_value(&run.outcome.report).unwrap();
+    assert_eq!(
+        value["steps"][0]["deploy_prediction"]["status"],
+        "dispensed"
+    );
+    assert_eq!(
+        value["steps"][0]["deploy_prediction"]["workflows"][0]["filter"],
+        "paths"
+    );
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn main_paths_match_waits_for_deploy_and_passes() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    rig.script().workflows = path_workflow("    branches: [main]\n    paths: 'src/**'");
+    let run = rig.go(&plan_on(&[1]));
+    assert_eq!(run.step(0).status, Status::Done);
+    assert_eq!(rig.polls(), 2);
+    assert!(run.said(0).contains("deploy passed"));
+    assert!(
+        matches!(run.step(0).deploy_prediction.as_ref(), Some(pipetrain::workflows::PushRuns::Expected { workflows }) if workflows == &[".github/workflows/deploy.yml"])
+    );
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn paths_ignore_excludes_every_changed_file_without_polling() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    rig.script().workflows = path_workflow("    paths-ignore: ['docs/**', '*.md']");
+    rig.script().files = vec![
+        json!({"filename": "docs/guide.md"}),
+        json!({"filename": "README.md"}),
+    ];
+    rig.script().runs.clear();
+    let run = rig.go(&plan_on(&[1]));
+    assert_eq!(run.step(0).status, Status::Done);
+    assert_eq!(rig.polls(), 0);
+    assert!(run.said(0).contains("paths-ignore"));
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn negated_path_patterns_exclude_and_reinclude_files() {
+    for (file, polls) in [("src/generated/a.rs", 0), ("src/generated/keep.rs", 2)] {
+        let mut rig = Rig::new("");
+        let state = FilterState::attach(&mut rig);
+        rig.script().workflows =
+            path_workflow("    paths: ['src/**', '!src/generated/**', 'src/generated/keep.rs']");
+        rig.script().files = vec![json!({"filename": file})];
+        let run = rig.go(&plan_on(&[1]));
+        assert_eq!(run.step(0).status, Status::Done);
+        assert_eq!(rig.polls(), polls);
+        assert!(state.reopen().state.pending.is_empty());
+    }
+}
+
+#[test]
+fn renamed_file_previous_name_keeps_deploy_expected() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    rig.script().workflows = path_workflow("    paths: ['src/**']");
+    rig.script().files = vec![
+        json!({"filename": "docs/app.md", "previous_filename": "src/app.rs", "status": "renamed"}),
+    ];
+    let run = rig.go(&plan_on(&[1]));
+    assert_eq!(run.step(0).status, Status::Done);
+    assert_eq!(rig.polls(), 2);
+    assert!(matches!(
+        run.step(0).deploy_prediction,
+        Some(pipetrain::workflows::PushRuns::Expected { .. })
+    ));
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn incomplete_pr_files_remain_indeterminate_and_wait() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    rig.script().workflows = path_workflow("    paths: 'service/**'");
+    rig.script().file_total = Some(2);
+    let run = rig.go(&plan_on(&[1]));
+    assert_eq!(run.step(0).status, Status::Done);
+    assert_eq!(rig.polls(), 2);
+    assert!(run.said(0).contains("incomplete: read 1 of 2"));
+    assert!(matches!(
+        run.step(0).deploy_prediction,
+        Some(pipetrain::workflows::PushRuns::Indeterminate { .. })
+    ));
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn file_pagination_must_match_the_pr_total() {
+    for mode in ["duplicate", "short", "excess"] {
+        let mut rig = Rig::new("");
+        let state = FilterState::attach(&mut rig);
+        rig.script().workflows = path_workflow("    paths: 'service/**'");
+        rig.script().files = (0..100)
+            .map(|n| json!({"filename": format!("docs/{n}.md")}))
+            .collect();
+        match mode {
+            "duplicate" => {
+                rig.script().file_total = Some(101);
+                rig.script()
+                    .file_pages
+                    .insert(2, vec![json!({"filename": "docs/0.md"})]);
+            }
+            "short" => rig.script().file_total = Some(101),
+            _ => rig.script().file_total = Some(99),
+        }
+        let run = rig.go(&plan_on(&[1]));
+        assert_eq!(run.step(0).status, Status::Done, "{mode}");
+        assert_eq!(rig.polls(), 2, "{mode}");
+        assert!(
+            matches!(
+                run.step(0).deploy_prediction,
+                Some(pipetrain::workflows::PushRuns::Indeterminate { .. })
+            ),
+            "{mode}"
+        );
+        assert!(state.reopen().state.pending.is_empty());
+    }
+}
+
+#[test]
+fn more_than_300_changed_files_wait_without_using_filters() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    rig.script().workflows = path_workflow("    paths: 'service/**'");
+    rig.script().file_total = Some(301);
+    let run = rig.go(&plan_on(&[1]));
+    assert_eq!(run.step(0).status, Status::Done);
+    assert_eq!(rig.polls(), 2);
+    assert!(run.said(0).contains("more than 300 changed files"));
+    assert!(rig.lines().iter().all(|line| !line.contains("/files?")));
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn exactly_300_changed_files_are_read_through_the_last_page() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    rig.script().workflows = path_workflow("    paths: 'service/**'");
+    rig.script().files = (0..300)
+        .map(|n| json!({"filename": format!("docs/{n}.md")}))
+        .collect();
+    let run = rig.go(&plan_on(&[1]));
+    assert_eq!(run.step(0).status, Status::Done);
+    assert_eq!(rig.polls(), 0);
+    assert!(
+        rig.lines()
+            .iter()
+            .any(|line| line.ends_with("/files?per_page=100&page=4"))
+    );
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn truncated_workflow_tree_remains_indeterminate_and_waits() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    rig.script().workflows = path_workflow("    paths: 'service/**'");
+    rig.script().tree_truncated = true;
+    let run = rig.go(&plan_on(&[1]));
+    assert_eq!(run.step(0).status, Status::Done);
+    assert_eq!(rig.polls(), 2);
+    assert!(run.said(0).contains("truncated"));
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn unreadable_workflow_and_unsupported_glob_remain_indeterminate() {
+    for workflow in [
+        "on: [",
+        "on:\n  push:\n    branches: other\n    paths: 'src/[ab].rs'",
+    ] {
+        let mut rig = Rig::new("");
+        let state = FilterState::attach(&mut rig);
+        rig.script().workflows = vec![("deploy.yml".into(), workflow.into())];
+        let run = rig.go(&plan_on(&[1]));
+        assert_eq!(run.step(0).status, Status::Done);
+        assert_eq!(rig.polls(), 2);
+        assert!(matches!(
+            run.step(0).deploy_prediction,
+            Some(pipetrain::workflows::PushRuns::Indeterminate { .. })
+        ));
+        assert!(state.reopen().state.pending.is_empty());
+    }
+}
+
+#[test]
+fn dry_run_reports_each_workflow_prediction_in_text_and_json() {
+    for (status, filters) in [
+        ("expected", "    paths: 'src/**'"),
+        ("dispensed", "    paths: ['service/**']"),
+        ("indeterminate", "    paths: 'src/?'"),
+    ] {
+        let mut rig = Rig::new("");
+        let state = FilterState::attach(&mut rig);
+        rig.store.save().unwrap();
+        let before = std::fs::read(state.directory.join("state.json")).unwrap();
+        rig.script().workflows = path_workflow(filters);
+        let run = rig.run(&plan_on(&[1, 2]), dry(), false, false).unwrap();
+        let value = serde_json::to_value(&run.outcome.report).unwrap();
+        let text = render(&run.outcome.report, false);
+        assert_eq!(value["schema"], 1);
+        for step in value["steps"].as_array().unwrap() {
+            assert_eq!(step["status"], "planned");
+            assert_eq!(step["deploy_prediction"]["status"], status);
+        }
+        assert_eq!(text.matches(&format!("{status}:")).count(), 2, "{text}");
+        assert!(text.contains(".github/workflows/deploy.yml"));
+        assert_eq!(rig.polls(), 0);
+        assert!(rig.puts().is_empty());
+        assert_eq!(run.confirms, 0);
+        assert_eq!(
+            std::fs::read(state.directory.join("state.json")).unwrap(),
+            before
+        );
+    }
+}
+
+#[test]
+fn pending_prediction_is_saved_and_resumed_without_reading_workflows() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    rig.script().workflows = path_workflow("    paths: 'src/**'");
+    rig.script()
+        .workflows
+        .push(("audit.yml".into(), "on: push".into()));
+    rig.script().runs.clear();
+    let first = rig.go(&plan_on(&[1]));
+    assert_eq!(first.step(0).status, Status::Stopped);
+    let saved = state.reopen();
+    assert!(
+        matches!(saved.state.pending[0].deploy_prediction.as_ref(), Some(pipetrain::workflows::PushRuns::Expected { workflows }) if workflows.len() == 2)
+    );
+    rig.store = saved;
+    rig.script().workflows.clear();
+    rig.script().files.clear();
+    rig.script().runs = green();
+    let trees = rig
+        .lines()
+        .iter()
+        .filter(|line| line.contains("/git/trees/"))
+        .count();
+    let second = rig.go(&plan_on(&[]));
+    assert_eq!(second.step(0).status, Status::Done);
+    assert!(matches!(
+        second.step(0).deploy_prediction,
+        Some(pipetrain::workflows::PushRuns::Expected { .. })
+    ));
+    assert_eq!(rig.puts().len(), 1);
+    assert_eq!(
+        rig.lines()
+            .iter()
+            .filter(|line| line.contains("/git/trees/"))
+            .count(),
+        trees
+    );
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn legacy_pending_without_prediction_keeps_polling_on_resume() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    std::fs::create_dir_all(&state.directory).unwrap();
+    std::fs::write(state.directory.join("state.json"), serde_json::to_vec(&json!({"schema": 1, "pending": [{"id": "acme/api#1", "repo": "acme/api", "base": "main", "sha": merge_sha(1)}]})).unwrap()).unwrap();
+    rig.store = state.reopen();
+    rig.script().workflows.clear();
+    let run = rig.go(&plan_on(&[]));
+    assert_eq!(run.step(0).status, Status::Done);
+    assert_eq!(rig.polls(), 2);
+    assert!(run.step(0).deploy_prediction.is_none());
+    assert!(rig.puts().is_empty());
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn same_repo_and_base_keep_each_pr_file_prediction_separate() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    rig.script().workflows = path_workflow("    paths: 'service/**'");
+    rig.script()
+        .files_by_pr
+        .insert(2, vec![json!({"filename": "service/app.rs"})]);
+    rig.script().put_body = Some(json!({"sha": merge_sha(1), "merged": true}));
+    let run = rig.go(&plan_on(&[1, 2]));
+    assert_eq!(run.statuses(), vec![Status::Done, Status::Done]);
+    assert_eq!(rig.polls(), 2);
+    assert!(matches!(
+        run.step(0).deploy_prediction,
+        Some(pipetrain::workflows::PushRuns::Dispensed { .. })
+    ));
+    assert!(matches!(
+        run.step(1).deploy_prediction,
+        Some(pipetrain::workflows::PushRuns::Expected { .. })
+    ));
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn missing_totals_and_rename_names_remain_indeterminate() {
+    for mode in ["total", "filename", "previous_filename", "head"] {
+        let mut rig = Rig::new("");
+        let state = FilterState::attach(&mut rig);
+        rig.script().workflows = path_workflow("    paths: 'service/**'");
+        match mode {
+            "total" => rig.script().metadata_missing_total = true,
+            "filename" => rig.script().files = vec![json!({"status": "modified"})],
+            "previous_filename" => {
+                rig.script().files = vec![json!({"filename": "docs/a.md", "status": "renamed"})]
+            }
+            _ => {}
+        }
+        let run = if mode == "head" {
+            let mut plan = plan_on(&[1]);
+            plan.items[0].sha = "c".repeat(40);
+            rig.run(&plan, dry(), false, false).unwrap()
+        } else {
+            rig.go(&plan_on(&[1]))
+        };
+        assert!(
+            matches!(
+                run.step(0).deploy_prediction,
+                Some(pipetrain::workflows::PushRuns::Indeterminate { .. })
+            ),
+            "{mode}"
+        );
+        assert_eq!(rig.polls(), if mode == "head" { 0 } else { 2 });
+        assert!(state.reopen().state.pending.is_empty());
+    }
+}
+
+#[test]
+fn malformed_workflow_trees_never_dispense_the_wait() {
+    for tree in [
+        json!({}),
+        json!({"tree": [], "truncated": "unknown"}),
+        json!({"tree": "missing", "truncated": false}),
+        json!({"tree": [{"type": "blob"}], "truncated": false}),
+        json!({"tree": [{"path": ".github/workflows/deploy.yml"}], "truncated": false}),
+    ] {
+        let mut rig = Rig::new("");
+        let state = FilterState::attach(&mut rig);
+        rig.script().tree_body = Some(tree);
+        let run = rig.go(&plan_on(&[1]));
+        assert_eq!(run.step(0).status, Status::Done);
+        assert_eq!(rig.polls(), 2);
+        assert!(matches!(
+            run.step(0).deploy_prediction,
+            Some(pipetrain::workflows::PushRuns::Indeterminate { .. })
+        ));
+        assert!(state.reopen().state.pending.is_empty());
+    }
+}
+
+#[test]
+fn workflow_readings_are_reused_for_the_same_sha_and_files() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    rig.script().workflows = path_workflow("    paths: 'service/**'");
+    rig.script().put_body = Some(json!({"sha": merge_sha(1), "merged": true}));
+    let run = rig.go(&plan_on(&[1, 2]));
+    assert_eq!(run.statuses(), vec![Status::Done, Status::Done]);
+    assert_eq!(rig.polls(), 0);
+    assert_eq!(
+        rig.lines()
+            .iter()
+            .filter(|line| line.contains("/git/trees/"))
+            .count(),
+        1
+    );
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn legacy_train_pending_keeps_branch_only_workflow_behavior() {
+    for (workflow, polls) in [
+        ("on: pull_request", 0),
+        (
+            "on:\n  push:\n    branches: ['deploy/**']\n    paths: ['service/**']",
+            2,
+        ),
+    ] {
+        let mut rig = Rig::new("");
+        let state = FilterState::attach(&mut rig);
+        std::fs::create_dir_all(&state.directory).unwrap();
+        std::fs::write(state.directory.join("state.json"), serde_json::to_vec(&json!({"schema": 1, "pending": [{"id": "acme/api#1", "repo": "acme/api", "base": BUNDLE, "sha": merge_sha(1)}]})).unwrap()).unwrap();
+        rig.store = state.reopen();
+        rig.script().workflows = vec![("deploy.yml".into(), workflow.into())];
+        let run = rig.go(&plan_on(&[]));
+        assert_eq!(run.step(0).status, Status::Done);
+        assert_eq!(rig.polls(), polls);
+        assert!(run.step(0).deploy_prediction.is_none());
+        assert!(rig.puts().is_empty());
+        assert!(state.reopen().state.pending.is_empty());
+    }
 }

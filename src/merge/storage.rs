@@ -185,6 +185,7 @@ mod tests {
             base: "main".to_string(),
             sha: Some("abc123".to_string()),
             continuation: None,
+            deploy_prediction: None,
         };
         Store::open(Some(first.clone()))
             .unwrap()

@@ -2,7 +2,7 @@
 
 `pipetrain merge` follows the dependencies computed by `pipetrain plan`, runs independent repositories up to the configured `max_parallel`, and waits for each PR deployment before releasing its consumers. Setting `max_parallel = 1` preserves sequential execution. It is the second command that writes to GitHub, after `bundle --apply`.
 
-Without `--apply` nothing is written. The dry run prints the steps it would take and the PRs the plan left out, and calls GitHub only to build the plan.
+Without `--apply` nothing is written. The dry run prints the steps it would take, the PRs the plan left out and a workflow prediction for each PR. It reads GitHub to build the plan and evaluate the workflow filters; it does not poll runs or write merge state.
 
 ```
 pipetrain merge [OPTIONS] [PRS]...
@@ -38,31 +38,41 @@ When GitHub is still recalculating mergeability, both the GraphQL readiness quer
 
 ## What it waits for
 
-After a merge it takes the merge commit sha and polls `GET /repos/{repo}/actions/runs?head_sha={sha}&event=push`. The deploy is finished when there is at least one workflow run, all of them are `completed`, and two polls in a row saw the same number of runs. A run that ended as anything but `success`, `skipped` or `neutral` (`failure`, `cancelled`, `timed_out`, `action_required`) fails the step, even while other runs are still going.
+Before waiting, pipetrain evaluates the workflow files (`.github/workflows/*.yml` and `*.yaml`) for every PR base, including `main`, feature branches and train branches. Execution reads them at the merge commit SHA. A dry run reads them at the planned PR head SHA, so its prediction is provisional until the merge. Within an executor, readings are cached by repository, exact base branch, workflow SHA and the sorted set of changed filenames.
 
-A run that ended `cancelled` is ignored, not failed, when a newer run (a higher run id) of the same workflow exists for the same commit: CI that cancels in-progress runs leaves such runs behind, and the newer run is the one that counts, so it is still waited for and judged. A cancelled run that nothing replaced, or a newer run that was cancelled too, fails the step.
+The changed files come from `GET /repos/{repo}/pulls/{number}/files`, rather than the plan's file snapshot. Both `filename` and `previous_filename` count for a rename. pipetrain checks the PR head and its REST `changed_files` total, follows file pages through the final short page and requires the count to equal that total. A missing total, missing filename or rename source, duplicate file, mismatched count, unreadable response or more than 300 changed files makes the prediction indeterminate. The 300 limit counts changed files, before adding previous names.
 
-The two polls in a row exist to catch a workflow chained with `workflow_run`: when the first workflow finishes, the chained one may take a moment to appear, and one poll alone would call the deploy finished before it. The second poll is not to be shortened or dropped without measuring how long a chain really takes to show up in the API.
+Each push has one prediction:
 
-The wait is skipped, and the step is `done` with a note, when:
-
-- the repo matches `merge.no_deploy_repos`;
-- the base of the PR is a train branch (it starts with `train_prefix`) and the workflows of the repo were read and none of them runs on a push to that branch.
-
-For a train branch pipetrain reads the workflow files at the merge commit (`.github/workflows/*.yml` and `*.yaml`, once per repo and branch in a run) and looks at `on: push`:
-
-| `on` | Runs on a push to the branch? |
+| Prediction | Evidence and behavior |
 |---|---|
-| `push` with no filter, or `[push, ...]` | yes |
-| `push.branches` | yes when a pattern matches (`*` does not cross `/`, `**` does, a leading `!` takes a branch back out) |
-| `push.branches-ignore` | yes unless a pattern matches |
-| `push.tags` or `push.tags-ignore` alone | no |
-| `push.paths` or `paths-ignore` | counted as yes, because it depends on the files |
-| no `push` | no |
+| `expected` | Lists every workflow file whose push filters match. Continue the existing deploy polling. |
+| `dispensed` | Every readable push workflow excludes this branch or these changed files, or the repo has no push workflow. End the step as `done` without polling runs. The detail names each excluding workflow, filter, patterns and changed filenames. |
+| `indeterminate` | The workflow YAML, glob or push inputs cannot be read reliably, or the workflow tree is truncated or malformed. Continue polling with the existing grace and timeout. Uncertainty never dispenses the wait, even if another workflow can be evaluated. |
 
-When a workflow runs on the push, or the files cannot be read or understood (no access, a tree too large to list, invalid YAML, a pattern with `?`, `+`, `[` or `\`), the step waits for the deploy like for any other base and says why: `workflow ci.yml runs on push to deploy/05-11-2026-main` or `could not read the workflows (...)`. Assuming that a push to a train branch deploys nothing is wrong for repos that deploy on `deploy/**`, so it is never assumed.
+`merge.no_deploy_repos` retains precedence: matching repositories are dispensed by configuration without fetching workflows or changed files. This setting still applies to the whole repo, rather than to one PR or path filter.
 
-If no run appears within `merge.no_run_grace_seconds`, the step is `stopped`, not `done`: pipetrain cannot tell "no deploy exists" from "the deploy has not started". List the repo in `merge.no_deploy_repos` if it really has none.
+Branch and path conditions must both match for a workflow to be expected:
+
+| `on` | Runs on this branch push? |
+|---|---|
+| `push` with no filter, `[push, ...]` or `push:` | yes |
+| `push.branches` | when the branch matches the ordered patterns |
+| `push.branches-ignore` | unless the branch matches the ordered ignore patterns |
+| `push.paths` | when at least one current or previous changed filename matches the ordered patterns |
+| `push.paths-ignore` | when at least one current or previous changed filename is not ignored |
+| `push.tags` or `push.tags-ignore` without a branch filter | no |
+| no `push` event | no |
+
+Filters accept a string or a list of strings. `*` matches within a path segment, `**` crosses `/`, and `**/` also matches zero directories. A leading `!` removes a previous match; a later positive pattern can include it again. Matching is case sensitive and covers the entire branch or filename. Unsupported patterns (including `?`, `+`, character classes, braces, backslashes, embedded `!` or three consecutive stars), malformed lists and conflicting include/ignore filters are indeterminate. Filter patterns are validated before deciding a workflow is excluded.
+
+For `expected` and `indeterminate`, the merge commit SHA is polled with `GET /repos/{repo}/actions/runs?head_sha={sha}&event=push`. The deploy is finished when there is at least one workflow run, all of them are `completed`, and two polls in a row saw the same number of runs. A run that ended as anything but `success`, `skipped` or `neutral` (`failure`, `cancelled`, `timed_out`, `action_required`) fails the step, even while other runs are still going.
+
+A run that ended `cancelled` is ignored when a newer run (a higher run id) of the same workflow exists for the same commit. A cancelled run without a replacement, or a replacement that was cancelled too, fails the step.
+
+The two polls stabilize the observed run count. This slice records expected workflow files for subsequent deploy verification, but retains the existing polling verdict: it does not yet restrict confirmation to those workflows or follow `workflow_run` chains. An auxiliary push workflow can still satisfy the existing verdict; the expected list by itself is a prediction, not proof of deployment.
+
+If no run appears within `merge.no_run_grace_seconds`, an expected or indeterminate step is `stopped`. The message preserves the prediction and its reason. A path filter that proves no workflow should run is reported as dispensed immediately. Absence of runs alone never recommends adding the entire repo to `merge.no_deploy_repos`; only evidence that the repo has no push workflows could justify that configuration.
 
 ## Opening the deploy PR
 
@@ -132,7 +142,7 @@ Text output streams each completed step once. Its final summary counts PRs merge
 Before it merges, pipetrain records the PR in a state file. After the deploy passes, or all detected workflow runs are skipped, it removes the record. A run that is stopped, fails, is interrupted or loses its connection leaves the record, and the next `merge --apply` starts by finishing that wait, before it touches the queue:
 
 - A record without a merge commit (the process ended between the request and the answer) is resolved by asking GitHub whether the PR was merged.
-- A record whose deploy failed is checked again, so re-running the workflow and then running `merge` again continues.
+- A record whose deploy failed is checked again, so re-running the workflow and then running `merge` again continues. New records also save `deploy_prediction` before polling, including the full expected workflow paths when known; resume reuses that decision. Records without this optional field still load and use legacy behavior: normal bases poll as before; train bases keep their branch-only workflow check and do not evaluate paths without saved push inputs.
 - The plan itself is not saved. It is built again, so merged PRs are gone from it and the queue continues from the first one still open.
 
 State is local and durable by default. Named profiles use `pipetrain/queues/<profile-key>/merge-state.json` in the user state directory (the local data directory on Windows). The selected canonical profile name identifies one stable queue across repositories and invocations; aliases and case changes do not create another queue. Simple names use their lowercase form. Other UTF-8 bytes are percent-encoded, including dots, path separators and percent signs; Windows reserved names escape their first byte. Different names cannot collide through replacement of punctuation. The implicit `default` profile retains `pipetrain/merge-state.json`.
@@ -170,7 +180,17 @@ Without a path override, unfinished work in the legacy global state blocks a nam
 | `not_merging` | `{id, reasons[]}[]` | PRs the plan left out and why. |
 | `questions` | string[] | The `? ...` lines of the plan. |
 
-A step is `{kind, target, status, detail}` plus `merge_sha`, `deploy` and `blocked_by` when they apply. `blocked_by` identifies the failed PR responsible for a blocked step. `kind` is `resume`, `merge`, `gate`, `wait` or `open-pr`. `status` is `planned`, `done`, `skipped`, `failed` or `stopped`; after a global stop the steps that did not run are `skipped` with the detail `stopped after an earlier failure`. Dependency and same-target skips include a specific reason.
+A step is `{kind, target, status, detail}` plus `merge_sha`, `deploy`, `blocked_by` and `deploy_prediction` when they apply. `blocked_by` identifies the failed PR responsible for a blocked step. `kind` is `resume`, `merge`, `gate`, `wait` or `open-pr`. `status` is `planned`, `done`, `skipped`, `failed` or `stopped`; after a global stop the steps that did not run are `skipped` with the detail `stopped after an earlier failure`. Dependency and same-target skips include a specific reason.
+
+`deploy_prediction` is an additive optional object on merge and resume steps. It is present for each evaluated PR in a dry run and for merged PRs after evaluation. Gates and unevaluated steps omit it. The same object is stored on new pending records with `serde(default)` compatibility for older state files. Existing fields and schema `1` keep their meaning.
+
+| Prediction shape | Fields |
+|---|---|
+| `{status: "expected", workflows: string[]}` | Full repository-relative workflow paths, for example `.github/workflows/deploy.yml`. |
+| `{status: "dispensed", reason: string, workflows: Exclusion[]}` | Each exclusion is `{workflow: string, filter: string, patterns: string[], files: string[]}`. `filter` identifies the excluding push filter, and `files` contains the complete current/previous filename set. The list is empty when there are no push workflows or `no_deploy_repos` overrides evaluation. |
+| `{status: "indeterminate", reason: string}` | Why a reliable prediction was unavailable. |
+
+Dry-run text shows `expected`, `dispensed` or `indeterminate` per PR together with workflow paths or the reason. The existing step `status` remains `planned` until execution. A dispensed merge is `done` with its merge SHA; it does not claim that a deploy ran.
 
 ## Not part of it
 
@@ -182,7 +202,7 @@ A step is `{kind, target, status, detail}` plus `merge_sha`, `deploy` and `block
 
 These were decided on the conservative side. Each can be loosened later with a new flag or setting without changing what exists.
 
-1. **No workflow run after a merge.** Treated as `stopped`, not as success, because "there is no deploy" and "it has not started" look the same from the API. Should a repo with no run ever count as deployed without being listed in `merge.no_deploy_repos`?
+1. **No workflow run after a merge.** An expected or indeterminate prediction remains `stopped` after the grace period. Only complete filter evidence or the explicit repo configuration dispenses the wait; dispensing does not claim a deploy happened.
 2. **Gates under `--yes`.** `--yes` does not answer gates. Is a separate `--gates-confirmed` the right split, or should a CI run be able to pre-approve a named gate (for example by PR id)?
 3. **Open questions.** They block `--apply`. Some questions (a sibling that is not ready, for example) may be acceptable to merge past; is one switch for all of them too coarse?
 4. **Branches that are behind.** A `behind` PR fails the step and asks you to update it. Should `merge` offer `--update-branch`, knowing that it re-triggers the PR's checks and invalidates the plan?

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Merge evaluates push branch and path filters on every base using complete PR file pagination and rename sources, dispensing the wait with evidence when no workflow should run and keeping uncertain inputs on the existing polling path.
+- Merge dry runs show each PR's workflow prediction in text and the additive JSON `deploy_prediction` field.
+- Pending merges save their workflow prediction, including expected workflow paths, for resume and subsequent verification; older records retain legacy polling behavior.
+
 ## 0.8.1
 
 ### Added

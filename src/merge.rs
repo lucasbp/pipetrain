@@ -128,6 +128,8 @@ pub struct Pending {
     pub sha: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation: Option<Continuation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deploy_prediction: Option<crate::workflows::PushRuns>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -359,6 +361,8 @@ pub struct StepReport {
     pub blocked_by: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bump: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deploy_prediction: Option<crate::workflows::PushRuns>,
 }
 
 impl StepReport {
@@ -372,6 +376,7 @@ impl StepReport {
             deploy: None,
             blocked_by: None,
             bump: None,
+            deploy_prediction: None,
         }
     }
 }
@@ -624,6 +629,7 @@ mod tests {
                 base: "main".to_string(),
                 sha: None,
                 continuation: None,
+                deploy_prediction: None,
             })
             .unwrap();
         store.set_sha("acme/api#1", "abc123").unwrap();

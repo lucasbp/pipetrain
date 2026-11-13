@@ -260,6 +260,64 @@ impl Client {
         Ok((files, complete))
     }
 
+    pub fn push_files(&mut self, key: &PrKey, head_sha: &str) -> Result<Vec<String>> {
+        let metadata = self.rest(&format!("/repos/{}/pulls/{}", key.slug(), key.number))?;
+        if metadata.pointer("/head/sha").and_then(Value::as_str) != Some(head_sha) {
+            anyhow::bail!("the PR head changed while reading push files");
+        }
+        let total = metadata
+            .get("changed_files")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| anyhow!("the PR changed_files total is unavailable"))?;
+        if total > 300 {
+            anyhow::bail!("the PR has more than 300 changed files ({total})");
+        }
+        let mut paths = std::collections::BTreeSet::new();
+        let mut filenames = std::collections::BTreeSet::new();
+        let mut count = 0;
+        for page in 1..=FILE_PAGES + 1 {
+            let value = self.rest(&format!(
+                "/repos/{}/pulls/{}/files?per_page=100&page={page}",
+                key.slug(),
+                key.number
+            ))?;
+            let files = value
+                .as_array()
+                .ok_or_else(|| anyhow!("the PR file list is unreadable"))?;
+            for file in files {
+                let name = file
+                    .get("filename")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.is_empty())
+                    .ok_or_else(|| anyhow!("a changed filename is missing"))?;
+                if !filenames.insert(name.to_string()) {
+                    anyhow::bail!("the PR file pagination contains duplicate filenames");
+                }
+                paths.insert(name.to_string());
+                match file.get("previous_filename") {
+                    Some(Value::String(previous)) if !previous.is_empty() => {
+                        paths.insert(previous.clone());
+                    }
+                    None if file.get("status").and_then(Value::as_str) != Some("renamed") => {}
+                    _ => anyhow::bail!("a renamed file's previous filename is unavailable"),
+                }
+            }
+            count += files.len() as u64;
+            if count > total || files.len() > 100 {
+                anyhow::bail!("the PR file pagination does not match its changed_files total");
+            }
+            if files.len() < 100 {
+                if count != total {
+                    anyhow::bail!(
+                        "the PR file list is incomplete: read {count} of {total} changed files"
+                    );
+                }
+                return Ok(paths.into_iter().collect());
+            }
+        }
+        anyhow::bail!("the PR file pagination did not finish")
+    }
+
     pub fn default_branch_sha(&mut self, slug: &str) -> Result<String> {
         let (owner, name) = slug
             .split_once('/')

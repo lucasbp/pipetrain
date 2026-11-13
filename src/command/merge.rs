@@ -76,30 +76,52 @@ pub struct Outcome {
     pub code: i32,
 }
 
+type PushReadingKey = (String, String, String, Vec<String>);
+
 struct Env<'a> {
     plan: &'a Plan,
     cfg: &'a Config,
     settings: &'a Settings,
     method: &'a str,
-    readings: RefCell<BTreeMap<(String, String), Result<PushRuns, String>>>,
+    readings: RefCell<BTreeMap<PushReadingKey, PushRuns>>,
 }
 
 impl Env<'_> {
     fn push_reading(
         &self,
         client: &mut Client,
-        slug: &str,
+        key: &PrKey,
         branch: &str,
         sha: &str,
-    ) -> Result<PushRuns, String> {
-        let key = (slug.to_lowercase(), branch.to_lowercase());
-        if let Some(known) = self.readings.borrow().get(&key) {
+        head_sha: &str,
+    ) -> PushRuns {
+        if !self.cfg.merge.waits_for_deploy(&key.slug()) {
+            return PushRuns::Dispensed {
+                workflows: Vec::new(),
+                reason: "the repo is listed in merge.no_deploy_repos".to_string(),
+            };
+        }
+        let changed = match client.push_files(key, head_sha) {
+            Ok(changed) => changed,
+            Err(error) => return PushRuns::indeterminate(format!("{error:#}")),
+        };
+        let slug = key.slug();
+        let cache_key = (
+            slug.to_lowercase(),
+            branch.to_string(),
+            sha.to_string(),
+            changed.clone(),
+        );
+        if let Some(known) = self.readings.borrow().get(&cache_key) {
             return known.clone();
         }
-        let reading = workflows::read(client, slug, sha)
-            .map_err(|error| format!("{error:#}"))
-            .and_then(|files| workflows::push_runs(&files, branch));
-        self.readings.borrow_mut().insert(key, reading.clone());
+        let reading = match workflows::read(client, &slug, sha) {
+            Ok(files) => workflows::push_runs(&files, branch, &changed),
+            Err(error) => PushRuns::indeterminate(format!("{error:#}")),
+        };
+        self.readings
+            .borrow_mut()
+            .insert(cache_key, reading.clone());
         reading
     }
 }
@@ -186,12 +208,14 @@ fn resume_steps(state: &State) -> Vec<StepReport> {
         .pending
         .iter()
         .map(|pending| {
-            StepReport::new(
+            let mut step = StepReport::new(
                 Kind::Resume,
                 &pending.id,
                 Status::Planned,
                 "merged by an earlier run, waiting for its deploy",
-            )
+            );
+            step.deploy_prediction = pending.deploy_prediction.clone();
+            step
         })
         .collect()
 }
@@ -318,6 +342,7 @@ fn deploy_phase(
     slug: &str,
     base: &str,
     sha: &str,
+    prediction: Option<&PushRuns>,
 ) -> (Status, String) {
     (hooks.progress)(&format!("checking deploy workflows for {slug}@{base}"));
     if !env.cfg.merge.waits_for_deploy(slug) {
@@ -326,22 +351,21 @@ fn deploy_phase(
             "not waited: the repo is listed in merge.no_deploy_repos".to_string(),
         );
     }
-    let mut note: Option<String> = None;
-    if is_stacked(base, &env.cfg.train_prefix) {
-        match env.push_reading(client, slug, base, sha) {
-            Ok(PushRuns::No) => {
-                return (
-                    Status::Done,
-                    format!("not waited: workflows read, none runs on push to {base}"),
-                );
-            }
-            Ok(PushRuns::Yes(file)) => {
-                note = Some(format!("workflow {file} runs on push to {base}"));
-            }
-            Err(reason) => {
-                note = Some(format!("could not read the workflows ({reason})"));
-            }
-        }
+    let legacy = if prediction.is_none() && is_stacked(base, &env.cfg.train_prefix) {
+        Some(match workflows::read(client, slug, sha) {
+            Ok(files) => workflows::branch_push_runs(&files, base),
+            Err(error) => PushRuns::indeterminate(format!("{error:#}")),
+        })
+    } else {
+        None
+    };
+    let prediction = prediction.or(legacy.as_ref());
+    let note = prediction.map(|reading| reading.detail(base));
+    if matches!(prediction, Some(PushRuns::Dispensed { .. })) {
+        return (
+            Status::Done,
+            format!("not waited: {}", note.unwrap_or_default()),
+        );
     }
     let said = |text: String| match &note {
         Some(note) => format!("{note}; {text}"),
@@ -378,7 +402,7 @@ fn deploy_phase(
         Deploy::NoRun(grace) => (
             Status::Stopped,
             said(format!(
-                "no workflow run appeared for the push in {}s; if this repo deploys without GitHub Actions, list it in merge.no_deploy_repos; run again to check once more",
+                "no workflow run appeared for the push in {}s; run again to check once more",
                 grace.as_secs()
             )),
         ),
@@ -489,6 +513,7 @@ fn merge_one(
         base: item.base.clone(),
         sha: None,
         continuation: Some(failure::continuation(env.plan, item)),
+        deploy_prediction: None,
     };
     if let Err(error) = store.add(pending) {
         return fail(report, format!("cannot save the merge state: {error:#}"));
@@ -532,6 +557,33 @@ fn merge_one(
             ),
         );
     }
+    report.deploy_prediction = Some(PushRuns::Dispensed {
+        workflows: Vec::new(),
+        reason: "the repo is listed in merge.no_deploy_repos".to_string(),
+    });
+    if env.cfg.merge.waits_for_deploy(&slug) {
+        (hooks.progress)(&format!(
+            "checking deploy workflows for {slug}@{}",
+            item.base
+        ));
+        let prediction = env.push_reading(client, &key, &item.base, &merge_sha, &item.sha);
+        report.deploy_prediction = Some(prediction.clone());
+        if let Some(mut pending) = store
+            .state
+            .pending
+            .iter()
+            .find(|pending| pending.id == item.id)
+            .cloned()
+        {
+            pending.deploy_prediction = Some(prediction);
+            if let Err(error) = store.add(pending) {
+                return stop(
+                    report,
+                    format!("cannot save the deploy prediction: {error:#}"),
+                );
+            }
+        }
+    }
     let landed = Landed {
         id: &item.id,
         slug: &slug,
@@ -563,7 +615,15 @@ fn finish_deploy(
         base,
         sha,
     } = *landed;
-    let (status, text) = deploy_phase(env, client, hooks, slug, base, sha);
+    let (status, text) = deploy_phase(
+        env,
+        client,
+        hooks,
+        slug,
+        base,
+        sha,
+        report.deploy_prediction.as_ref(),
+    );
     report.deploy = Some(text);
     report.status = status;
     report.detail = match status {
@@ -624,6 +684,7 @@ fn resume_one(
         }
     };
     report.merge_sha = Some(sha.clone());
+    report.deploy_prediction = pending.deploy_prediction.clone();
     let landed = Landed {
         id: &pending.id,
         slug: &pending.repo,
@@ -902,6 +963,16 @@ pub fn merge_plan(
         questions: emit::question_lines(plan),
     };
     if !settings.apply {
+        for step in &mut report.steps {
+            if step.kind != Kind::Merge {
+                continue;
+            }
+            if let Some(item) = plan.items.iter().find(|item| item.id == step.target) {
+                let key = PrKey::new(&item.org, &item.repo, item.number);
+                step.deploy_prediction =
+                    Some(env.push_reading(client, &key, &item.base, &item.sha, &item.sha));
+            }
+        }
         arrange(&mut report, plan, store, settings);
         return Ok(Outcome {
             report,
@@ -1078,7 +1149,21 @@ fn step_text(step: &StepReport, color: bool) -> String {
         .map(|text| format!("; {text}"))
         .unwrap_or_default();
     match step.status {
-        Status::Planned => format!("{what}{suffix}"),
+        Status::Planned => {
+            let prediction = step
+                .deploy_prediction
+                .as_ref()
+                .map(|reading| {
+                    let branch = step
+                        .detail
+                        .strip_prefix("into ")
+                        .and_then(|detail| detail.split(';').next())
+                        .unwrap_or("the saved base");
+                    format!("; {}", reading.detail(branch))
+                })
+                .unwrap_or_default();
+            format!("{what}{suffix}{deploy}{prediction}")
+        }
         Status::Done => format!("{} {what}{suffix}{deploy}", tint(color, green, "done:")),
         Status::Skipped => format!(
             "{} {what}{suffix}{deploy}",
