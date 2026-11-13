@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Interactive merge progress retains one row per active PR with its base, phase and elapsed time; waiting excludes active work, and the header separates merge acceptance, deploy confirmation and failures.
+- Merge dry runs and confirmations show the configured parallelism upper bound and the existing one-worker-per-repository restriction, including different bases.
+- Merge text summaries and additive JSON summary, max_parallel and deploy_outcome fields distinguish merged PRs from deploys confirmed, dispensed, indeterminate, resolved by a later deploy, skipped and failed.
+
 - Plan and merge share preflight blockers for full GitHub merge states; UNKNOWN warns while the executor retains its one-minute retry and final clean-only guard.
 - Plan and merge previews and additive JSON preflight entries show eligibility, causes, next steps, bases, repository default branches and check names, states and URLs.
 - Plan and merge warn about feature bases without a selected parent; queue output adds only preflight comments and preserves existing step ordering.

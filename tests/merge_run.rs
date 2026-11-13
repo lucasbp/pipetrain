@@ -595,26 +595,15 @@ fn progress_identifies_the_current_pr_and_deploy_confirmation_in_queue_order() {
         .position(|text| text.contains("confirming completion"))
         .unwrap();
     assert!(first_at < confirmed_at && confirmed_at < second_at);
-    let second_step_at = run
-        .phases
-        .iter()
-        .position(|text| text.starts_with("step 2/2,"))
-        .unwrap();
-    assert!(
-        run.phases[..second_step_at]
-            .iter()
-            .all(|text| text.starts_with("step 1/2, 1 remaining\nacme/api#1 → main\n"))
-    );
-    assert!(
-        run.phases[second_step_at..]
-            .iter()
-            .all(|text| text.starts_with("step 2/2, 0 remaining\nacme/api#2 → main\n"))
-    );
-    assert!(
-        run.phases
-            .iter()
-            .any(|text| text == "step 1/2, 1 remaining\nacme/api#1 → main\nstarting")
-    );
+    assert!(run.phases.iter().all(|text| text.starts_with("waiting: ")));
+    assert!(run.phases.iter().any(|text| {
+        text.starts_with("waiting: 1, running: 1, merged: 0, deploy confirmed: 0")
+            && text.contains("acme/api#1 → main | readiness: starting")
+    }));
+    assert!(run.phases.iter().any(|text| {
+        text.starts_with("waiting: 0, running: 1, merged: 1, deploy confirmed: 1")
+            && text.contains("acme/api#2 → main | readiness: starting")
+    }));
     assert!(
         run.phases
             .iter()
@@ -624,6 +613,11 @@ fn progress_identifies_the_current_pr_and_deploy_confirmation_in_queue_order() {
         run.phases
             .iter()
             .any(|text| text.ends_with("checking deploy workflows for acme/api@main"))
+    );
+    assert!(
+        run.phases.last().unwrap().starts_with(
+            "waiting: 0, running: 0, merged: 2, deploy confirmed: 2, failed/stopped: 0"
+        )
     );
 }
 
@@ -953,9 +947,10 @@ fn an_old_train_target_is_explicit_in_confirmation_and_final_summary() {
     assert!(confirmation.contains(TRAIN));
     assert!(confirmation.contains("intermediate train branch"));
     assert!(
-        run.phases.iter().all(|phase| {
-            phase.lines().nth(1) == Some(format!("acme/api#1 → {TRAIN}").as_str())
-        })
+        run.phases
+            .iter()
+            .flat_map(|phase| phase.lines().skip(1))
+            .all(|row| row.starts_with(&format!("acme/api#1 → {TRAIN} | ")))
     );
     let summary = render_final(&run.outcome.report, true);
     assert!(summary.contains("Promotion requires a separate reviewed PR"));
@@ -2082,10 +2077,14 @@ fn parallel_real_workers_merge_independent_repositories_with_coordinated_state()
     assert!(!run.phases.is_empty());
     for phase in &run.phases {
         let rows: Vec<_> = phase.lines().collect();
-        assert_eq!(rows.len(), 3, "{phase}");
-        assert!(rows[0].contains("completed"));
-        assert!(["acme/api#1 → main", "acme/ui#2 → main"].contains(&rows[1]));
-        assert!(!rows[2].is_empty());
+        assert!(rows.len() <= 3, "{phase}");
+        assert!(rows[0].starts_with("waiting: "));
+        assert!(rows[0].contains("running: "));
+        for row in &rows[1..] {
+            assert!(
+                row.starts_with("acme/api#1 → main | ") || row.starts_with("acme/ui#2 → main | ")
+            );
+        }
     }
 }
 
@@ -3495,6 +3494,209 @@ fn failed_deploy_on_disk(rig: &mut Rig) -> FilterState {
     assert_eq!(failed.step(0).status, Status::Failed);
     rig.store = state.reopen();
     state
+}
+
+#[test]
+fn parallel_progress_renders_both_active_prs_with_their_phases() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    rig.cfg.max_parallel = 2;
+    let shared = rig.script.clone();
+    rig.server = serve_requests(move |line, payload| {
+        if line.contains("/actions/runs?") {
+            let ready = shared.lock().unwrap().merged.len() == 2;
+            if !ready {
+                return (
+                    200,
+                    json!({"total_count": 1, "workflow_runs": [run_json("deploy", "in_progress", None)]}),
+                );
+            }
+        }
+        respond(&shared, line, payload)
+    });
+    let plan = plan_of(
+        vec![
+            pr("acme/api", 1, "feat/1", "main"),
+            pr("acme/ui", 2, "feat/2", "main"),
+        ],
+        Vec::new(),
+    );
+    let run = rig.go(&plan);
+    let frame =
+        run.phases
+            .iter()
+            .find(|frame| {
+                frame.starts_with("waiting: 0, running: 2, merged: 2, deploy confirmed: 0")
+                    && frame.lines().skip(1).count() == 2
+                    && frame.lines().skip(1).all(|line| {
+                        line.contains("waiting for deploy: .github/workflows/deploy.yml")
+                    })
+            })
+            .unwrap_or_else(|| panic!("both deploy waits must be visible: {:?}", run.phases));
+    let sink = ProgressSink::default();
+    let mut painter = pipetrain::progress::Painter::new(sink.clone(), true, Duration::ZERO);
+    painter.set_phase(frame);
+    painter.tick(Duration::from_secs(1));
+    let rendered = sink.text();
+    assert!(rendered.contains("acme/api#1 → main | waiting for deploy:"));
+    assert!(rendered.contains("acme/ui#2 → main | waiting for deploy:"));
+    assert_eq!(rendered.matches(" · ").count(), 3);
+    assert_eq!(run.outcome.report.summary.merged, 2);
+    assert_eq!(run.outcome.report.summary.deploy_confirmed, 2);
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[derive(Clone, Default)]
+struct ProgressSink(Arc<Mutex<Vec<u8>>>);
+
+impl ProgressSink {
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
+}
+
+impl std::io::Write for ProgressSink {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn merge_summary_separates_merge_and_deploy_outcomes_in_text_and_json() {
+    for case in [
+        "confirmed",
+        "dispensed",
+        "indeterminate",
+        "failed",
+        "skipped",
+        "timeout",
+        "readiness",
+    ] {
+        let mut rig = Rig::new("");
+        let state = FilterState::attach(&mut rig);
+        match case {
+            "dispensed" => rig.script().workflows = path_workflow("    paths: 'service/**'"),
+            "indeterminate" => rig.script().tree_status = 500,
+            "failed" => rig.script().runs = vec![run_json("deploy", "completed", Some("failure"))],
+            "skipped" => rig.script().runs = vec![run_json("deploy", "completed", Some("skipped"))],
+            "timeout" => rig.script().runs.clear(),
+            "readiness" => {
+                rig.script().review.insert(1, "CHANGES_REQUESTED".into());
+            }
+            _ => {}
+        }
+        let run = rig.go(&plan_on(&[1]));
+        let summary = &run.outcome.report.summary;
+        let value = serde_json::to_value(&run.outcome.report).unwrap();
+        assert_eq!(summary.merged, usize::from(case != "readiness"), "{case}");
+        assert_eq!(
+            summary.deploy_confirmed,
+            usize::from(case == "confirmed"),
+            "{case}"
+        );
+        assert_eq!(
+            summary.deploy_dispensed,
+            usize::from(case == "dispensed"),
+            "{case}"
+        );
+        assert_eq!(
+            summary.deploy_indeterminate,
+            usize::from(matches!(case, "indeterminate" | "timeout")),
+            "{case}"
+        );
+        assert_eq!(
+            summary.deploy_skipped,
+            usize::from(case == "skipped"),
+            "{case}"
+        );
+        assert_eq!(
+            summary.deploy_failed,
+            usize::from(case == "failed"),
+            "{case}"
+        );
+        assert_eq!(
+            summary.failed,
+            usize::from(matches!(case, "failed" | "readiness")),
+            "{case}"
+        );
+        assert_eq!(summary.stopped, usize::from(case == "timeout"), "{case}");
+        assert_eq!(summary.deploy_resolved, 0);
+        assert_eq!(value["schema"], 1);
+        assert_eq!(value["summary"]["merged"], summary.merged);
+        assert_eq!(
+            value["summary"]["deploy_confirmed"],
+            summary.deploy_confirmed
+        );
+        let text = render_final(&run.outcome.report, false);
+        assert!(text.contains(&format!("{} PRs merged", summary.merged)));
+        assert!(text.contains(&format!("deploys: {} confirmed, {} dispensed, {} indeterminate, 0 resolved by later deploy, {} skipped, {} failed", summary.deploy_confirmed, summary.deploy_dispensed, summary.deploy_indeterminate, summary.deploy_skipped, summary.deploy_failed)));
+        assert_eq!(
+            state.reopen().state.pending.len(),
+            usize::from(matches!(case, "failed" | "timeout"))
+        );
+    }
+}
+
+#[test]
+fn merge_summary_counts_later_resolution_separately_from_confirmation() {
+    let mut rig = Rig::new("");
+    let state = failed_deploy_on_disk(&mut rig);
+    {
+        let mut script = rig.script();
+        script.later_tip = Some("d".repeat(40));
+        script.compare_status = "ahead".into();
+        script.runs_by_sha.insert("d".repeat(40), green());
+    }
+    let run = rig.go(&plan_on(&[]));
+    let value = serde_json::to_value(&run.outcome.report).unwrap();
+    assert_eq!(value["summary"]["merged"], 0);
+    assert_eq!(value["summary"]["earlier_merges_checked"], 1);
+    assert_eq!(value["summary"]["deploy_confirmed"], 0);
+    assert_eq!(value["summary"]["deploy_resolved"], 1);
+    assert_eq!(value["summary"]["deploy_failed"], 0);
+    assert!(render_final(&run.outcome.report, false).contains("1 resolved by later deploy"));
+    assert!(
+        run.phases
+            .iter()
+            .any(|frame| frame.contains("| resolving:"))
+    );
+    assert_eq!(state.reopen().state.audit.len(), 1);
+}
+
+#[test]
+fn merge_preview_shows_configured_parallelism_in_dry_run_and_confirmation() {
+    for limit in [1, 4] {
+        let mut rig = Rig::new("");
+        let _state = FilterState::attach(&mut rig);
+        rig.cfg.max_parallel = limit;
+        let plan = plan_on(&[1]);
+        let dry = rig
+            .run(
+                &plan,
+                Settings {
+                    apply: false,
+                    ..applied()
+                },
+                true,
+                true,
+            )
+            .unwrap();
+        let line =
+            format!("up to {limit} PRs at a time, one per repository (including different bases)");
+        assert!(render(&dry.outcome.report, false).contains(&line));
+        let value = serde_json::to_value(&dry.outcome.report).unwrap();
+        assert_eq!(value["max_parallel"], limit);
+        assert_eq!(value["summary"]["merged"], 0);
+        assert_eq!(value["summary"]["deploy_confirmed"], 0);
+        let declined = rig.run(&plan, applied(), false, true).unwrap();
+        assert!(declined.confirmation_text[0].contains(&line));
+        assert!(rig.puts().is_empty());
+    }
 }
 
 #[test]

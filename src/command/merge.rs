@@ -15,9 +15,9 @@ use crate::config::Config;
 use crate::emit;
 use crate::github::{Client, LivePr, PrWrite};
 use crate::merge::{
-    DependencyFailure, Kind, NotMerging, Pending, REPORT_SCHEMA, Report, STOPPED, State, Status,
-    Step, StepReport, Store, Verdict, judge, judge_expected, resolve_state_path, steps,
-    wait_is_published,
+    DependencyFailure, DeployOutcome, Kind, NotMerging, Pending, REPORT_SCHEMA, Report, STOPPED,
+    State, Status, Step, StepReport, Store, Summary, Verdict, judge, judge_expected,
+    resolve_state_path, steps, wait_is_published,
 };
 use crate::model::{PrKey, PrState};
 use crate::plan::Plan;
@@ -290,6 +290,21 @@ fn wait_for_deploy(
     report: &mut StepReport,
 ) -> (Deploy, Vec<String>) {
     let expected = prediction.filter(|value| matches!(value, PushRuns::Expected { .. }));
+    let workflows = match expected {
+        Some(PushRuns::Expected {
+            workflows,
+            chained_workflows,
+            ..
+        }) => workflows
+            .iter()
+            .chain(chained_workflows)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", "),
+        _ => "legacy workflow runs".to_string(),
+    };
+    let mut emit =
+        |message: &str| (hooks.progress)(&format!("waiting for deploy: {workflows}; {message}"));
     let poll = limits.poll.max(Duration::from_millis(1));
     let mut waited = Duration::ZERO;
     let mut settled: Option<usize> = None;
@@ -305,7 +320,7 @@ fn wait_for_deploy(
             .map(|run| format!("{}: {}", run.name, run.url))
             .collect::<Vec<_>>()
             .join("; ");
-        (hooks.progress)(&format!(
+        emit(&format!(
             "deploy {slug} at SHA {sha}: {}",
             if observed.is_empty() {
                 "no run yet"
@@ -356,18 +371,18 @@ fn wait_for_deploy(
                 }
                 settled = Some(count);
                 let conclusion = if skipped { "skipped" } else { "passed" };
-                (hooks.progress)(&format!(
+                emit(&format!(
                     "deploy {slug}: {count} workflows {conclusion}, confirming completion"
                 ));
             }
             Verdict::Waiting(text) => {
                 settled = None;
-                (hooks.progress)(&format!("deploy {slug}: {text}"));
+                emit(&format!("deploy {slug}: {text}"));
                 last = format!("{text}; SHA {sha}; {observed}");
             }
             Verdict::NoRuns => {
                 settled = None;
-                (hooks.progress)(&format!("deploy {slug}: waiting for a workflow to start"));
+                emit(&format!("deploy {slug}: waiting for a workflow to start"));
                 if waited >= limits.grace {
                     break Deploy::NoRun(limits.grace);
                 }
@@ -393,6 +408,7 @@ fn deploy_phase(
 ) -> (Status, String) {
     (hooks.progress)(&format!("checking deploy workflows for {slug}@{base}"));
     if !env.cfg.merge.waits_for_deploy(slug) {
+        report.deploy_outcome = Some(DeployOutcome::Dispensed);
         return (
             Status::Done,
             "not waited: the repo is listed in merge.no_deploy_repos".to_string(),
@@ -411,6 +427,7 @@ fn deploy_phase(
     let display_prediction = prediction.or(legacy.as_ref());
     let note = display_prediction.map(|reading| reading.detail(base));
     if matches!(display_prediction, Some(PushRuns::Dispensed { .. })) {
+        report.deploy_outcome = Some(DeployOutcome::Dispensed);
         return (
             Status::Done,
             format!("not waited: {}", note.unwrap_or_default()),
@@ -427,6 +444,15 @@ fn deploy_phase(
     };
     let (outcome, auxiliary_failures) =
         wait_for_deploy(client, slug, sha, &limits, hooks, prediction, report);
+    report.deploy_outcome = Some(match &outcome {
+        Deploy::Passed(_) if matches!(display_prediction, Some(PushRuns::Indeterminate { .. })) => {
+            DeployOutcome::Indeterminate
+        }
+        Deploy::Passed(_) => DeployOutcome::Confirmed,
+        Deploy::Skipped(_) => DeployOutcome::Skipped,
+        Deploy::Failed(_) => DeployOutcome::Failed,
+        _ => DeployOutcome::Indeterminate,
+    });
     let said = |text: String| {
         let mut parts: Vec<String> = note.iter().cloned().collect();
         parts.push(format!("SHA {sha}: {text}"));
@@ -606,6 +632,7 @@ fn merge_one(
         },
     };
     report.merge_sha = Some(merge_sha.clone());
+    (hooks.progress)(&format!("merged {} at SHA {merge_sha}", item.id));
     if let Err(error) = store.set_sha(&item.id, &merge_sha) {
         return stop(
             report,
@@ -1019,6 +1046,8 @@ pub fn merge_plan(
         readings: RefCell::new(BTreeMap::new()),
     };
     let mut report = Report {
+        max_parallel: cfg.max_parallel,
+        summary: Summary::default(),
         preflight: plan
             .preflight
             .iter()
@@ -1092,6 +1121,7 @@ pub fn merge_plan(
     }
     if cfg.max_parallel > 1 || settings.bump {
         parallel::execute(&env, client, store, hooks, &mut report.steps, &bundles)?;
+        report.summary = Summary::from_steps(&report.steps);
         let code = report.exit_code();
         return Ok(Outcome {
             report,
@@ -1099,6 +1129,7 @@ pub fn merge_plan(
             code,
         });
     }
+    let mut progress_state = crate::progress::merge::MergeProgress::new(report.steps.len());
     let mut halted: Option<String> = None;
     let mut failures = failure::DeployFailures::default();
     for index in 0..report.steps.len() {
@@ -1114,14 +1145,14 @@ pub fn merge_plan(
             step.detail = blocked.detail;
             step.blocked_by = Some(blocked.id);
         } else {
-            let total = report.steps.len();
             let target = progress_target(plan, &store.state, &step);
+            progress_state.start(index, target, step.kind);
             let mut progress = |text: &str| {
-                (hooks.progress)(&format!(
-                    "step {}/{total}, {} remaining\n{target}\n{text}",
-                    index + 1,
-                    total - index - 1
-                ));
+                if text.starts_with("merged ") {
+                    progress_state.merged(index);
+                }
+                progress_state.update(index, text);
+                (hooks.progress)(&progress_state.frame());
             };
             let mut step_hooks = Hooks {
                 confirm: &mut *hooks.confirm,
@@ -1198,9 +1229,12 @@ pub fn merge_plan(
                 halted = Some(step.target.clone());
             }
         }
+        progress_state.finish(index, &step);
         (hooks.observe)(&step);
+        (hooks.progress)(&progress_state.frame());
         report.steps[index] = step;
     }
+    report.summary = Summary::from_steps(&report.steps);
     let code = report.exit_code();
     Ok(Outcome {
         report,
@@ -1282,6 +1316,10 @@ fn render_with_steps(report: &Report, color: bool, include_steps: bool) -> Strin
         out.push_str(&format!("{}\n\n", tint(color, yellow, banner)));
     }
     if include_steps {
+        out.push_str(&format!(
+            "up to {} PRs at a time, one per repository (including different bases)\n",
+            report.max_parallel
+        ));
         out.push_str(&report.state.render());
         for pr in &report.preflight {
             for line in pr.lines() {
@@ -1338,18 +1376,15 @@ fn render_with_steps(report: &Report, color: bool, include_steps: bool) -> Strin
         out.push_str(&format!("\n{}\n", tint(color, yellow, reason)));
     }
     if report.applied {
-        let merged = report
-            .steps
-            .iter()
-            .filter(|step| step.kind == Kind::Merge && step.merge_sha.is_some())
-            .count();
-        let resumed = report
-            .steps
-            .iter()
-            .filter(|step| step.kind == Kind::Resume && step.merge_sha.is_some())
-            .count();
+        let summary = &report.summary;
         out.push_str(&format!(
-            "\n{merged} PRs merged, {resumed} earlier merges checked\n"
+            "\n{} PRs merged, {} earlier merges checked\n",
+            summary.merged, summary.earlier_merges_checked,
+        ));
+        out.push_str(&format!(
+            "deploys: {} confirmed, {} dispensed, {} indeterminate, {} resolved by later deploy, {} skipped, {} failed\n",
+            summary.deploy_confirmed, summary.deploy_dispensed, summary.deploy_indeterminate,
+            summary.deploy_resolved, summary.deploy_skipped, summary.deploy_failed,
         ));
         out.push_str(&format!(
             "\n{} done, {} skipped, {} failed, {} stopped\n",
@@ -1409,6 +1444,7 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
     let (apply, yes) = (opts.apply, opts.yes);
     let live = crate::progress::detect(!opts.plan.progress, json, false);
     let display = RefCell::new(None);
+    let execution_started = RefCell::new(None);
     let mut confirm = |text: &str| {
         let answer = if yes {
             None
@@ -1424,7 +1460,10 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
         };
         let proceed = gate(apply, yes, interactive, answer.as_deref()) == Gate::Proceed;
         if proceed {
-            *display.borrow_mut() = Some(crate::progress::Progress::start(live));
+            let started = *execution_started
+                .borrow_mut()
+                .get_or_insert_with(Instant::now);
+            *display.borrow_mut() = Some(crate::progress::Progress::start_at(live, started));
         }
         proceed
     };
@@ -1439,7 +1478,10 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
         );
         let proceed = answer.trim() == "yes";
         if proceed {
-            *display.borrow_mut() = Some(crate::progress::Progress::start(live));
+            let started = *execution_started
+                .borrow_mut()
+                .get_or_insert_with(Instant::now);
+            *display.borrow_mut() = Some(crate::progress::Progress::start_at(live, started));
         }
         proceed
     };

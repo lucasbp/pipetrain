@@ -510,6 +510,8 @@ pub struct StepReport {
     pub expected_runs: Vec<ExpectedRun>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution: Option<Resolution>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deploy_outcome: Option<DeployOutcome>,
 }
 
 impl StepReport {
@@ -526,7 +528,59 @@ impl StepReport {
             deploy_prediction: None,
             expected_runs: Vec::new(),
             resolution: None,
+            deploy_outcome: None,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeployOutcome {
+    Confirmed,
+    Dispensed,
+    Indeterminate,
+    Skipped,
+    Failed,
+}
+
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct Summary {
+    pub merged: usize,
+    pub earlier_merges_checked: usize,
+    pub deploy_confirmed: usize,
+    pub deploy_dispensed: usize,
+    pub deploy_indeterminate: usize,
+    pub deploy_resolved: usize,
+    pub deploy_skipped: usize,
+    pub deploy_failed: usize,
+    pub failed: usize,
+    pub stopped: usize,
+}
+
+impl Summary {
+    pub fn from_steps<'a>(steps: impl IntoIterator<Item = &'a StepReport>) -> Self {
+        let mut summary = Self::default();
+        for step in steps {
+            summary.failed += usize::from(step.status == Status::Failed);
+            summary.stopped += usize::from(step.status == Status::Stopped);
+            if !matches!(step.kind, Kind::Merge | Kind::Resume) || step.merge_sha.is_none() {
+                continue;
+            }
+            summary.merged += usize::from(step.kind == Kind::Merge);
+            summary.earlier_merges_checked += usize::from(step.kind == Kind::Resume);
+            if step.resolution.is_some() {
+                summary.deploy_resolved += 1;
+                continue;
+            }
+            match step.deploy_outcome {
+                Some(DeployOutcome::Confirmed) => summary.deploy_confirmed += 1,
+                Some(DeployOutcome::Dispensed) => summary.deploy_dispensed += 1,
+                Some(DeployOutcome::Indeterminate) | None => summary.deploy_indeterminate += 1,
+                Some(DeployOutcome::Skipped) => summary.deploy_skipped += 1,
+                Some(DeployOutcome::Failed) => summary.deploy_failed += 1,
+            }
+        }
+        summary
     }
 }
 
@@ -538,6 +592,8 @@ pub struct NotMerging {
 
 #[derive(Debug, Serialize)]
 pub struct Report {
+    pub max_parallel: usize,
+    pub summary: Summary,
     pub preflight: Vec<crate::model::Readiness>,
     pub state: StatePreview,
     #[serde(skip_serializing_if = "std::ops::Not::not")]

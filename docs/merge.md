@@ -100,15 +100,19 @@ When the PRs of a bundle were retargeted to `deploy/<date>-<base>` (see `bundle 
 
 ## Confirmation and gates
 
-On an interactive terminal, execution shows up to three live lines after confirmation: queue counts and elapsed time, the current organization/repository/PR and destination branch in bold when styling is enabled, and the current operation or deployment detail. Each line fits the current terminal width. For example:
+Dry runs and apply confirmations show the configured limit before the steps, for example `up to 4 PRs at a time, one per repository (including different bases)`. This is an upper bound: dependencies, gates and the existing repository exclusion can reduce concurrency. A repository cannot run two workers even when the PR bases differ.
+
+On an interactive terminal, execution shows one header with queue counters and total elapsed time, followed by one row for every active PR. Each row includes organization/repository/PR, destination branch, current phase and that PR's elapsed time. Sequential execution uses the same format with one active row. For example on a sufficiently wide terminal:
 
 ```text
-⠋ 3/50 completed, 2 active, 47 remaining · 1m 12s
-  acme/api#123 → main
-  deploy acme/api: 1 of 2 workflow runs still going
+⠋ waiting: 0, running: 2, merged: 1, deploy confirmed: 0, failed/stopped: 0 · 1m 12s
+acme/api#123 → main | waiting for deploy: .github/workflows/deploy.yml; deploy acme/api: 1 of 1 expected workflow runs still going · 1m 10s
+acme/ui#42 → main | readiness: checking merge readiness of acme/ui#42 · 2.0 s
 ```
 
-Sequential status retains the step index; parallel status reports completed steps, active workers and unfinished steps. An active step is included in the unfinished count. The total includes merge, resume, gate, package wait and deploy PR steps. The status changes during readiness checks, the merge request, deployment workflow discovery, running workflows and the final completion check. The spinner keeps moving between API polls, pauses before gate prompts and clears before final results. `--no-progress`, JSON output, CI and redirected stderr disable the animation. These status updates do not change merge order, checks, polling intervals or resumability. Cancellation does not undo merges already accepted by GitHub; durable pending records remain available for recovery.
+`waiting` excludes active and finished operations. `running` counts active operations, including their deploy waits. Merge, resume, gate, package wait and deploy PR steps all contribute to waiting and running counts. Gate and other non-PR operations use their own target label. `merged` counts PR merge requests accepted during this invocation, even when deploy is still running or fails. Earlier merges resumed from state do not increase it. `deploy confirmed` counts completed original deploy confirmations, excluding dispensed waits and resolutions by later deploys. `failed/stopped` counts terminal failures and stops. Blocked or skipped steps leave the waiting count without becoming confirmed deploys.
+
+Phases include readiness, merging, waiting for deploy (with expected workflow paths, or a legacy polling label), resolving a later deploy and gate confirmation. Every active row is retained, including in narrow terminals; each line is truncated to the current terminal width. Total and per-PR clocks advance between polls, and a phase update retains the PR's start time. The total clock continues across gate prompts. The spinner pauses before gate prompts and clears before final results. `--no-progress`, JSON output, CI and redirected stderr disable the animation. These status updates do not change merge order, checks, polling intervals or resumability. Cancellation does not undo merges already accepted by GitHub; durable pending records remain available for recovery.
 
 - `--apply` shows the steps and asks you to type `yes`. `--yes` skips only this question.
 - Every gate and unpublished package wait asks again, even with `--yes`. Without a terminal it does not ask: the step is `stopped` and the run ends.
@@ -143,7 +147,7 @@ no_deploy_repos = ["acme/docs"]
 
 ## Resuming
 
-Text output streams each completed step once. Its final summary counts PRs merged during this invocation separately from earlier merges checked. `done` counts completed steps, including their deploy waits, rather than successful merge requests alone. A PR whose merge succeeded but whose deployment failed stays merged and remains pending in the state file. The JSON output continues to contain every step, its status, merge SHA and deploy result.
+Text output streams each completed step once. Its final summary counts PRs merged during this invocation separately from earlier merges checked, then lists deploys confirmed, dispensed, indeterminate, resolved by later deploy, skipped and failed. A dispensed wait is not a confirmed deploy. An indeterminate prediction stays indeterminate in these new counters even if legacy polling returns a successful result; existing step statuses and exit codes retain their meaning. `done` counts completed steps, including their deploy waits, rather than successful merge requests alone. A PR whose merge succeeded but whose deployment failed stays merged and remains pending in the state file. The JSON output continues to contain every step, its status, merge SHA and deploy result.
 
 Before it merges, pipetrain records the PR in a state file. After the deploy passes, or all detected workflow runs are skipped, it removes the record. A run that is stopped, fails, is interrupted or loses its connection leaves the record, and the next `merge --apply` starts by finishing that wait, before it touches the queue:
 
@@ -213,6 +217,12 @@ Neither stale markers nor a different current selection or profile filter, disca
 | `questions` | string[] | The `? ...` lines of the plan. |
 | `preflight` | Readiness[] | Additive readiness snapshot for every visible selected PR, including blocked PRs, using the same shape as [plan-json.md](plan-json.md#readiness). |
 | `state` | StatePreview | Additive snapshot of local state before execution, also present in dry runs. |
+| `max_parallel` | integer | Additive configured concurrency upper bound, also present in dry runs. The existing exclusion is one worker per repository, including different bases. |
+| `summary` | MergeSummary | Additive invocation result counts, all zero before execution, including dry runs and declined confirmations. |
+
+`MergeSummary` contains integer fields `merged`, `earlier_merges_checked`, `deploy_confirmed`, `deploy_dispensed`, `deploy_indeterminate`, `deploy_resolved`, `deploy_skipped`, `deploy_failed`, `failed` and `stopped`. `merged` counts merge steps with a merge SHA; `earlier_merges_checked` counts resume steps with a merge SHA. The six deploy counts partition those merged or checked PRs: original deploy confirmed, wait dispensed by configuration or filters, outcome not reliably determined (including a timeout, unreadable discovery or runs, or interrupted post-merge bookkeeping), audited resolution by a later deploy, all observed workflows skipped, and original deploy failed. A later resolution increments only `deploy_resolved`, retaining the original failure evidence. `failed` and `stopped` count steps of every kind with those statuses, including readiness and gate failures without a merge. These counts do not include historical discarded records and do not change existing status semantics.
+
+`deploy_outcome` is an additive optional step field with values `confirmed`, `dispensed`, `indeterminate`, `skipped` or `failed`. It records the original deploy evaluation separately from the step status; `resolution` takes precedence in summary counts. Legacy pending records still follow their existing polling rules: a passed legacy poll without a saved indeterminate prediction counts as confirmed. A successful poll with an explicitly indeterminate prediction is counted as indeterminate. A merged step without a deploy outcome is also counted as indeterminate. Gates and steps that never merged omit it.
 
 `StatePreview` contains `path: string | null`, `file_age_seconds: integer | null`, `file_age: string`, `created_at: string | null`, `updated_at: string | null`, `profile: string | null` (recorded origin), `selected_profile: string | null` (current selection), `queue_id: string | null`, `stale_pending_hours: integer` and `pending: PendingPreview[]`. Unknown metadata is `null`; age strings use `age Hh Mm Ss` or `age unknown`. File age measures the last filesystem modification, independently of the stored timestamps. `path` is null only for library callers using memory-only storage.
 
