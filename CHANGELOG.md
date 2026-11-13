@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.0
 
 - Merge deploy waits and both mergeability checks use injectable monotonic wall-clock deadlines, include HTTP, pacing and retry time, and cap every wait sleep by the remaining time, including no-run grace.
 - Merge retries transient transport and HTTP 5xx deploy reads up to three consecutive times, resetting on recovery and stopping resumably with pending state after exhaustion.
