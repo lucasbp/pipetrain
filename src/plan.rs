@@ -6,7 +6,7 @@ use crate::bundle::{self, Bundle};
 use crate::config::Rules;
 use crate::conflicts::{self, Conflict, Snapshot};
 use crate::discovery::Skipped;
-use crate::model::{Pr, Question};
+use crate::model::{Pr, Question, Readiness};
 use crate::planner::{self, DepState, Item, PlanInput, Rule};
 use crate::profile::ProfileSource;
 use crate::publishers::{Publishers, References};
@@ -67,6 +67,7 @@ pub struct Plan {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shown_authors: Option<Vec<String>>,
     pub items: Vec<Item>,
+    pub preflight: Vec<Readiness>,
     pub gate: Vec<String>,
     pub lanes: Vec<Vec<String>>,
     pub bundles: Vec<Bundle>,
@@ -150,6 +151,28 @@ fn stacked_pairs(items: &[Item]) -> BTreeSet<(String, String)> {
 
 pub fn build(rules: &Rules, gathered: Gathered) -> Plan {
     let snapshots = snapshots(&gathered.ready);
+    let selected: Vec<&Pr> = gathered
+        .ready
+        .iter()
+        .map(|(pr, _)| pr)
+        .chain(gathered.skipped.iter().map(|skipped| &skipped.pr))
+        .collect();
+    let mut preflight: Vec<Readiness> = selected.iter().map(|pr| {
+        let reasons = gathered.skipped.iter().find(|skipped| skipped.pr.key == pr.key)
+            .map(|skipped| skipped.reasons.clone()).unwrap_or_default();
+        let mut readiness = pr.readiness(reasons);
+        if !pr.default_branch.is_empty() && pr.base_ref != pr.default_branch
+            && !bundle::is_stacked(&pr.base_ref, &gathered.train_prefix)
+            && !selected.iter().any(|parent| parent.key != pr.key
+                && parent.key.slug().eq_ignore_ascii_case(&pr.key.slug()) && parent.head_ref == pr.base_ref)
+        {
+            readiness.warnings.push(format!(
+                "base not landed: base `{}` is not default `{}` or a train branch and no selected parent has that head; select the parent PR or verify the intended destination",
+                pr.base_ref, pr.default_branch
+            ));
+        }
+        readiness
+    }).collect();
     let planned = planner::plan(PlanInput {
         rules,
         prs: gathered.ready,
@@ -159,6 +182,38 @@ pub fn build(rules: &Rules, gathered: Gathered) -> Plan {
     });
     let questions = merged(gathered.questions, planned.questions);
     let skipped = skipped_out(gathered.skipped);
+    for readiness in &mut preflight {
+        if readiness.status == "blocked" {
+            continue;
+        }
+        if let Some(item) = planned.items.iter().find(|item| item.id == readiness.id) {
+            let predecessors: Vec<String> = item
+                .after
+                .iter()
+                .filter(|dep| planned.items.iter().any(|prior| prior.id == dep.id))
+                .map(|dep| format!("{}: {}", dep.id, dep.reason))
+                .collect();
+            let unresolved: Vec<String> = questions
+                .iter()
+                .filter(|question| {
+                    question.pr.is_none() || question.pr.as_deref() == Some(&readiness.id)
+                })
+                .map(|question| question.message.clone())
+                .collect();
+            if !predecessors.is_empty() || !unresolved.is_empty() || item.manual_pause {
+                readiness.status = "waiting".to_string();
+                readiness.causes = predecessors;
+                readiness.causes.extend(unresolved);
+                if item.manual_pause {
+                    readiness
+                        .causes
+                        .push("manual gate requires confirmation".to_string());
+                }
+                readiness.next_step = "complete the earlier steps and resolve questions or confirm the gate, then revalidate this PR".to_string();
+            }
+        }
+    }
+    preflight.sort_by(|a, b| a.id.cmp(&b.id));
     let bundles = bundle::suggest(
         &planned.items,
         &gathered.deploy_branch,
@@ -176,6 +231,7 @@ pub fn build(rules: &Rules, gathered: Gathered) -> Plan {
         orgs: gathered.orgs,
         shown_authors: None,
         items: planned.items,
+        preflight,
         gate: planned.gate,
         lanes: planned.lanes,
         bundles,
@@ -201,6 +257,20 @@ pub fn build(rules: &Rules, gathered: Gathered) -> Plan {
 }
 
 impl Plan {
+    pub fn has_eligible(&self) -> bool {
+        self.preflight
+            .iter()
+            .any(|pr| pr.status == "eligible" && !self.is_hidden(&pr.id))
+    }
+
+    pub fn preflight_lines(&self) -> Vec<String> {
+        self.preflight
+            .iter()
+            .filter(|pr| !self.is_hidden(&pr.id))
+            .flat_map(Readiness::lines)
+            .collect()
+    }
+
     pub fn is_hidden(&self, id: &str) -> bool {
         self.items.iter().any(|i| i.id == id && i.hidden)
             || self.skipped.iter().any(|s| s.id == id && s.hidden)

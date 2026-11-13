@@ -1,8 +1,7 @@
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::emit::PAUSE_LINE;
@@ -10,9 +9,10 @@ use crate::github::Run;
 
 mod storage;
 
-pub use storage::resolve_state_path;
+pub use storage::{StatePreview, resolve_state_path};
 
-pub const SCHEMA: u32 = 1;
+pub const SCHEMA: u32 = 2;
+pub const REPORT_SCHEMA: u32 = 1;
 pub const STOPPED: &str = "stopped after an earlier failure";
 pub const EXIT_STOPPED: i32 = 5;
 
@@ -106,6 +106,100 @@ pub fn judge(all: &[Run]) -> Verdict {
     }
 }
 
+pub fn judge_expected(all: &[Run], prediction: &crate::workflows::PushRuns) -> Verdict {
+    let crate::workflows::PushRuns::Expected {
+        workflows,
+        chained_workflows,
+        untracked_chains,
+    } = prediction
+    else {
+        return judge(all);
+    };
+    let paths: Vec<_> = workflows.iter().chain(chained_workflows).collect();
+    let runs: Vec<_> = all
+        .iter()
+        .filter(|run| {
+            paths.contains(&&run.path)
+                && !(run.status == "completed"
+                    && run.conclusion.as_deref() == Some("cancelled")
+                    && all.iter().any(|other| {
+                        other.path == run.path && other.id > run.id && same_workflow(other, run)
+                    }))
+        })
+        .collect();
+    for run in &runs {
+        if run.status == "completed"
+            && !matches!(run.conclusion.as_deref(), Some("success" | "skipped"))
+        {
+            return Verdict::Failed(format!(
+                "workflow {} ended as {}: {}",
+                run.name,
+                run.conclusion.as_deref().unwrap_or("unknown"),
+                run.url
+            ));
+        }
+    }
+    if !untracked_chains.is_empty() {
+        return Verdict::Waiting(
+            untracked_chains
+                .iter()
+                .map(|path| format!("chained workflow {path} cannot be tracked"))
+                .collect::<Vec<_>>()
+                .join("; "),
+        );
+    }
+    if all.is_empty() {
+        return Verdict::NoRuns;
+    }
+    let missing: Vec<_> = paths
+        .iter()
+        .filter(|path| !runs.iter().any(|run| &run.path == **path))
+        .map(|path| path.as_str())
+        .collect();
+    if !missing.is_empty() || paths.is_empty() {
+        return Verdict::Waiting(format!(
+            "waiting for expected workflows: {}",
+            missing.join(", ")
+        ));
+    }
+    let running = runs.iter().filter(|run| run.status != "completed").count();
+    if running > 0 {
+        return Verdict::Waiting(format!(
+            "{running} of {} expected workflow runs still going",
+            runs.len()
+        ));
+    }
+    if runs
+        .iter()
+        .all(|run| run.conclusion.as_deref() == Some("skipped"))
+    {
+        Verdict::Skipped(runs.len())
+    } else {
+        Verdict::Passed(runs.len())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExpectedRun {
+    pub path: String,
+    pub name: String,
+    pub html_url: String,
+    pub status: String,
+    pub conclusion: Option<String>,
+}
+
+impl From<&Run> for ExpectedRun {
+    fn from(run: &Run) -> Self {
+        Self {
+            path: run.path.clone(),
+            name: run.name.clone(),
+            html_url: run.url.clone(),
+            status: run.status.clone(),
+            conclusion: run.conclusion.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Continuation {
     pub independent: BTreeMap<String, String>,
@@ -122,12 +216,16 @@ pub enum DependencyFailure {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pending {
+    #[serde(default)]
+    pub recorded_at: Option<String>,
     pub id: String,
     pub repo: String,
     pub base: String,
     pub sha: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation: Option<Continuation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deploy_prediction: Option<crate::workflows::PushRuns>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,8 +235,58 @@ pub struct DeployPr {
     pub ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditAction {
+    Discarded,
+    ResolvedByLaterDeploy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Resolution {
+    pub status: AuditAction,
+    pub sha: String,
+    pub runs: Vec<ExpectedRun>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditEntry {
+    pub id: String,
+    pub repo: String,
+    pub base: String,
+    pub sha: Option<String>,
+    pub action: AuditAction,
+    pub reason: String,
+    pub recorded_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<Resolution>,
+}
+
+impl AuditEntry {
+    pub fn new(pending: &Pending, action: AuditAction, reason: String) -> Self {
+        Self {
+            id: pending.id.clone(),
+            repo: pending.repo.clone(),
+            base: pending.base.clone(),
+            sha: pending.sha.clone(),
+            action,
+            reason,
+            recorded_at: chrono::Utc::now().to_rfc3339(),
+            resolution: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct State {
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+    #[serde(default)]
+    pub profile: Option<String>,
+    #[serde(default)]
+    pub queue_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bump: Option<crate::consumer_bump::journal::Journal>,
     #[serde(default)]
@@ -149,6 +297,8 @@ pub struct State {
     pub deploy_prs: Vec<DeployPr>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub active_jobs: Vec<String>,
+    #[serde(default)]
+    pub audit: Vec<AuditEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,6 +309,7 @@ pub enum StoreOperation {
         sha: String,
     },
     Remove(String),
+    Archive(AuditEntry),
     AddDeployPr {
         slug: String,
         branch: String,
@@ -176,6 +327,7 @@ pub struct Store {
     path: Option<PathBuf>,
     pub state: State,
     remote: Option<RemoteStore>,
+    lock: Option<std::fs::File>,
 }
 
 pub fn default_state_path() -> Option<PathBuf> {
@@ -188,31 +340,13 @@ impl Store {
     pub fn in_memory() -> Self {
         Self {
             path: None,
-            state: State::default(),
+            state: State {
+                schema: SCHEMA,
+                ..State::default()
+            },
             remote: None,
+            lock: None,
         }
-    }
-
-    pub fn open(path: Option<PathBuf>) -> Result<Self> {
-        let Some(path) = path else {
-            return Ok(Self::in_memory());
-        };
-        let state = match fs::read_to_string(&path) {
-            Ok(text) => serde_json::from_str(&text)
-                .with_context(|| format!("the merge state file {} is not valid", path.display()))?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => State::default(),
-            Err(error) => {
-                return Err(anyhow!(
-                    "cannot read the merge state file {}: {error}",
-                    path.display()
-                ));
-            }
-        };
-        Ok(Self {
-            path: Some(path),
-            state,
-            remote: None,
-        })
     }
 
     pub fn remote(
@@ -223,6 +357,7 @@ impl Store {
             path: None,
             state,
             remote: Some(Box::new(forward)),
+            lock: None,
         }
     }
 
@@ -238,6 +373,7 @@ impl Store {
             StoreOperation::Add(pending) => self.add(pending),
             StoreOperation::SetSha { id, sha } => self.set_sha(&id, &sha),
             StoreOperation::Remove(id) => self.remove(&id),
+            StoreOperation::Archive(entry) => self.archive(entry),
             StoreOperation::AddDeployPr { slug, branch, id } => {
                 self.add_deploy_pr(&slug, &branch, &id)
             }
@@ -245,20 +381,6 @@ impl Store {
                 self.remove_deploy_pr(&slug, &branch)
             }
         }
-    }
-
-    pub fn save(&mut self) -> Result<()> {
-        self.state.schema = SCHEMA;
-        let Some(path) = &self.path else {
-            return Ok(());
-        };
-        if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
-        }
-        let temp = path.with_extension("json.tmp");
-        fs::write(&temp, serde_json::to_string_pretty(&self.state)?)
-            .with_context(|| format!("cannot write {}", temp.display()))?;
-        fs::rename(&temp, path).with_context(|| format!("cannot write {}", path.display()))
     }
 
     pub fn add(&mut self, pending: Pending) -> Result<()> {
@@ -283,6 +405,29 @@ impl Store {
         self.forward(StoreOperation::Remove(id.to_string()))?;
         self.state.pending.retain(|p| p.id != id);
         self.save()
+    }
+
+    pub fn archive(&mut self, entry: AuditEntry) -> Result<()> {
+        if !self.state.pending.iter().any(|pending| {
+            pending.id == entry.id
+                && pending.repo == entry.repo
+                && pending.base == entry.base
+                && pending.sha == entry.sha
+        }) {
+            anyhow::bail!(
+                "pending record {} no longer matches the audit entry",
+                entry.id
+            );
+        }
+        self.forward(StoreOperation::Archive(entry.clone()))?;
+        let previous = self.state.clone();
+        self.state.pending.retain(|pending| pending.id != entry.id);
+        self.state.audit.push(entry);
+        if let Err(error) = self.save() {
+            self.state = previous;
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub fn add_deploy_pr(&mut self, slug: &str, branch: &str, id: &str) -> Result<()> {
@@ -359,6 +504,14 @@ pub struct StepReport {
     pub blocked_by: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bump: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deploy_prediction: Option<crate::workflows::PushRuns>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expected_runs: Vec<ExpectedRun>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<Resolution>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deploy_outcome: Option<DeployOutcome>,
 }
 
 impl StepReport {
@@ -372,7 +525,62 @@ impl StepReport {
             deploy: None,
             blocked_by: None,
             bump: None,
+            deploy_prediction: None,
+            expected_runs: Vec::new(),
+            resolution: None,
+            deploy_outcome: None,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeployOutcome {
+    Confirmed,
+    Dispensed,
+    Indeterminate,
+    Skipped,
+    Failed,
+}
+
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct Summary {
+    pub merged: usize,
+    pub earlier_merges_checked: usize,
+    pub deploy_confirmed: usize,
+    pub deploy_dispensed: usize,
+    pub deploy_indeterminate: usize,
+    pub deploy_resolved: usize,
+    pub deploy_skipped: usize,
+    pub deploy_failed: usize,
+    pub failed: usize,
+    pub stopped: usize,
+}
+
+impl Summary {
+    pub fn from_steps<'a>(steps: impl IntoIterator<Item = &'a StepReport>) -> Self {
+        let mut summary = Self::default();
+        for step in steps {
+            summary.failed += usize::from(step.status == Status::Failed);
+            summary.stopped += usize::from(step.status == Status::Stopped);
+            if !matches!(step.kind, Kind::Merge | Kind::Resume) || step.merge_sha.is_none() {
+                continue;
+            }
+            summary.merged += usize::from(step.kind == Kind::Merge);
+            summary.earlier_merges_checked += usize::from(step.kind == Kind::Resume);
+            if step.resolution.is_some() {
+                summary.deploy_resolved += 1;
+                continue;
+            }
+            match step.deploy_outcome {
+                Some(DeployOutcome::Confirmed) => summary.deploy_confirmed += 1,
+                Some(DeployOutcome::Dispensed) => summary.deploy_dispensed += 1,
+                Some(DeployOutcome::Indeterminate) | None => summary.deploy_indeterminate += 1,
+                Some(DeployOutcome::Skipped) => summary.deploy_skipped += 1,
+                Some(DeployOutcome::Failed) => summary.deploy_failed += 1,
+            }
+        }
+        summary
     }
 }
 
@@ -383,7 +591,22 @@ pub struct NotMerging {
 }
 
 #[derive(Debug, Serialize)]
+pub struct ApiEstimate {
+    pub discovery: u64,
+    pub checks: u64,
+    pub deploy_polls: u64,
+    pub total: u64,
+    pub budget: u32,
+    pub exceeds_budget: bool,
+}
+
+#[derive(Debug, Serialize)]
 pub struct Report {
+    pub api_estimate: ApiEstimate,
+    pub max_parallel: usize,
+    pub summary: Summary,
+    pub preflight: Vec<crate::model::Readiness>,
+    pub state: StatePreview,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub bump_enabled: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -418,12 +641,14 @@ impl Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn run(name: &str, status: &str, conclusion: Option<&str>) -> Run {
         Run {
             id: 0,
             workflow_id: 0,
             name: name.to_string(),
+            path: format!(".github/workflows/{name}.yml"),
             status: status.to_string(),
             conclusion: conclusion.map(str::to_string),
             url: format!("https://example.test/{name}"),
@@ -619,11 +844,13 @@ mod tests {
         assert!(store.state.pending.is_empty());
         store
             .add(Pending {
+                recorded_at: None,
                 id: "acme/api#1".to_string(),
                 repo: "acme/api".to_string(),
                 base: "main".to_string(),
                 sha: None,
                 continuation: None,
+                deploy_prediction: None,
             })
             .unwrap();
         store.set_sha("acme/api#1", "abc123").unwrap();

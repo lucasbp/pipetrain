@@ -91,6 +91,37 @@ pub struct Item {
     pub hidden: bool,
 }
 
+pub const STACKED_STRATEGY: &str =
+    "children land into the parent branch first; the parent is revalidated after";
+
+pub fn stacked_chain(item: &Item, items: &[Item]) -> Option<String> {
+    let mut chain = vec![item.id.clone()];
+    let mut current = item;
+    let mut visited = BTreeSet::from([item.id.as_str()]);
+    loop {
+        let parents: Vec<_> = items
+            .iter()
+            .filter(|parent| {
+                parent.org.eq_ignore_ascii_case(&current.org)
+                    && parent.repo.eq_ignore_ascii_case(&current.repo)
+                    && parent.head == current.base
+                    && parent.id != current.id
+            })
+            .collect();
+        match parents.as_slice() {
+            [] => {
+                chain.push(current.base.clone());
+                return (chain.len() > 2).then(|| chain.join(" → "));
+            }
+            [parent] if visited.insert(parent.id.as_str()) => {
+                chain.push(format!("{} (#{})", current.base, parent.number));
+                current = parent;
+            }
+            _ => return None,
+        }
+    }
+}
+
 pub struct PlanInput<'a> {
     pub rules: &'a Rules,
     pub prs: Vec<(Pr, String)>,
@@ -477,10 +508,8 @@ impl<'a> Builder<'a> {
 
     fn apply_layers(&mut self) {
         let mut sets: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-        for i in 0..self.prs.len() {
-            sets.entry(self.prs[i].head_ref.clone())
-                .or_default()
-                .push(i);
+        for (i, pr) in self.prs.iter().enumerate() {
+            sets.entry(pr.head_ref.clone()).or_default().push(i);
         }
         for (branch, members) in sets {
             let repos: HashSet<String> = members
@@ -667,6 +696,18 @@ pub fn plan(input: PlanInput<'_>) -> Planned {
             }
         })
         .collect();
+
+    for item in &items {
+        if !items.iter().any(|child| {
+            child.org.eq_ignore_ascii_case(&item.org)
+                && child.repo.eq_ignore_ascii_case(&item.repo)
+                && child.base == item.head
+                && child.id != item.id
+        }) && let Some(chain) = stacked_chain(item, &items)
+        {
+            b.notes.push(format!("stack: {chain}; {STACKED_STRATEGY}"));
+        }
+    }
 
     let lane_ids = lanes
         .iter()

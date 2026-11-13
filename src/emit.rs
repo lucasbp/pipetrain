@@ -9,6 +9,7 @@ use crate::planner::{Item, Rule, is_late_rule};
 
 pub const PAUSE_LINE: &str = "# pause: confirm DDL/infra before continuing";
 pub const EXIT_QUESTIONS: i32 = 3;
+pub const EXIT_NO_ELIGIBLE: i32 = 4;
 pub const REPO_LEVEL: &str = "(repo)";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -176,9 +177,7 @@ pub fn queue_lines(plan: &Plan) -> Vec<String> {
             item_lines(plan, i)
         }
     }));
-    if lines.is_empty() {
-        return lines;
-    }
+
     let mut out: Vec<String> = plan
         .conflicts
         .iter()
@@ -187,6 +186,11 @@ pub fn queue_lines(plan: &Plan) -> Vec<String> {
         .collect();
     out.extend(plan.bundles.iter().map(bundle_line));
     out.extend(lines);
+    out.extend(
+        plan.preflight_lines()
+            .into_iter()
+            .map(|line| format!("# preflight: {}", line.replace(['\r', '\n'], " "))),
+    );
     out
 }
 

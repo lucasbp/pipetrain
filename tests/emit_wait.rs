@@ -17,6 +17,9 @@ fn pr(slug: &str, number: u64, head: &str) -> Pr {
         url: format!("github.com/{slug}/pull/{number}"),
         body: String::new(),
         head_ref: head.to_string(),
+        default_branch: String::new(),
+        merge_state_status: String::new(),
+        check_details: Vec::new(),
         base_ref: "master".to_string(),
         head_sha: format!("{number:040x}"),
         base_sha: String::new(),
@@ -95,7 +98,10 @@ fn without_waits(lines: &[String]) -> Vec<String> {
     lines
         .iter()
         .filter(|l| {
-            !l.starts_with("# wait") && !l.starts_with("# step") && !l.starts_with("# lane")
+            !l.starts_with("# wait")
+                && !l.starts_with("# step")
+                && !l.starts_with("# lane")
+                && !l.starts_with("# preflight:")
         })
         .cloned()
         .collect()

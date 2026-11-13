@@ -16,7 +16,7 @@ struct Coordinator<'a, 'h> {
     steps: &'a mut [StepReport],
     bundles: &'a BTreeMap<String, Bundled>,
     failures: failure::DeployFailures,
-    states: BTreeMap<String, scheduler::Status>,
+    progress_state: crate::progress::merge::MergeProgress,
     control_client: Client,
     events: Vec<StepReport>,
     bump_checked: BTreeMap<String, Option<String>>,
@@ -74,7 +74,17 @@ impl scheduler::Coordinator for Coordinator<'_, '_> {
             scheduler::Status::Pending => {}
         }
         self.store.save().map_err(|error| error.to_string())?;
-        self.states.insert(id.to_string(), status.clone());
+        if *status == scheduler::Status::Running {
+            let step = &self.steps[index];
+            self.progress_state.start(
+                index,
+                progress_target(self.env.plan, &self.store.state, step),
+                step.kind,
+            );
+        } else if *status != scheduler::Status::Pending {
+            self.progress_state.finish(index, &self.steps[index]);
+        }
+        (self.hooks.progress)(&self.progress_state.frame());
         if !matches!(
             status,
             scheduler::Status::Running | scheduler::Status::Pending
@@ -154,6 +164,12 @@ impl scheduler::Coordinator for Coordinator<'_, '_> {
     }
 
     fn confirm(&mut self, job: &Job) -> Result<(), String> {
+        if matches!(
+            self.steps[step_index(&job.id)?].kind,
+            Kind::Gate | Kind::Wait
+        ) {
+            self.progress(&job.id, "awaiting gate confirmation");
+        }
         let step = &mut self.steps[step_index(&job.id)?];
         if matches!(step.kind, Kind::Gate | Kind::Wait) {
             gate_step(self.env, self.hooks, step);
@@ -166,27 +182,17 @@ impl scheduler::Coordinator for Coordinator<'_, '_> {
 
     fn progress(&mut self, id: &str, message: &str) {
         if let Ok(index) = step_index(id) {
-            let total = self.steps.len();
-            let completed = self
-                .states
-                .values()
-                .filter(|status| {
-                    !matches!(
-                        status,
-                        scheduler::Status::Pending | scheduler::Status::Running
-                    )
-                })
-                .count();
-            let active = self
-                .states
-                .values()
-                .filter(|status| **status == scheduler::Status::Running)
-                .count();
-            let target = progress_target(self.env.plan, &self.store.state, &self.steps[index]);
-            (self.hooks.progress)(&format!(
-                "{completed}/{total} completed, {active} active, {} remaining\n{target}\n{message}",
-                total - completed,
-            ));
+            let step = &self.steps[index];
+            self.progress_state.start(
+                index,
+                progress_target(self.env.plan, &self.store.state, step),
+                step.kind,
+            );
+            if step.kind == Kind::Merge && message.starts_with("merged ") {
+                self.progress_state.merged(index);
+            }
+            self.progress_state.update(index, message);
+            (self.hooks.progress)(&self.progress_state.frame());
         }
     }
 
@@ -199,6 +205,7 @@ impl scheduler::Coordinator for Coordinator<'_, '_> {
             Checkpoint::State(operation) => {
                 let valid = match &operation {
                     StoreOperation::Add(pending) => pending.id == *target,
+                    StoreOperation::Archive(entry) => entry.id == *target,
                     StoreOperation::SetSha { id, .. } | StoreOperation::Remove(id) => id == target,
                     StoreOperation::AddDeployPr { id, .. } => id == target,
                     StoreOperation::RemoveDeployPr { slug, branch } => {
@@ -348,6 +355,8 @@ pub(super) fn execute(
         DependencyFailure::Stop => scheduler::FailurePolicy::StopOnPublisher,
         DependencyFailure::Skip => scheduler::FailurePolicy::SkipDescendants,
     };
+    let total = steps.len();
+    let now = hooks.now;
     let mut coordinator = Coordinator {
         env,
         store,
@@ -355,7 +364,7 @@ pub(super) fn execute(
         steps,
         bundles,
         failures: failure::DeployFailures::default(),
-        states: BTreeMap::new(),
+        progress_state: crate::progress::merge::MergeProgress::new(total),
         control_client: client.fork(),
         events: Vec::new(),
         bump_checked: BTreeMap::new(),
@@ -364,6 +373,7 @@ pub(super) fn execute(
     let cfg = env.cfg;
     let settings = env.settings;
     let method = env.method;
+    let stacked = env.stacked.clone();
     let result = scheduler::run(
         &jobs,
         states,
@@ -391,6 +401,7 @@ pub(super) fn execute(
                 settings,
                 method,
                 readings: RefCell::new(BTreeMap::new()),
+                stacked: stacked.clone(),
             };
             let mut confirm = |_: &str| false;
             let mut gate = |_: &str| false;
@@ -404,6 +415,7 @@ pub(super) fn execute(
                 gate: &mut gate,
                 observe: &mut observe,
                 sleep: &mut sleep,
+                now,
                 progress: &mut emit,
             };
             (hooks.progress)("starting");
@@ -493,7 +505,9 @@ pub(super) fn execute(
             step.status = Status::Skipped;
             step.detail = STOPPED.to_string();
             step.blocked_by = stopped_by.clone();
+            coordinator.progress_state.finish(index, step);
             (coordinator.hooks.observe)(step);
+            (coordinator.hooks.progress)(&coordinator.progress_state.frame());
         }
     }
     if !result.coordinator_errors.is_empty() {

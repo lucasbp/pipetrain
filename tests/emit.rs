@@ -95,7 +95,10 @@ fn without_waits(lines: Vec<String>) -> Vec<String> {
     lines
         .into_iter()
         .filter(|l| {
-            !l.starts_with("# wait") && !l.starts_with("# step") && !l.starts_with("# lane")
+            !l.starts_with("# wait")
+                && !l.starts_with("# step")
+                && !l.starts_with("# lane")
+                && !l.starts_with("# preflight:")
         })
         .collect()
 }
@@ -124,7 +127,7 @@ fn every_ready_pr_appears_once_and_none_skipped() {
         assert_eq!(items.iter().filter(|l| ***l == wanted).count(), 1);
     }
     assert!(plan.skipped.iter().any(|s| s.id == SKIPPED));
-    assert!(!lines.iter().any(|l| l.contains(SKIPPED)));
+    assert!(!items.iter().any(|l| l.contains(SKIPPED)));
 }
 
 #[test]
@@ -213,7 +216,11 @@ fn an_empty_plan_has_no_queue_lines() {
     let mut plan = build();
     plan.items.clear();
     plan.gate.clear();
-    assert!(emit::queue_lines(&plan).is_empty());
+    assert!(
+        emit::queue_lines(&plan)
+            .iter()
+            .all(|line| line.starts_with('#'))
+    );
     assert_eq!(emit::exit_code(&plan), 0);
 }
 
@@ -336,7 +343,7 @@ fn the_gate_segment_is_first_and_uses_the_same_order() {
     let step = "# step 1".to_string();
     let lines: Vec<String> = lines
         .into_iter()
-        .filter(|l| !l.starts_with("# lane"))
+        .filter(|l| !l.starts_with("# lane") && !l.starts_with("# preflight:"))
         .collect();
     assert_eq!(
         lines,
@@ -417,6 +424,9 @@ fn late_pr(slug: &str, number: u64, head: &str) -> Pr {
         url: format!("https://github.com/{slug}/pull/{number}"),
         body: String::new(),
         head_ref: head.to_string(),
+        default_branch: String::new(),
+        merge_state_status: String::new(),
+        check_details: Vec::new(),
         base_ref: "master".to_string(),
         head_sha: format!("{number:040x}"),
         base_sha: String::new(),

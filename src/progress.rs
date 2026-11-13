@@ -1,3 +1,4 @@
+pub(crate) mod merge;
 mod term;
 
 #[cfg(test)]
@@ -39,6 +40,7 @@ pub struct Painter<W: Write> {
     enabled: bool,
     color: bool,
     drawn_lines: usize,
+    row_started: std::collections::BTreeMap<String, Instant>,
 }
 
 fn ellipsize(text: &str, budget: usize) -> String {
@@ -115,6 +117,7 @@ impl<W: Write> Painter<W> {
             enabled,
             color: false,
             drawn_lines: 0,
+            row_started: std::collections::BTreeMap::new(),
         }
     }
 
@@ -128,6 +131,20 @@ impl<W: Write> Painter<W> {
     }
 
     pub fn set_phase(&mut self, text: &str) {
+        if text.starts_with("waiting: ") {
+            let targets: Vec<_> = text
+                .lines()
+                .skip(1)
+                .filter_map(|line| line.split_once(" | ").map(|(target, _)| target.to_string()))
+                .collect();
+            self.row_started
+                .retain(|target, _| targets.contains(target));
+            for target in targets {
+                self.row_started.entry(target).or_insert_with(Instant::now);
+            }
+        } else {
+            self.row_started.clear();
+        }
         self.phase = Some(
             text.chars()
                 .map(|character| {
@@ -170,10 +187,11 @@ impl<W: Write> Painter<W> {
             self.finish();
             return;
         }
-        let mut lines = phase.split('\n').take(3);
+        let merge = phase.starts_with("waiting: ");
+        let mut lines = phase.split('\n').take(if merge { usize::MAX } else { 3 });
         let header = lines.next().unwrap_or_default();
         let mut extra: Vec<&str> = lines.collect();
-        if limit < 24 {
+        if limit < 24 && !merge {
             extra.truncate(1);
         }
         let mut counter = self
@@ -194,7 +212,17 @@ impl<W: Write> Painter<W> {
             "{hide}{erase}{glyph_on}{glyph}{off} {phase}{counter}{dim_on}{elapsed_text}{off}"
         );
         for (index, line) in extra.iter().enumerate() {
-            let fitted = ellipsize(line, limit);
+            let fitted = if merge {
+                let elapsed = line
+                    .split_once(" | ")
+                    .and_then(|(target, _)| self.row_started.get(target))
+                    .map(|started| format!(" · {}", crate::elapsed::format(started.elapsed())))
+                    .unwrap_or_default();
+                let elapsed = ellipsize(&elapsed, limit);
+                format!("{}{elapsed}", ellipsize(line, limit - elapsed.len()))
+            } else {
+                ellipsize(line, limit)
+            };
             let style = if self.color {
                 if index == 0 { BOLD } else { DIM }
             } else {
@@ -330,26 +358,41 @@ pub struct Progress {
 
 impl Progress {
     pub fn start(enabled: bool) -> Progress {
+        Self::start_at(enabled, Instant::now())
+    }
+
+    pub(crate) fn start_at(enabled: bool, started: Instant) -> Progress {
         if !enabled || !term::prepare() {
             return Progress { handle: None };
         }
         install_panic_hook();
-        Progress::start_into(
+        Progress::start_into_at(
             Box::new(std::io::stderr()),
             DEFAULT_DELAY,
             REDRAW,
             color_enabled(),
+            started,
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn start_into(
         writer: Box<dyn Write + Send>,
         delay: Duration,
         redraw: Duration,
         color: bool,
     ) -> Progress {
+        Self::start_into_at(writer, delay, redraw, color, Instant::now())
+    }
+
+    fn start_into_at(
+        writer: Box<dyn Write + Send>,
+        delay: Duration,
+        redraw: Duration,
+        color: bool,
+        started: Instant,
+    ) -> Progress {
         *active() = Some(Painter::new(writer, true, delay).with_color(color));
-        let started = Instant::now();
         let handle = thread::spawn(move || {
             loop {
                 thread::park_timeout(redraw);

@@ -35,6 +35,7 @@ pub mod order;
 pub mod orgs;
 pub mod profiles;
 mod resolve;
+pub mod state;
 pub mod update;
 
 const MAX_EXTERNAL_REFS: usize = 20;
@@ -53,6 +54,7 @@ pub struct PlanOptions {
     pub cache: CacheMode,
     pub progress: bool,
     pub check_feeds: bool,
+    pub strict: bool,
 }
 
 struct Collected {
@@ -330,7 +332,12 @@ fn deliver(built: &Plan, json: bool, mode: Option<Emit>) -> Result<i32> {
 
 pub fn plan(opts: PlanOptions) -> Result<i32> {
     let (built, _) = build_plan(&opts)?;
-    deliver(&built, opts.json, opts.emit)
+    let code = deliver(&built, opts.json, opts.emit)?;
+    Ok(if opts.strict && !built.has_eligible() {
+        emit::EXIT_NO_ELIGIBLE
+    } else {
+        code
+    })
 }
 
 pub(crate) fn build_plan(opts: &PlanOptions) -> Result<(Plan, Client)> {

@@ -78,9 +78,12 @@ pub struct Config {
 #[serde(default, deny_unknown_fields)]
 pub struct MergeConfig {
     pub state_file: Option<PathBuf>,
+    pub stale_pending_hours: u64,
     pub method: String,
     pub timeout_minutes: u64,
     pub poll_seconds: u64,
+    pub package_poll_seconds: u64,
+    pub package_wait_seconds: u64,
     pub no_run_grace_seconds: u64,
     pub no_deploy_repos: Vec<String>,
     pub repo_timeout_minutes: BTreeMap<String, u64>,
@@ -90,9 +93,12 @@ impl Default for MergeConfig {
     fn default() -> Self {
         Self {
             state_file: None,
+            stale_pending_hours: 24,
             method: "merge".to_string(),
             timeout_minutes: 30,
             poll_seconds: 15,
+            package_poll_seconds: crate::feed::DEFAULT_INTERVAL,
+            package_wait_seconds: crate::feed::DEFAULT_TIMEOUT,
             no_run_grace_seconds: 120,
             no_deploy_repos: Vec::new(),
             repo_timeout_minutes: BTreeMap::new(),

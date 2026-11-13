@@ -152,11 +152,13 @@ fn assert_package_survives_winning_rule(cfg: &Config, prs: Vec<Pr>, rule: &str) 
         &mut store,
         &bump::Options::default(),
         &StoreOperation::Add(Pending {
+            recorded_at: None,
             id: "acme/util#2".into(),
             repo: "acme/util".into(),
             base: "master".into(),
             sha: None,
             continuation: None,
+            deploy_prediction: None,
         }),
     );
     let journal = store.state.bump.unwrap();

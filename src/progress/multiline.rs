@@ -236,3 +236,71 @@ fn dropping_during_unwinding_clears_every_status_line_and_restores_the_cursor() 
             .ends_with(std::str::from_utf8(RESTORE_BLOCK).unwrap())
     );
 }
+
+#[test]
+fn merge_frames_keep_every_active_row_at_all_terminal_widths() {
+    for color in [false, true] {
+        for width in [160, 80, 40, 24, 12, 5] {
+            let (mut painter, sink) = painter(color);
+            painter.set_phase("waiting: 0, running: 4, merged: 2, deploy confirmed: 0, failed/stopped: 0\nacme/api#1 → main | readiness: checking approvals\nacme/ui#2 → main | merging: sending request\nacme/worker#3 → main | waiting for deploy: deploy.yml\nacme/tools#4 → main | resolving: later deploy 日本語\t\x1b[31m");
+            painter.tick_at_width(Duration::from_secs(12), Some(width));
+            let mut screen = Screen::default();
+            screen.write(&sink.text());
+            let rows = screen.visible();
+            assert_eq!(rows.len(), 5, "{width}: {rows:?}");
+            assert!(
+                rows.iter().all(|row| row.len() < width),
+                "{width}: {rows:?}"
+            );
+            assert!(rows.iter().all(|row| !row.contains(['\r', '\t', '\x1b'])));
+            if width >= 80 {
+                assert!(rows[1].contains("readiness:"));
+                assert!(rows[2].contains("merging:"));
+                assert!(rows[3].contains("waiting for deploy:"));
+                assert!(rows[4].contains("resolving:"));
+                assert!(rows.iter().skip(1).all(|row| row.contains(" · ")));
+            }
+            painter.finish();
+            let mut cleared = Screen::default();
+            cleared.write(&sink.text());
+            assert!(cleared.visible().is_empty());
+            assert!(!cleared.hidden);
+        }
+    }
+}
+
+#[test]
+fn merge_row_clocks_survive_phase_updates_and_finished_rows_are_cleared() {
+    let (mut painter, sink) = painter(false);
+    painter.set_phase("waiting: 0, running: 2, merged: 0, deploy confirmed: 0, failed/stopped: 0\nacme/api#1 → main | readiness: starting\nacme/ui#2 → main | readiness: starting");
+    let first = Instant::now() - Duration::from_secs(65);
+    let second = Instant::now() - Duration::from_secs(12);
+    painter
+        .row_started
+        .insert("acme/api#1 → main".into(), first);
+    painter
+        .row_started
+        .insert("acme/ui#2 → main".into(), second);
+    painter.set_phase("waiting: 0, running: 2, merged: 1, deploy confirmed: 0, failed/stopped: 0\nacme/api#1 → main | waiting for deploy: deploy.yml\nacme/ui#2 → main | merging: sending request");
+    assert_eq!(painter.row_started["acme/api#1 → main"], first);
+    assert_eq!(painter.row_started["acme/ui#2 → main"], second);
+    painter.tick_at_width(Duration::from_secs(70), Some(120));
+    let mut screen = Screen::default();
+    screen.write(&sink.text());
+    assert!(screen.visible()[0].ends_with(" · 1m 10s"));
+    assert!(screen.visible()[1].ends_with(" · 1m 05s"));
+    assert!(screen.visible()[2].contains(" · 12."));
+    let start = sink.text().len();
+    painter.set_phase("waiting: 0, running: 1, merged: 2, deploy confirmed: 1, failed/stopped: 0\nacme/ui#2 → main | waiting for deploy: deploy.yml");
+    painter.tick_at_width(Duration::from_secs(71), Some(120));
+    screen.write(&sink.text()[start..]);
+    assert_eq!(screen.visible().len(), 2);
+    assert!(
+        !screen
+            .visible()
+            .iter()
+            .any(|row| row.contains("acme/api#1"))
+    );
+    assert_eq!(painter.row_started.len(), 1);
+    assert_eq!(painter.row_started["acme/ui#2 → main"], second);
+}

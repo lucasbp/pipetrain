@@ -238,7 +238,7 @@ impl Checker {
     }
 }
 
-fn publishing_org(package: &str, producers: &[String]) -> Option<String> {
+pub(crate) fn publishing_org(package: &str, producers: &[String]) -> Option<String> {
     match Ecosystem::default_for(package) {
         Ecosystem::Npm => {
             let scope = package
@@ -400,11 +400,16 @@ fn wait_message(
     }
 }
 
-pub fn run_wait(opts: FeedOptions, wait: WaitOptions) -> Result<i32> {
-    let Some(version) = opts.version.clone() else {
+pub fn wait_for(
+    opts: &FeedOptions,
+    plan: WaitPlan,
+    pause: impl FnMut(u32, Duration, Option<&str>),
+    now: impl FnMut() -> Duration,
+) -> Result<Waited> {
+    if opts.version.is_none() {
         bail!("--wait requires --version");
-    };
-    if wait.interval.is_zero() {
+    }
+    if plan.interval.is_zero() {
         bail!("--interval must be at least 1 second");
     }
     let ecosystem = opts
@@ -416,22 +421,32 @@ pub fn run_wait(opts: FeedOptions, wait: WaitOptions) -> Result<i32> {
         bail!("--org is required for nuget unless --registry is given");
     }
     let session = Session::new();
+    Ok(feed::wait_loop(
+        plan,
+        || attempt(&session, ecosystem, opts),
+        pause,
+        now,
+    ))
+}
+
+pub fn run_wait(opts: FeedOptions, wait: WaitOptions) -> Result<i32> {
     let started = Instant::now();
     let package = opts.package.clone();
+    let version = opts.version.clone().unwrap_or_default();
     let progress = progress::Progress::start(wait.progress);
     progress::phase(&format!("waiting for {package} {version}"));
-    let waited = feed::wait_loop(
+    let waited = wait_for(
+        &opts,
         WaitPlan {
             interval: wait.interval,
             timeout: wait.timeout,
         },
-        || attempt(&session, ecosystem, &opts),
         |attempts, delay, error| {
             progress::line(&wait_message(&package, &version, attempts, delay, error));
             std::thread::sleep(delay);
         },
         || started.elapsed(),
-    );
+    )?;
     drop(progress);
     let code = waited.exit_code();
     match &waited.end {

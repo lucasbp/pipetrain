@@ -102,3 +102,13 @@ The step succeeds when the version is published, fails with 1 on timeout, and fa
 ## Not in scope
 
 `plan --check-feeds` still checks each feed once and does not wait. `--wait` never writes to a repo or a feed.
+
+## Package waits during merge
+
+`merge --apply` reuses this lookup and wait loop when it reaches a package wait with a known version. It rechecks the feed after the publisher finishes, even when the plan's earlier snapshot says published, absent or failed. The ecosystem and publishing organization are inferred using the same rules as `plan --check-feeds`.
+
+`[merge]` configures this wait separately from deploy polling: `package_poll_seconds = 10` and `package_wait_seconds = 600` by default. The interval has a minimum of 1 second; `0` is normalized to 1. A zero package timeout performs one lookup without sleeping. The CLI's `--timeout-minutes` overrides deploy waits only. As with `feed --wait`, an HTTP request in flight has its own request timeout and can finish after the polling deadline.
+
+A published version releases the consumer without a prompt. The wait step retains status `skipped` and records the package, version and feed URL in the existing `detail` field, in text and merge JSON. No JSON fields or schemas change. If the version remains absent at the timeout, merge keeps its existing terminal question, non-interactive `stopped` result or confirmation through `--gates-confirmed`. A missing version keeps manual confirmation without a lookup.
+
+401/403 stops immediately with the authentication cause, without asking or accepting `--gates-confirmed` as feed evidence. Other failed attempts are retried, and a failed final attempt stops with its cause. The standalone `feed --wait` exit codes above remain unchanged; a stopped merge package step uses merge's existing exit code 5. Dry-run merge does not wait on feeds. This reuse does not add writes to any feed or GitHub.

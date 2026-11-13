@@ -1,5 +1,46 @@
 # Changelog
 
+## Unreleased
+
+- Merge deploy waits and both mergeability checks use injectable monotonic wall-clock deadlines, include HTTP, pacing and retry time, and cap every wait sleep by the remaining time, including no-run grace.
+- Merge retries transient transport and HTTP 5xx deploy reads up to three consecutive times, resetting on recovery and stopping resumably with pending state after exhaustion.
+- Merge previews and confirmations estimate discovery, readiness/merge checks and deploy polls using per-repository deadlines; additive JSON api_estimate and advisory warnings identify api.max_requests without changing its default or blocking confirmation.
+- Add six end-to-end incident regressions for path-filter dispensing on main, simultaneous PR phases, later-deploy recovery, blocked planning, stacked merges, and stale pending state with cross-process locking.
+- Installers bound downloads to 120 seconds, shell connections to 15 seconds, and wget total runtime with a watchdog; PowerShell restores the previous binary if replacement or its final step fails, preserving download URLs and checksum verification.
+- README describes parallel merges, local state inspection/discard and optional merge --bump Git/.NET preparation while retaining read-only defaults.
+
+- Merge package waits recheck and poll the feed after the publisher finishes, automatically releasing consumers with version and feed evidence; configure the interval and timeout with merge.package_poll_seconds (10) and merge.package_wait_seconds (600).
+- Merge retains manual package confirmation after an absence timeout, while feed authentication refusals stop immediately with their cause and failed final lookups stop after retries; --gates-confirmed retains its manual gate meaning.
+
+- Merge accepts a stacked parent's changed head only with recorded child merge evidence, planned-SHA ancestry and fresh readiness for that exact head; lost approval or pending checks stop with the next step, and the merge request uses the verified SHA.
+- Plan notes, merge dry runs and confirmations show complete selected stack chains and explain that children land into the parent branch before the parent is revalidated.
+
+- Interactive merge progress retains one row per active PR with its base, phase and elapsed time; waiting excludes active work, and the header separates merge acceptance, deploy confirmation and failures.
+- Merge dry runs and confirmations show the configured parallelism upper bound and the existing one-worker-per-repository restriction, including different bases.
+- Merge text summaries and additive JSON summary, max_parallel and deploy_outcome fields distinguish merged PRs from deploys confirmed, dispensed, indeterminate, resolved by a later deploy, skipped and failed.
+
+- Plan and merge share preflight blockers for full GitHub merge states; UNKNOWN warns while the executor retains its one-minute retry and final clean-only guard.
+- Plan and merge previews and additive JSON preflight entries show eligibility, causes, next steps, bases, repository default branches and check names, states and URLs.
+- Plan and merge warn about feature bases without a selected parent; queue output adds only preflight comments and preserves existing step ordering.
+- Add opt-in `plan --strict` and `merge --strict` exit code 4 for selections without an eligible PR, including merge dry runs with no merge steps; default codes remain unchanged.
+
+- Add local `state show` inspection in text and JSON, using merge state path and profile selection without contacting GitHub.
+- Add confirmed `state discard` with a required reason, the merge state lock and atomic audit history; discarded records never count as confirmed deploys.
+- Resume failed deploys through a later successful deploy only with ancestry proof, complete expected workflow evidence and two settled readings; save the later SHA and run URLs in audit and additive report resolution fields.
+- Resume progress and failure messages identify the saved SHA and runs, explaining when repeating an unchanged failed deploy cannot help.
+- Merge state schema 2 records queue identity, profile and UTC timestamps; legacy schemas 0 and 1 upgrade on save, while newer schemas are refused without changing the file.
+- Merge apply holds an exclusive process lock beside the state file, reloads under the lock and uses unique temporary files for atomic state replacement.
+- Merge dry runs, confirmations and JSON show state origin, file age and inherited pending records, with warning-only stale markers controlled by `merge.stale_pending_hours` (default 24).
+
+- Merge confirms deploys only from saved expected workflow paths; auxiliary runs cannot decide the verdict and their failures remain visible.
+- Merge follows resolved and transitive `workflow_run` chains on the merge SHA, persists them for resume, and keeps untrackable chains pending with a diagnostic.
+- Merge refuses deploy confirmation from incomplete workflow-run responses, including more than 100 runs for a SHA.
+- Merge step details include expected run names and URLs, also exposed by the additive JSON `expected_runs` field.
+
+- Merge evaluates push branch and path filters on every base using complete PR file pagination and rename sources, dispensing the wait with evidence when no workflow should run and keeping uncertain inputs on the existing polling path.
+- Merge dry runs show each PR's workflow prediction in text and the additive JSON `deploy_prediction` field.
+- Pending merges save their workflow prediction, including expected workflow paths, for resume and subsequent verification; older records retain legacy polling behavior.
+
 ## 0.8.1
 
 ### Added

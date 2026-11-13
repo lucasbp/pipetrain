@@ -103,6 +103,12 @@ A PR is never made to wait for its own repo.
 
 Within one repo, if PR J has as base the head branch of PR I, then J goes before I. Why: J merges into I's branch, so J's changes ride along when I merges. Merging I first would orphan J.
 
+The plan's existing `notes` list and text output show each complete selected stack from its leaf to its final base, for example `acme/api#12 → feature/y (#11) → feature/x (#10) → main`. The merge dry run and confirmation show the same chain with the strategy: `children land into the parent branch first; the parent is revalidated after`. No PR is retargeted and no branch is updated separately. Ambiguous or cyclic branch relationships do not produce an invented chain; the existing dependency conflict questions remain authoritative.
+
+After a child lands, execution accepts a changed parent head only with recorded child merge evidence and proof that the new head contains the parent's planned SHA. It then requires fresh readiness at that exact head before merging the parent. A lost approval or pending checks stop the stack with the cause and next step. See [merge.md](merge.md) for the precise SHA guard.
+
+The shared preflight warns `base not landed` when a PR targets a non-default, non-train branch with no selected parent. That warning does not invent a parent or change the ordering.
+
 ### 4. order
 
 Each `[[order]]` table is a list of globs on `org/repo` (case-insensitive). A PR that matches an earlier glob goes before a PR that matches a later glob of the same list, whatever the head branch. PRs matched by the same glob, and PRs of the same repo, get no edge from this rule. A PR that matches none of the globs is left alone. The reason shown is `config order`.

@@ -332,16 +332,14 @@ fn gate_reports_the_file_that_triggered_it() {
 }
 
 #[test]
-fn unknown_mergeability_is_skipped_with_the_reason() {
+fn unknown_mergeability_is_ready_with_a_computing_warning() {
     let cfg = config("");
     let mut unknown = pr("acme/api-core", 1, "feat/a", "master");
     unknown.mergeable_unknown = true;
     let found = discovery::explicit(vec![unknown], &cfg);
-    assert!(found.ready.is_empty());
-    assert_eq!(
-        found.skipped[0].reasons,
-        vec!["mergeability unknown, retry in a minute".to_string()]
-    );
+    assert!(found.skipped.is_empty());
+    assert_eq!(found.ready.len(), 1);
+    assert!(found.ready[0].0.readiness(Vec::new()).warnings[0].contains("GitHub still computing"));
 }
 
 #[test]

@@ -111,3 +111,9 @@ Each open question is one stderr line, printed before any exit:
 | 3 | Queue printed, at least one question open. |
 
 `--color` and `NO_COLOR` have no effect. The `--json` schema and the default text output are unchanged by `--emit`.
+
+## Preflight comments
+
+The queue adds only `# preflight: ...` comments, after the existing queue lines, sorted by PR ID. They report every visible selected PR, including blocked PRs that have no `merge:` line: eligibility, cause, next step, base and default branch, warnings and check names/states/URLs. Embedded newlines are replaced with spaces so evidence cannot become a queue step. The readiness data is described in [plan-json.md](plan-json.md#readiness). Existing step and pause lines and their relative order are unchanged by these comments. A selection with no runnable item can therefore print comments only.
+
+With `--strict`, exit `4` means no visible selected PR is currently eligible, including empty, fully blocked or entirely waiting selections. The full queue/comments still print. This strict condition takes precedence over exit `3` for open questions. Without `--strict`, existing exit codes are unchanged.

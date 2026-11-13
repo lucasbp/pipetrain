@@ -1,9 +1,272 @@
 use std::fmt::Write;
+use std::fs::{self, File, OpenOptions};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
+use chrono::{DateTime, SecondsFormat, Utc};
+use serde::Serialize;
 
-use super::{State, Store};
+use super::{SCHEMA, State, Store};
+
+static NEXT_WRITE: AtomicU64 = AtomicU64::new(0);
+
+fn sibling(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+fn create_parent(path: &Path) -> Result<()> {
+    if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+        fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    }
+    Ok(())
+}
+
+fn age_seconds(timestamp: Option<&str>, now: DateTime<Utc>) -> Option<u64> {
+    let timestamp = DateTime::parse_from_rfc3339(timestamp?).ok()?;
+    Some(now.signed_duration_since(timestamp).num_seconds().max(0) as u64)
+}
+
+fn age_text(seconds: Option<u64>) -> String {
+    match seconds {
+        Some(seconds) => format!(
+            "age {}h {}m {}s",
+            seconds / 3600,
+            seconds % 3600 / 60,
+            seconds % 60
+        ),
+        None => "age unknown".to_string(),
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PendingPreview {
+    pub id: String,
+    pub base: String,
+    pub sha: Option<String>,
+    pub recorded_at: Option<String>,
+    pub age_seconds: Option<u64>,
+    pub age: String,
+    pub stale: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StatePreview {
+    pub path: Option<String>,
+    pub file_age_seconds: Option<u64>,
+    pub file_age: String,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub profile: Option<String>,
+    pub selected_profile: Option<String>,
+    pub queue_id: Option<String>,
+    pub stale_pending_hours: u64,
+    pub pending: Vec<PendingPreview>,
+}
+
+impl StatePreview {
+    pub fn render(&self) -> String {
+        let mut out = format!(
+            "State\n  path: {}\n  file {}\n  profile: {} (selected: {})\n  queue: {}\n",
+            self.path.as_deref().unwrap_or("memory only"),
+            self.file_age,
+            self.profile.as_deref().unwrap_or("unknown"),
+            self.selected_profile.as_deref().unwrap_or("unknown"),
+            self.queue_id.as_deref().unwrap_or("unknown"),
+        );
+        for pending in &self.pending {
+            writeln!(
+                out,
+                "  inherited pending: {} into {} at {} ({}){}",
+                pending.id,
+                pending.base,
+                pending.sha.as_deref().unwrap_or("SHA unknown"),
+                pending.age,
+                if pending.stale {
+                    "; stale (warning only)"
+                } else {
+                    ""
+                },
+            )
+            .expect("writing to a String cannot fail");
+        }
+        out.push('\n');
+        out
+    }
+}
+
+impl Store {
+    pub fn open(path: Option<PathBuf>) -> Result<Self> {
+        let Some(path) = path else {
+            return Ok(Self::in_memory());
+        };
+        let mut state: State = match fs::read_to_string(&path) {
+            Ok(text) => {
+                let value: serde_json::Value = serde_json::from_str(&text).with_context(|| {
+                    format!("the merge state file {} is not valid", path.display())
+                })?;
+                if value
+                    .get("schema")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some_and(|schema| schema > u64::from(SCHEMA))
+                {
+                    bail!(
+                        "the merge state file {} was written by a newer pipetrain (schema {}, supported up to {SCHEMA}); upgrade pipetrain before using it",
+                        path.display(),
+                        value["schema"]
+                    );
+                }
+                serde_json::from_value(value).with_context(|| {
+                    format!("the merge state file {} is not valid", path.display())
+                })?
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => State::default(),
+            Err(error) => bail!(
+                "cannot read the merge state file {}: {error}",
+                path.display()
+            ),
+        };
+        state.schema = SCHEMA;
+        Ok(Self {
+            path: Some(path),
+            state,
+            remote: None,
+            lock: None,
+        })
+    }
+
+    pub fn lock(&mut self) -> Result<()> {
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        if self.lock.is_some() {
+            return Ok(());
+        }
+        let lock_path = sibling(path, ".lock");
+        create_parent(&lock_path)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .with_context(|| format!("cannot open the merge state lock {}", lock_path.display()))?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => bail!(
+                "another merge execution is active; cannot acquire the merge state lock {}",
+                lock_path.display()
+            ),
+            Err(error) => bail!(
+                "cannot acquire the merge state lock {}: {error}",
+                lock_path.display()
+            ),
+        }
+        self.state = Self::open(Some(path.clone()))?.state;
+        self.lock = Some(file);
+        Ok(())
+    }
+
+    pub fn preview(&self, profile: Option<&str>, stale_pending_hours: u64) -> StatePreview {
+        let now = Utc::now();
+        let file_age_seconds = self
+            .path
+            .as_ref()
+            .and_then(|path| fs::metadata(path).ok())
+            .and_then(|metadata| metadata.modified().ok())
+            .map(|modified| {
+                now.signed_duration_since(DateTime::<Utc>::from(modified))
+                    .num_seconds()
+                    .max(0) as u64
+            });
+        StatePreview {
+            path: self.path.as_ref().map(|path| path.display().to_string()),
+            file_age_seconds,
+            file_age: age_text(file_age_seconds),
+            created_at: self.state.created_at.clone(),
+            updated_at: self.state.updated_at.clone(),
+            profile: self.state.profile.clone(),
+            selected_profile: profile.map(str::to_string),
+            queue_id: self.state.queue_id.clone(),
+            stale_pending_hours,
+            pending: self
+                .state
+                .pending
+                .iter()
+                .map(|pending| {
+                    let age_seconds = age_seconds(pending.recorded_at.as_deref(), now);
+                    PendingPreview {
+                        id: pending.id.clone(),
+                        base: pending.base.clone(),
+                        sha: pending
+                            .sha
+                            .as_ref()
+                            .map(|sha| sha.chars().take(7).collect()),
+                        recorded_at: pending.recorded_at.clone(),
+                        age_seconds,
+                        age: age_text(age_seconds),
+                        stale: age_seconds
+                            .is_some_and(|age| age > stale_pending_hours.saturating_mul(3600)),
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    pub fn save(&mut self) -> Result<()> {
+        let now = Utc::now();
+        let timestamp = now.to_rfc3339_opts(SecondsFormat::Nanos, true);
+        self.state.schema = SCHEMA;
+        self.state
+            .created_at
+            .get_or_insert_with(|| timestamp.clone());
+        self.state.updated_at = Some(timestamp);
+        self.state.queue_id.get_or_insert_with(|| {
+            format!(
+                "{}-{}-{}",
+                now.format("%Y%m%dT%H%M%S%.9fZ"),
+                std::process::id(),
+                NEXT_WRITE.fetch_add(1, Ordering::Relaxed)
+            )
+        });
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        create_parent(path)?;
+        let data = serde_json::to_vec_pretty(&self.state)?;
+        let (temp, mut file) = loop {
+            let temp = sibling(
+                path,
+                &format!(
+                    ".{}.{}.tmp",
+                    std::process::id(),
+                    NEXT_WRITE.fetch_add(1, Ordering::Relaxed)
+                ),
+            );
+            match File::create_new(&temp) {
+                Ok(file) => break (temp, file),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(error).with_context(|| format!("cannot write {}", temp.display()));
+                }
+            }
+        };
+        let result = file.write_all(&data).and_then(|()| file.sync_all());
+        drop(file);
+        let result = result
+            .with_context(|| format!("cannot write {}", temp.display()))
+            .and_then(|()| {
+                fs::rename(&temp, path).with_context(|| format!("cannot write {}", path.display()))
+            });
+        if result.is_err() {
+            let _ = fs::remove_file(&temp);
+        }
+        result
+    }
+}
 
 pub fn resolve_state_path(
     explicit: Option<&Path>,
@@ -180,11 +443,13 @@ mod tests {
         let first = directory.resolve(Some("acme")).unwrap();
         let second = directory.resolve(Some("globex")).unwrap();
         let pending = super::super::Pending {
+            recorded_at: None,
             id: "acme/api#1".to_string(),
             repo: "acme/api".to_string(),
             base: "main".to_string(),
             sha: Some("abc123".to_string()),
             continuation: None,
+            deploy_prediction: None,
         };
         Store::open(Some(first.clone()))
             .unwrap()

@@ -42,6 +42,7 @@ pub struct Run {
     pub id: u64,
     pub workflow_id: u64,
     pub name: String,
+    pub path: String,
     pub status: String,
     pub conclusion: Option<String>,
     pub url: String,
@@ -60,6 +61,7 @@ fn parse_run(value: &Value) -> Run {
         id: number("id"),
         workflow_id: number("workflow_id"),
         name: text("name"),
+        path: text("path"),
         status: text("status"),
         conclusion: value
             .get("conclusion")
@@ -82,7 +84,7 @@ fn encode_path(text: &str) -> String {
     out
 }
 
-const PR_FIELDS: &str = "number title url body headRefName baseRefName baseRef { target { oid } } headRefOid isDraft state reviewDecision mergeable mergeStateStatus author { login } labels(first: 50) { nodes { name } } repository { name owner { login } } latestOpinionatedReviews(first: 20, writersOnly: true) { nodes { state } } commits(last: 1) { nodes { commit { statusCheckRollup { state contexts(first: 100) { nodes { __typename ... on CheckRun { name conclusion } ... on StatusContext { context state } } } } } } }";
+const PR_FIELDS: &str = "number title url body headRefName baseRefName baseRef { target { oid } } headRefOid isDraft state reviewDecision mergeable mergeStateStatus author { login } labels(first: 50) { nodes { name } } repository { name owner { login } defaultBranchRef { name } } latestOpinionatedReviews(first: 20, writersOnly: true) { nodes { state } } commits(last: 1) { nodes { commit { statusCheckRollup { state contexts(first: 100) { nodes { __typename ... on CheckRun { name conclusion status detailsUrl } ... on StatusContext { context state targetUrl } } } } } } }";
 
 struct OpenSearch {
     prs: Vec<Pr>,
@@ -258,6 +260,64 @@ impl Client {
             }
         }
         Ok((files, complete))
+    }
+
+    pub fn push_files(&mut self, key: &PrKey, head_sha: &str) -> Result<Vec<String>> {
+        let metadata = self.rest(&format!("/repos/{}/pulls/{}", key.slug(), key.number))?;
+        if metadata.pointer("/head/sha").and_then(Value::as_str) != Some(head_sha) {
+            anyhow::bail!("the PR head changed while reading push files");
+        }
+        let total = metadata
+            .get("changed_files")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| anyhow!("the PR changed_files total is unavailable"))?;
+        if total > 300 {
+            anyhow::bail!("the PR has more than 300 changed files ({total})");
+        }
+        let mut paths = std::collections::BTreeSet::new();
+        let mut filenames = std::collections::BTreeSet::new();
+        let mut count = 0;
+        for page in 1..=FILE_PAGES + 1 {
+            let value = self.rest(&format!(
+                "/repos/{}/pulls/{}/files?per_page=100&page={page}",
+                key.slug(),
+                key.number
+            ))?;
+            let files = value
+                .as_array()
+                .ok_or_else(|| anyhow!("the PR file list is unreadable"))?;
+            for file in files {
+                let name = file
+                    .get("filename")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.is_empty())
+                    .ok_or_else(|| anyhow!("a changed filename is missing"))?;
+                if !filenames.insert(name.to_string()) {
+                    anyhow::bail!("the PR file pagination contains duplicate filenames");
+                }
+                paths.insert(name.to_string());
+                match file.get("previous_filename") {
+                    Some(Value::String(previous)) if !previous.is_empty() => {
+                        paths.insert(previous.clone());
+                    }
+                    None if file.get("status").and_then(Value::as_str) != Some("renamed") => {}
+                    _ => anyhow::bail!("a renamed file's previous filename is unavailable"),
+                }
+            }
+            count += files.len() as u64;
+            if count > total || files.len() > 100 {
+                anyhow::bail!("the PR file pagination does not match its changed_files total");
+            }
+            if files.len() < 100 {
+                if count != total {
+                    anyhow::bail!(
+                        "the PR file list is incomplete: read {count} of {total} changed files"
+                    );
+                }
+                return Ok(paths.into_iter().collect());
+            }
+        }
+        anyhow::bail!("the PR file pagination did not finish")
     }
 
     pub fn default_branch_sha(&mut self, slug: &str) -> Result<String> {
@@ -475,18 +535,29 @@ impl Client {
         }
     }
 
-    pub fn push_runs(&mut self, slug: &str, sha: &str) -> Result<Vec<Run>, ApiError> {
-        let path = format!("/repos/{slug}/actions/runs?head_sha={sha}&event=push&per_page=100");
+    pub fn workflow_runs(
+        &mut self,
+        slug: &str,
+        sha: &str,
+        push_only: bool,
+    ) -> Result<(Vec<Run>, bool), ApiError> {
+        let event = if push_only { "&event=push" } else { "" };
+        let path = format!("/repos/{slug}/actions/runs?head_sha={sha}{event}&per_page=100");
         let body = self
             .get(&path)?
             .into_body(&path)
             .map_err(|error| self.redact(error))?;
-        let runs = body
+        let runs: Vec<Run> = body
             .get("workflow_runs")
             .and_then(Value::as_array)
             .map(|runs| runs.iter().map(parse_run).collect())
             .unwrap_or_default();
-        Ok(runs)
+        let complete = body.get("workflow_runs").is_some_and(Value::is_array)
+            && body
+                .get("total_count")
+                .and_then(Value::as_u64)
+                .map_or(runs.len() < 100, |total| total == runs.len() as u64);
+        Ok((runs, complete))
     }
 
     pub fn tree(&mut self, slug: &str, sha: &str) -> Result<(Vec<String>, bool)> {
