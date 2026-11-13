@@ -106,6 +106,100 @@ pub fn judge(all: &[Run]) -> Verdict {
     }
 }
 
+pub fn judge_expected(all: &[Run], prediction: &crate::workflows::PushRuns) -> Verdict {
+    let crate::workflows::PushRuns::Expected {
+        workflows,
+        chained_workflows,
+        untracked_chains,
+    } = prediction
+    else {
+        return judge(all);
+    };
+    let paths: Vec<_> = workflows.iter().chain(chained_workflows).collect();
+    let runs: Vec<_> = all
+        .iter()
+        .filter(|run| {
+            paths.contains(&&run.path)
+                && !(run.status == "completed"
+                    && run.conclusion.as_deref() == Some("cancelled")
+                    && all.iter().any(|other| {
+                        other.path == run.path && other.id > run.id && same_workflow(other, run)
+                    }))
+        })
+        .collect();
+    for run in &runs {
+        if run.status == "completed"
+            && !matches!(run.conclusion.as_deref(), Some("success" | "skipped"))
+        {
+            return Verdict::Failed(format!(
+                "workflow {} ended as {}: {}",
+                run.name,
+                run.conclusion.as_deref().unwrap_or("unknown"),
+                run.url
+            ));
+        }
+    }
+    if !untracked_chains.is_empty() {
+        return Verdict::Waiting(
+            untracked_chains
+                .iter()
+                .map(|path| format!("chained workflow {path} cannot be tracked"))
+                .collect::<Vec<_>>()
+                .join("; "),
+        );
+    }
+    if all.is_empty() {
+        return Verdict::NoRuns;
+    }
+    let missing: Vec<_> = paths
+        .iter()
+        .filter(|path| !runs.iter().any(|run| &run.path == **path))
+        .map(|path| path.as_str())
+        .collect();
+    if !missing.is_empty() || paths.is_empty() {
+        return Verdict::Waiting(format!(
+            "waiting for expected workflows: {}",
+            missing.join(", ")
+        ));
+    }
+    let running = runs.iter().filter(|run| run.status != "completed").count();
+    if running > 0 {
+        return Verdict::Waiting(format!(
+            "{running} of {} expected workflow runs still going",
+            runs.len()
+        ));
+    }
+    if runs
+        .iter()
+        .all(|run| run.conclusion.as_deref() == Some("skipped"))
+    {
+        Verdict::Skipped(runs.len())
+    } else {
+        Verdict::Passed(runs.len())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExpectedRun {
+    pub path: String,
+    pub name: String,
+    pub html_url: String,
+    pub status: String,
+    pub conclusion: Option<String>,
+}
+
+impl From<&Run> for ExpectedRun {
+    fn from(run: &Run) -> Self {
+        Self {
+            path: run.path.clone(),
+            name: run.name.clone(),
+            html_url: run.url.clone(),
+            status: run.status.clone(),
+            conclusion: run.conclusion.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Continuation {
     pub independent: BTreeMap<String, String>,
@@ -363,6 +457,8 @@ pub struct StepReport {
     pub bump: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deploy_prediction: Option<crate::workflows::PushRuns>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expected_runs: Vec<ExpectedRun>,
 }
 
 impl StepReport {
@@ -377,6 +473,7 @@ impl StepReport {
             blocked_by: None,
             bump: None,
             deploy_prediction: None,
+            expected_runs: Vec::new(),
         }
     }
 }
@@ -429,6 +526,7 @@ mod tests {
             id: 0,
             workflow_id: 0,
             name: name.to_string(),
+            path: format!(".github/workflows/{name}.yml"),
             status: status.to_string(),
             conclusion: conclusion.map(str::to_string),
             url: format!("https://example.test/{name}"),

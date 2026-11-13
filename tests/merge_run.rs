@@ -29,6 +29,8 @@ struct Script {
     put_merges: bool,
     merged: BTreeSet<u64>,
     runs: Vec<Value>,
+    run_readings: std::collections::VecDeque<Vec<Value>>,
+    run_total: Option<u64>,
     runs_by_sha: BTreeMap<String, Vec<Value>>,
     bases: BTreeMap<u64, String>,
     workflows: Vec<(String, String)>,
@@ -55,6 +57,7 @@ fn merge_sha(number: u64) -> String {
 fn run_json(name: &str, status: &str, conclusion: Option<&str>) -> Value {
     json!({
         "name": name,
+        "path": ".github/workflows/deploy.yml",
         "status": status,
         "conclusion": conclusion,
         "html_url": format!("https://example.test/acme/api/actions/runs/{name}"),
@@ -78,6 +81,8 @@ impl Script {
             put_merges: true,
             merged: BTreeSet::new(),
             runs: green(),
+            run_readings: Default::default(),
+            run_total: None,
             runs_by_sha: BTreeMap::new(),
             bases: BTreeMap::new(),
             workflows: vec![("deploy.yml".into(), "on: push".into())],
@@ -267,10 +272,13 @@ fn respond(script: &Mutex<Script>, line: &str, payload: &str) -> (u16, Value) {
             .nth(1)
             .and_then(|query| query.split('&').next())
             .unwrap_or("");
-        let runs = script.runs_by_sha.get(sha).unwrap_or(&script.runs);
+        let runs = script
+            .run_readings
+            .pop_front()
+            .unwrap_or_else(|| script.runs_by_sha.get(sha).unwrap_or(&script.runs).clone());
         return (
             200,
-            json!({"total_count": runs.len(), "workflow_runs": runs}),
+            json!({"total_count": script.run_total.unwrap_or(runs.len() as u64), "workflow_runs": runs}),
         );
     }
     (404, json!({"message": "not found"}))
@@ -623,9 +631,9 @@ fn progress_shows_running_workflows_and_waiting_for_the_first_run() {
         )
         .unwrap();
     assert!(
-        run.phases
-            .iter()
-            .any(|text| text.ends_with("deploy acme/api: 1 of 1 workflow runs still going"))
+        run.phases.iter().any(
+            |text| text.ends_with("deploy acme/api: 1 of 1 expected workflow runs still going")
+        )
     );
 
     let mut absent = Rig::new("");
@@ -2562,7 +2570,7 @@ fn main_paths_match_waits_for_deploy_and_passes() {
     assert_eq!(rig.polls(), 2);
     assert!(run.said(0).contains("deploy passed"));
     assert!(
-        matches!(run.step(0).deploy_prediction.as_ref(), Some(pipetrain::workflows::PushRuns::Expected { workflows }) if workflows == &[".github/workflows/deploy.yml"])
+        matches!(run.step(0).deploy_prediction.as_ref(), Some(pipetrain::workflows::PushRuns::Expected { workflows, .. }) if workflows == &[".github/workflows/deploy.yml"])
     );
     assert!(state.reopen().state.pending.is_empty());
 }
@@ -2778,12 +2786,14 @@ fn pending_prediction_is_saved_and_resumed_without_reading_workflows() {
     assert_eq!(first.step(0).status, Status::Stopped);
     let saved = state.reopen();
     assert!(
-        matches!(saved.state.pending[0].deploy_prediction.as_ref(), Some(pipetrain::workflows::PushRuns::Expected { workflows }) if workflows.len() == 2)
+        matches!(saved.state.pending[0].deploy_prediction.as_ref(), Some(pipetrain::workflows::PushRuns::Expected { workflows, .. }) if workflows.len() == 2)
     );
     rig.store = saved;
     rig.script().workflows.clear();
     rig.script().files.clear();
-    rig.script().runs = green();
+    let mut audit = run_json("audit", "completed", Some("success"));
+    audit["path"] = json!(".github/workflows/audit.yml");
+    rig.script().runs = vec![green().remove(0), audit];
     let trees = rig
         .lines()
         .iter()
@@ -2942,4 +2952,417 @@ fn legacy_train_pending_keeps_branch_only_workflow_behavior() {
         assert!(rig.puts().is_empty());
         assert!(state.reopen().state.pending.is_empty());
     }
+}
+
+fn workflow_run(path: &str, name: &str, status: &str, conclusion: Option<&str>) -> Value {
+    let mut run = run_json(name, status, conclusion);
+    run["path"] = json!(format!(".github/workflows/{path}"));
+    run
+}
+
+fn short_deploy(rig: &mut Rig) -> Run {
+    rig.run(
+        &plan_on(&[1]),
+        Settings {
+            timeout: Some(Duration::from_secs(3)),
+            ..applied()
+        },
+        true,
+        true,
+    )
+    .unwrap()
+}
+
+fn chained_workflows(name: &str, trigger: &str) -> Vec<(String, String)> {
+    vec![
+        ("deploy.yml".into(), format!("name: '{name}'\non: push")),
+        (
+            "release.yml".into(),
+            format!(
+                "name: Release\non:\n  workflow_run:\n    workflows: ['{trigger}']\n    types: [completed]"
+            ),
+        ),
+    ]
+}
+
+#[test]
+fn auxiliary_success_waits_until_the_expected_deploy_finishes() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    let auxiliary = workflow_run("lint.yml", "Lint", "completed", Some("success"));
+    let running = workflow_run("deploy.yml", "Deploy", "in_progress", None);
+    rig.script().run_readings = [
+        vec![auxiliary.clone(), running.clone()],
+        vec![auxiliary.clone(), running],
+    ]
+    .into();
+    rig.script().runs = vec![
+        auxiliary,
+        workflow_run("deploy.yml", "Deploy", "completed", Some("success")),
+    ];
+    let run = short_deploy(&mut rig);
+    assert_eq!(run.step(0).status, Status::Done);
+    assert_eq!(rig.polls(), 4);
+    assert!(
+        run.phases
+            .iter()
+            .filter(|text| text.contains("expected workflow runs still going"))
+            .count()
+            >= 2
+    );
+    let json = serde_json::to_value(&run.outcome.report).unwrap();
+    assert_eq!(
+        json["steps"][0]["expected_runs"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(json["steps"][0]["expected_runs"][0]["name"], "Deploy");
+    assert_eq!(
+        json["steps"][0]["expected_runs"][0]["html_url"],
+        "https://example.test/acme/api/actions/runs/Deploy"
+    );
+    assert!(run.said(0).contains("expected workflow Deploy (.github/workflows/deploy.yml): https://example.test/acme/api/actions/runs/Deploy"));
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn auxiliary_success_without_any_expected_run_cannot_confirm_deploy() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    rig.script().runs = vec![workflow_run(
+        "lint.yml",
+        "Deploy",
+        "completed",
+        Some("success"),
+    )];
+    let run = short_deploy(&mut rig);
+    assert_eq!(run.step(0).status, Status::Stopped);
+    assert_eq!(run.outcome.code, EXIT_STOPPED);
+    assert!(
+        run.said(0)
+            .contains("waiting for expected workflows: .github/workflows/deploy.yml")
+    );
+    assert_eq!(state.reopen().state.pending.len(), 1);
+}
+
+#[test]
+fn expected_deploy_failure_wins_over_green_auxiliary() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    rig.script().runs = vec![
+        workflow_run("lint.yml", "Lint", "completed", Some("success")),
+        workflow_run("deploy.yml", "Deploy", "completed", Some("failure")),
+    ];
+    let run = short_deploy(&mut rig);
+    assert_eq!(run.step(0).status, Status::Failed);
+    assert_eq!(run.outcome.code, 1);
+    assert_eq!(rig.polls(), 1);
+    assert!(run.said(0).contains("Deploy ended as failure"));
+    assert_eq!(state.reopen().state.pending.len(), 1);
+}
+
+#[test]
+fn auxiliary_failure_is_reported_without_deciding_expected_deploy() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    rig.script().runs = vec![
+        workflow_run("lint.yml", "Lint", "completed", Some("failure")),
+        workflow_run("deploy.yml", "Deploy", "completed", Some("success")),
+    ];
+    let run = short_deploy(&mut rig);
+    assert_eq!(run.step(0).status, Status::Done);
+    assert!(run.said(0).contains("auxiliary workflow Lint ended as failure: https://example.test/acme/api/actions/runs/Lint (does not decide deploy)"));
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn expected_neutral_is_failure_but_skipped_is_a_successful_noop() {
+    for (conclusion, status) in [("neutral", Status::Failed), ("skipped", Status::Skipped)] {
+        let mut rig = Rig::new("");
+        let state = FilterState::attach(&mut rig);
+        rig.script().runs = vec![workflow_run(
+            "deploy.yml",
+            "Deploy",
+            "completed",
+            Some(conclusion),
+        )];
+        let run = short_deploy(&mut rig);
+        assert_eq!(run.step(0).status, status);
+        assert_eq!(
+            state.reopen().state.pending.is_empty(),
+            status == Status::Skipped
+        );
+    }
+}
+
+#[test]
+fn workflow_run_chain_is_followed_by_path_and_same_sha_until_success() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    rig.script().workflows = chained_workflows("Deploy", "Deploy");
+    let parent = workflow_run("deploy.yml", "Deploy", "completed", Some("success"));
+    let mut child = workflow_run("release.yml", "Release", "in_progress", None);
+    child["event"] = json!("workflow_run");
+    rig.script().run_readings = [vec![parent.clone()], vec![parent.clone(), child.clone()]].into();
+    child["status"] = json!("completed");
+    child["conclusion"] = json!("success");
+    rig.script().runs = vec![parent, child];
+    let run = short_deploy(&mut rig);
+    assert_eq!(run.step(0).status, Status::Done);
+    assert_eq!(rig.polls(), 4);
+    for request in rig
+        .lines()
+        .iter()
+        .filter(|line| line.contains("/actions/runs?"))
+    {
+        assert!(request.contains(&format!("head_sha={}", merge_sha(1))));
+        assert!(!request.contains("event="));
+    }
+    let json = serde_json::to_value(&run.outcome.report).unwrap();
+    assert_eq!(
+        json["steps"][0]["deploy_prediction"]["workflows"],
+        json!([".github/workflows/deploy.yml"])
+    );
+    assert_eq!(
+        json["steps"][0]["deploy_prediction"]["chained_workflows"],
+        json!([".github/workflows/release.yml"])
+    );
+    assert_eq!(run.step(0).expected_runs.len(), 2);
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn unresolved_chain_times_out_and_is_preserved_for_resume() {
+    for name in ["Unknown", "Deploy"] {
+        let mut rig = Rig::new("");
+        let state = FilterState::attach(&mut rig);
+        rig.script().workflows = chained_workflows("Deploy", name);
+        if name == "Deploy" {
+            rig.script().workflows.push((
+                "duplicate.yml".into(),
+                "name: Deploy\non: workflow_dispatch".into(),
+            ));
+        }
+        let run = short_deploy(&mut rig);
+        assert_eq!(run.step(0).status, Status::Stopped);
+        assert_eq!(rig.polls(), 4);
+        assert!(
+            run.said(0)
+                .contains("chained workflow .github/workflows/release.yml cannot be tracked")
+        );
+        assert_eq!(state.reopen().state.pending.len(), 1);
+        rig.store = state.reopen();
+        rig.script().workflows.clear();
+        let resumed = rig
+            .run(
+                &plan_on(&[]),
+                Settings {
+                    timeout: Some(Duration::from_secs(1)),
+                    ..applied()
+                },
+                true,
+                true,
+            )
+            .unwrap();
+        assert_eq!(resumed.step(0).status, Status::Stopped);
+        assert!(
+            resumed
+                .said(0)
+                .contains("chained workflow .github/workflows/release.yml cannot be tracked")
+        );
+        assert_eq!(rig.puts().len(), 1);
+    }
+}
+
+#[test]
+fn transitive_chain_with_literal_names_is_saved_and_resumed() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    rig.script().workflows = chained_workflows("!Deploy", "!Deploy");
+    rig.script().workflows.push((
+        "final.yml".into(),
+        "on:\n  workflow_run:\n    workflows: Release".into(),
+    ));
+    let first = short_deploy(&mut rig);
+    assert_eq!(first.step(0).status, Status::Stopped);
+    rig.store = state.reopen();
+    let saved = serde_json::to_value(&rig.store.state).unwrap();
+    assert_eq!(
+        saved["pending"][0]["deploy_prediction"]["chained_workflows"],
+        json!([
+            ".github/workflows/final.yml",
+            ".github/workflows/release.yml"
+        ])
+    );
+    rig.script().workflows.clear();
+    rig.script().runs = vec![
+        workflow_run("deploy.yml", "!Deploy", "completed", Some("success")),
+        workflow_run("release.yml", "Release", "completed", Some("success")),
+        workflow_run("final.yml", "Final", "completed", Some("success")),
+    ];
+    let resumed = rig.go(&plan_on(&[]));
+    assert_eq!(resumed.step(0).status, Status::Done);
+    assert_eq!(resumed.step(0).expected_runs.len(), 3);
+    assert_eq!(rig.puts().len(), 1);
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn chain_of_known_but_excluded_workflow_is_not_expected() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    rig.script().workflows = vec![
+        ("deploy.yml".into(), "name: Deploy\non: push".into()),
+        (
+            "other.yml".into(),
+            "name: Other\non:\n  push:\n    branches: other".into(),
+        ),
+        (
+            "release.yml".into(),
+            "on:\n  workflow_run:\n    workflows: [Other]".into(),
+        ),
+    ];
+    let run = short_deploy(&mut rig);
+    assert_eq!(run.step(0).status, Status::Done);
+    assert_eq!(run.step(0).expected_runs.len(), 1);
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn incomplete_run_response_never_confirms_even_with_expected_green() {
+    for read in [1, 100] {
+        let mut rig = Rig::new("");
+        let state = FilterState::attach(&mut rig);
+        rig.script().runs = (0..read)
+            .map(|_| workflow_run("deploy.yml", "Deploy", "completed", Some("success")))
+            .collect();
+        rig.script().run_total = Some(read + 1);
+        let run = short_deploy(&mut rig);
+        assert_eq!(run.step(0).status, Status::Stopped);
+        assert!(
+            run.said(0)
+                .contains("workflow run response is incomplete; cannot confirm deploy")
+        );
+        assert_eq!(state.reopen().state.pending.len(), 1);
+    }
+}
+
+#[test]
+fn legacy_pending_json_keeps_neutral_and_missing_path_compatibility() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    std::fs::create_dir_all(&state.directory).unwrap();
+    std::fs::write(state.directory.join("state.json"), serde_json::to_vec(&json!({"schema": 1, "pending": [{"id": "acme/api#1", "repo": "acme/api", "base": "main", "sha": merge_sha(1)}]})).unwrap()).unwrap();
+    rig.store = state.reopen();
+    let mut auxiliary = workflow_run("lint.yml", "Lint", "completed", Some("neutral"));
+    auxiliary.as_object_mut().unwrap().remove("path");
+    rig.script().runs = vec![auxiliary];
+    let run = rig.go(&plan_on(&[]));
+    assert_eq!(run.step(0).status, Status::Done);
+    assert_eq!(rig.polls(), 2);
+    assert!(
+        rig.lines()
+            .iter()
+            .filter(|line| line.contains("/actions/runs?"))
+            .all(|line| line.contains("event=push"))
+    );
+    assert!(run.step(0).expected_runs.is_empty());
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn auxiliary_with_same_name_cannot_replace_cancelled_expected_run() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    let mut cancelled = workflow_run("deploy.yml", "Deploy", "completed", Some("cancelled"));
+    cancelled["id"] = json!(1);
+    let mut auxiliary = workflow_run("lint.yml", "Deploy", "completed", Some("success"));
+    auxiliary["id"] = json!(2);
+    rig.script().runs = vec![cancelled, auxiliary];
+    let run = short_deploy(&mut rig);
+    assert_eq!(run.step(0).status, Status::Failed);
+    assert!(run.said(0).contains("ended as cancelled"));
+    assert_eq!(state.reopen().state.pending.len(), 1);
+}
+
+#[test]
+fn unreadable_chain_reference_cannot_confirm_green_push() {
+    for trigger in [
+        "on: workflow_run",
+        "on: [workflow_run]",
+        "on:\n  workflow_run:",
+        "on:\n  workflow_run:\n    workflows: [Deploy, 5]",
+    ] {
+        let mut rig = Rig::new("");
+        let state = FilterState::attach(&mut rig);
+        rig.script().workflows = vec![
+            ("deploy.yml".into(), "name: Deploy\non: push".into()),
+            ("release.yml".into(), trigger.into()),
+        ];
+        let run = short_deploy(&mut rig);
+        assert_eq!(run.step(0).status, Status::Stopped, "{trigger}");
+        assert!(
+            run.said(0)
+                .contains("chained workflow .github/workflows/release.yml cannot be tracked")
+        );
+        assert_eq!(state.reopen().state.pending.len(), 1);
+    }
+}
+
+#[test]
+fn untrackable_chain_uses_timeout_even_without_runs() {
+    let mut rig = Rig::new("");
+    rig.cfg.merge.no_run_grace_seconds = 0;
+    let state = FilterState::attach(&mut rig);
+    rig.script().workflows = vec![
+        ("deploy.yml".into(), "on: push".into()),
+        (
+            "release.yml".into(),
+            "on:\n  workflow_run:\n    workflows: [Deploy]".into(),
+        ),
+    ];
+    rig.script().runs.clear();
+    let run = short_deploy(&mut rig);
+    assert_eq!(run.step(0).status, Status::Stopped);
+    assert_eq!(rig.polls(), 4);
+    assert_eq!(run.slept, Duration::from_secs(3));
+    assert!(
+        run.said(0)
+            .contains("chained workflow .github/workflows/release.yml cannot be tracked")
+    );
+    assert_eq!(state.reopen().state.pending.len(), 1);
+}
+
+#[test]
+fn saved_push_prediction_without_chain_fields_still_tracks_expected_paths() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    std::fs::create_dir_all(&state.directory).unwrap();
+    std::fs::write(state.directory.join("state.json"), serde_json::to_vec(&json!({"schema": 1, "pending": [{"id": "acme/api#1", "repo": "acme/api", "base": "main", "sha": merge_sha(1), "deploy_prediction": {"status": "expected", "workflows": [".github/workflows/deploy.yml"]}}]})).unwrap()).unwrap();
+    rig.store = state.reopen();
+    rig.script().runs = vec![workflow_run(
+        "lint.yml",
+        "Lint",
+        "completed",
+        Some("success"),
+    )];
+    let first = rig
+        .run(
+            &plan_on(&[]),
+            Settings {
+                timeout: Some(Duration::from_secs(1)),
+                ..applied()
+            },
+            true,
+            true,
+        )
+        .unwrap();
+    assert_eq!(first.step(0).status, Status::Stopped);
+    assert_eq!(state.reopen().state.pending.len(), 1);
+    rig.store = state.reopen();
+    rig.script().runs = green();
+    let resumed = rig.go(&plan_on(&[]));
+    assert_eq!(resumed.step(0).status, Status::Done);
+    assert_eq!(resumed.step(0).expected_runs.len(), 1);
+    assert!(rig.puts().is_empty());
+    assert!(state.reopen().state.pending.is_empty());
 }

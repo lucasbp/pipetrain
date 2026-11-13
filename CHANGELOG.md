@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Merge confirms deploys only from saved expected workflow paths; auxiliary runs cannot decide the verdict and their failures remain visible.
+- Merge follows resolved and transitive `workflow_run` chains on the merge SHA, persists them for resume, and keeps untrackable chains pending with a diagnostic.
+- Merge refuses deploy confirmation from incomplete workflow-run responses, including more than 100 runs for a SHA.
+- Merge step details include expected run names and URLs, also exposed by the additive JSON `expected_runs` field.
+
 - Merge evaluates push branch and path filters on every base using complete PR file pagination and rename sources, dispensing the wait with evidence when no workflow should run and keeping uncertain inputs on the existing polling path.
 - Merge dry runs show each PR's workflow prediction in text and the additive JSON `deploy_prediction` field.
 - Pending merges save their workflow prediction, including expected workflow paths, for resume and subsequent verification; older records retain legacy polling behavior.

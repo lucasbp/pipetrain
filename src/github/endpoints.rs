@@ -42,6 +42,7 @@ pub struct Run {
     pub id: u64,
     pub workflow_id: u64,
     pub name: String,
+    pub path: String,
     pub status: String,
     pub conclusion: Option<String>,
     pub url: String,
@@ -60,6 +61,7 @@ fn parse_run(value: &Value) -> Run {
         id: number("id"),
         workflow_id: number("workflow_id"),
         name: text("name"),
+        path: text("path"),
         status: text("status"),
         conclusion: value
             .get("conclusion")
@@ -533,18 +535,29 @@ impl Client {
         }
     }
 
-    pub fn push_runs(&mut self, slug: &str, sha: &str) -> Result<Vec<Run>, ApiError> {
-        let path = format!("/repos/{slug}/actions/runs?head_sha={sha}&event=push&per_page=100");
+    pub fn workflow_runs(
+        &mut self,
+        slug: &str,
+        sha: &str,
+        push_only: bool,
+    ) -> Result<(Vec<Run>, bool), ApiError> {
+        let event = if push_only { "&event=push" } else { "" };
+        let path = format!("/repos/{slug}/actions/runs?head_sha={sha}{event}&per_page=100");
         let body = self
             .get(&path)?
             .into_body(&path)
             .map_err(|error| self.redact(error))?;
-        let runs = body
+        let runs: Vec<Run> = body
             .get("workflow_runs")
             .and_then(Value::as_array)
             .map(|runs| runs.iter().map(parse_run).collect())
             .unwrap_or_default();
-        Ok(runs)
+        let complete = body.get("workflow_runs").is_some_and(Value::is_array)
+            && body
+                .get("total_count")
+                .and_then(Value::as_u64)
+                .map_or(runs.len() < 100, |total| total == runs.len() as u64);
+        Ok((runs, complete))
     }
 
     pub fn tree(&mut self, slug: &str, sha: &str) -> Result<(Vec<String>, bool)> {

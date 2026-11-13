@@ -16,7 +16,8 @@ use crate::emit;
 use crate::github::{Client, LivePr, PrWrite};
 use crate::merge::{
     DependencyFailure, Kind, NotMerging, Pending, Report, SCHEMA, STOPPED, State, Status, Step,
-    StepReport, Store, Verdict, judge, resolve_state_path, steps, wait_is_published,
+    StepReport, Store, Verdict, judge, judge_expected, resolve_state_path, steps,
+    wait_is_published,
 };
 use crate::model::{PrKey, PrState};
 use crate::plan::Plan;
@@ -287,22 +288,56 @@ fn wait_for_deploy(
     sha: &str,
     limits: &Limits,
     hooks: &mut Hooks,
-) -> Deploy {
+    prediction: Option<&PushRuns>,
+    report: &mut StepReport,
+) -> (Deploy, Vec<String>) {
+    let expected = prediction.filter(|value| matches!(value, PushRuns::Expected { .. }));
     let poll = limits.poll.max(Duration::from_millis(1));
     let mut waited = Duration::ZERO;
     let mut settled: Option<usize> = None;
     let mut last = "no workflow run yet".to_string();
-    loop {
-        let runs = match client.push_runs(slug, sha) {
-            Ok(runs) => runs,
-            Err(error) => return Deploy::Unreadable(error.to_string()),
+    let mut auxiliary_failures = std::collections::BTreeSet::new();
+    let outcome = loop {
+        let (runs, complete) = match client.workflow_runs(slug, sha, expected.is_none()) {
+            Ok(reading) => reading,
+            Err(error) => break Deploy::Unreadable(error.to_string()),
         };
-        match judge(&runs) {
-            Verdict::Failed(text) => return Deploy::Failed(text),
+        let mut verdict = if let Some(prediction) = expected {
+            if let PushRuns::Expected {
+                workflows,
+                chained_workflows,
+                ..
+            } = prediction
+            {
+                let is_expected =
+                    |path: &String| workflows.contains(path) || chained_workflows.contains(path);
+                report.expected_runs = runs
+                    .iter()
+                    .filter(|run| is_expected(&run.path))
+                    .map(crate::merge::ExpectedRun::from)
+                    .collect();
+                for run in runs.iter().filter(|run| !is_expected(&run.path)) {
+                    if let Verdict::Failed(text) = judge(std::slice::from_ref(run)) {
+                        auxiliary_failures
+                            .insert(format!("auxiliary {text} (does not decide deploy)"));
+                    }
+                }
+            }
+            judge_expected(&runs, prediction)
+        } else {
+            judge(&runs)
+        };
+        if !complete && !matches!(verdict, Verdict::Failed(_)) {
+            verdict = Verdict::Waiting(
+                "workflow run response is incomplete; cannot confirm deploy".to_string(),
+            );
+        }
+        match verdict {
+            Verdict::Failed(text) => break Deploy::Failed(text),
             verdict @ (Verdict::Passed(count) | Verdict::Skipped(count)) => {
                 let skipped = matches!(verdict, Verdict::Skipped(_));
                 if settled == Some(count) {
-                    return if skipped {
+                    break if skipped {
                         Deploy::Skipped(count)
                     } else {
                         Deploy::Passed(count)
@@ -323,16 +358,17 @@ fn wait_for_deploy(
                 settled = None;
                 (hooks.progress)(&format!("deploy {slug}: waiting for a workflow to start"));
                 if waited >= limits.grace {
-                    return Deploy::NoRun(limits.grace);
+                    break Deploy::NoRun(limits.grace);
                 }
             }
         }
         if waited >= limits.timeout {
-            return Deploy::TimedOut(last);
+            break Deploy::TimedOut(last);
         }
         (hooks.sleep)(poll);
         waited += poll;
-    }
+    };
+    (outcome, auxiliary_failures.into_iter().collect())
 }
 
 fn deploy_phase(
@@ -342,7 +378,7 @@ fn deploy_phase(
     slug: &str,
     base: &str,
     sha: &str,
-    prediction: Option<&PushRuns>,
+    report: &mut StepReport,
 ) -> (Status, String) {
     (hooks.progress)(&format!("checking deploy workflows for {slug}@{base}"));
     if !env.cfg.merge.waits_for_deploy(slug) {
@@ -351,6 +387,8 @@ fn deploy_phase(
             "not waited: the repo is listed in merge.no_deploy_repos".to_string(),
         );
     }
+    let saved_prediction = report.deploy_prediction.clone();
+    let prediction = saved_prediction.as_ref();
     let legacy = if prediction.is_none() && is_stacked(base, &env.cfg.train_prefix) {
         Some(match workflows::read(client, slug, sha) {
             Ok(files) => workflows::branch_push_runs(&files, base),
@@ -359,18 +397,14 @@ fn deploy_phase(
     } else {
         None
     };
-    let prediction = prediction.or(legacy.as_ref());
-    let note = prediction.map(|reading| reading.detail(base));
-    if matches!(prediction, Some(PushRuns::Dispensed { .. })) {
+    let display_prediction = prediction.or(legacy.as_ref());
+    let note = display_prediction.map(|reading| reading.detail(base));
+    if matches!(display_prediction, Some(PushRuns::Dispensed { .. })) {
         return (
             Status::Done,
             format!("not waited: {}", note.unwrap_or_default()),
         );
     }
-    let said = |text: String| match &note {
-        Some(note) => format!("{note}; {text}"),
-        None => text,
-    };
     let timeout = env
         .settings
         .timeout
@@ -380,7 +414,21 @@ fn deploy_phase(
         poll: Duration::from_secs(env.cfg.merge.poll_seconds.max(1)),
         grace: Duration::from_secs(env.cfg.merge.no_run_grace_seconds),
     };
-    match wait_for_deploy(client, slug, sha, &limits, hooks) {
+    let (outcome, auxiliary_failures) =
+        wait_for_deploy(client, slug, sha, &limits, hooks, prediction, report);
+    let said = |text: String| {
+        let mut parts: Vec<String> = note.iter().cloned().collect();
+        parts.push(text);
+        parts.extend(report.expected_runs.iter().map(|run| {
+            format!(
+                "expected workflow {} ({}): {}",
+                run.name, run.path, run.html_url
+            )
+        }));
+        parts.extend(auxiliary_failures.iter().cloned());
+        parts.join("; ")
+    };
+    match outcome {
         Deploy::Passed(count) => (
             Status::Done,
             said(format!("deploy passed ({count} workflow runs)")),
@@ -615,15 +663,7 @@ fn finish_deploy(
         base,
         sha,
     } = *landed;
-    let (status, text) = deploy_phase(
-        env,
-        client,
-        hooks,
-        slug,
-        base,
-        sha,
-        report.deploy_prediction.as_ref(),
-    );
+    let (status, text) = deploy_phase(env, client, hooks, slug, base, sha, report);
     report.deploy = Some(text);
     report.status = status;
     report.detail = match status {

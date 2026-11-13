@@ -46,7 +46,7 @@ Each push has one prediction:
 
 | Prediction | Evidence and behavior |
 |---|---|
-| `expected` | Lists every workflow file whose push filters match. Continue the existing deploy polling. |
+| `expected` | Lists every workflow file whose push filters match, plus separately resolved `workflow_run` chains. Only these expected workflow paths can confirm deployment. |
 | `dispensed` | Every readable push workflow excludes this branch or these changed files, or the repo has no push workflow. End the step as `done` without polling runs. The detail names each excluding workflow, filter, patterns and changed filenames. |
 | `indeterminate` | The workflow YAML, glob or push inputs cannot be read reliably, or the workflow tree is truncated or malformed. Continue polling with the existing grace and timeout. Uncertainty never dispenses the wait, even if another workflow can be evaluated. |
 
@@ -66,13 +66,19 @@ Branch and path conditions must both match for a workflow to be expected:
 
 Filters accept a string or a list of strings. `*` matches within a path segment, `**` crosses `/`, and `**/` also matches zero directories. A leading `!` removes a previous match; a later positive pattern can include it again. Matching is case sensitive and covers the entire branch or filename. Unsupported patterns (including `?`, `+`, character classes, braces, backslashes, embedded `!` or three consecutive stars), malformed lists and conflicting include/ignore filters are indeterminate. Filter patterns are validated before deciding a workflow is excluded.
 
-For `expected` and `indeterminate`, the merge commit SHA is polled with `GET /repos/{repo}/actions/runs?head_sha={sha}&event=push`. The deploy is finished when there is at least one workflow run, all of them are `completed`, and two polls in a row saw the same number of runs. A run that ended as anything but `success`, `skipped` or `neutral` (`failure`, `cancelled`, `timed_out`, `action_required`) fails the step, even while other runs are still going.
+For a saved `expected` prediction, the merge commit SHA is polled with `GET /repos/{repo}/actions/runs?head_sha={sha}&per_page=100`, without an event filter. Runs are matched by their full repository-relative `path`, never by the display name. Every expected workflow must have a run, all its runs must be `completed` with `success` or `skipped`, and two consecutive complete polls must see the same number of expected runs. All-skipped expected runs finish as `skipped`; a mixture of success and skipped finishes as `done`. An expected run ending in any other conclusion, including `neutral`, fails the step even while other expected runs are going. Auxiliary runs cannot confirm, fail or delay this verdict; their observed failures remain in the deploy detail with name and URL.
 
-A run that ended `cancelled` is ignored when a newer run (a higher run id) of the same workflow exists for the same commit. A cancelled run without a replacement, or a replacement that was cancelled too, fails the step.
+The prediction preserves the original push paths in `workflows` and adds `chained_workflows` for workflows whose `on.workflow_run.workflows` cites the explicit top-level `name:` of an expected workflow. Resolution includes transitive chains and uses literal, case-sensitive names. A chain of a known workflow excluded by the push filters is not expected. Missing, unreadable or ambiguous chain names are recorded in `untracked_chains`: the detail says `chained workflow X cannot be tracked`, and green runs cannot confirm that step. It remains pending until timeout, including on resume. Unresolved references are treated conservatively because their relationship to the expected push cannot be proved. Chained branch/type filters do not dispense the wait.
 
-The two polls stabilize the observed run count. This slice records expected workflow files for subsequent deploy verification, but retains the existing polling verdict: it does not yet restrict confirmation to those workflows or follow `workflow_run` chains. An auxiliary push workflow can still satisfy the existing verdict; the expected list by itself is a prediction, not proof of deployment.
+For `indeterminate` predictions and legacy pending records without a saved prediction, the previous verdict is retained: query `head_sha={sha}&event=push&per_page=100`, require at least one run, accept `success`, `skipped` or `neutral`, fail on any other completed conclusion, and require the same run count across two successful polls. Legacy train records retain their branch-only dispensing check; this temporary prediction does not opt them into expected-path tracking.
 
-If no run appears within `merge.no_run_grace_seconds`, an expected or indeterminate step is `stopped`. The message preserves the prediction and its reason. A path filter that proves no workflow should run is reported as dispensed immediately. Absence of runs alone never recommends adding the entire repo to `merge.no_deploy_repos`; only evidence that the repo has no push workflows could justify that configuration.
+In both modes, a response with `total_count` different from the number of runs read cannot confirm deployment in that poll and resets the consecutive-poll confirmation. Without `total_count`, a full 100-run page is treated as incomplete. An unreadable run list is also incomplete. This slice deliberately keeps one page per poll rather than following pages: a SHA with more than 100 runs remains pending and times out. A visible expected failure still fails immediately in an incomplete response.
+
+A run that ended `cancelled` is ignored when a newer run (a higher run id) of the same workflow exists for the same commit. Expected-path tracking additionally requires that replacement to have the same path. A cancelled run without a replacement, or a replacement that was cancelled too, fails the step.
+
+The two polls stabilize the observed run count. Chain protection comes from requiring every resolved chain path to finish, including chains whose runs have not appeared yet; two settled readings of auxiliary runs alone provide no evidence of deployment.
+
+If no run appears within `merge.no_run_grace_seconds`, an expected or indeterminate step is `stopped`. When auxiliary or parent runs are present but an expected path is missing, the wait continues until the deploy timeout. An untrackable chain always uses the deploy timeout, even without runs. The message preserves the prediction and its reason. A path filter that proves no workflow should run is reported as dispensed immediately. Absence of runs alone never recommends adding the entire repo to `merge.no_deploy_repos`; only evidence that the repo has no push workflows could justify that configuration.
 
 ## Opening the deploy PR
 
@@ -180,15 +186,17 @@ Without a path override, unfinished work in the legacy global state blocks a nam
 | `not_merging` | `{id, reasons[]}[]` | PRs the plan left out and why. |
 | `questions` | string[] | The `? ...` lines of the plan. |
 
-A step is `{kind, target, status, detail}` plus `merge_sha`, `deploy`, `blocked_by` and `deploy_prediction` when they apply. `blocked_by` identifies the failed PR responsible for a blocked step. `kind` is `resume`, `merge`, `gate`, `wait` or `open-pr`. `status` is `planned`, `done`, `skipped`, `failed` or `stopped`; after a global stop the steps that did not run are `skipped` with the detail `stopped after an earlier failure`. Dependency and same-target skips include a specific reason.
+A step is `{kind, target, status, detail}` plus `merge_sha`, `deploy`, `blocked_by`, `deploy_prediction` and `expected_runs` when they apply. `blocked_by` identifies the failed PR responsible for a blocked step. `kind` is `resume`, `merge`, `gate`, `wait` or `open-pr`. `status` is `planned`, `done`, `skipped`, `failed` or `stopped`; after a global stop the steps that did not run are `skipped` with the detail `stopped after an earlier failure`. Dependency and same-target skips include a specific reason.
 
 `deploy_prediction` is an additive optional object on merge and resume steps. It is present for each evaluated PR in a dry run and for merged PRs after evaluation. Gates and unevaluated steps omit it. The same object is stored on new pending records with `serde(default)` compatibility for older state files. Existing fields and schema `1` keep their meaning.
 
 | Prediction shape | Fields |
 |---|---|
-| `{status: "expected", workflows: string[]}` | Full repository-relative workflow paths, for example `.github/workflows/deploy.yml`. |
+| `{status: "expected", workflows: string[], chained_workflows?: string[], untracked_chains?: string[]}` | `workflows` retains the full push workflow paths, for example `.github/workflows/deploy.yml`. `chained_workflows` adds resolved workflow paths triggered through `workflow_run`. `untracked_chains` lists workflow paths whose upstream names cannot be resolved reliably; these prevent confirmation. Both new lists are optional, omitted when empty, and default to empty when loading older predictions. |
 | `{status: "dispensed", reason: string, workflows: Exclusion[]}` | Each exclusion is `{workflow: string, filter: string, patterns: string[], files: string[]}`. `filter` identifies the excluding push filter, and `files` contains the complete current/previous filename set. The list is empty when there are no push workflows or `no_deploy_repos` overrides evaluation. |
 | `{status: "indeterminate", reason: string}` | Why a reliable prediction was unavailable. |
+
+`expected_runs` is an additive optional array of `{path: string, name: string, html_url: string, status: string, conclusion: string | null}`. It contains the observed expected runs from the latest successful poll, including chained runs and cancelled runs replaced by a newer run. Missing workflows remain in the prediction rather than receiving invented run URLs. Empty arrays are omitted, including for legacy polling. The existing `deploy` string also includes expected run names and URLs and observed auxiliary failures.
 
 Dry-run text shows `expected`, `dispensed` or `indeterminate` per PR together with workflow paths or the reason. The existing step `status` remains `planned` until execution. A dispensed merge is `done` with its merge SHA; it does not claim that a deploy ran.
 
@@ -216,7 +224,7 @@ A failed deploy remains `failed`, keeps its merge SHA and pending state, and mak
 
 New pending records contain optional `continuation` metadata: `dependents` captures the transitive dependency closure, `has_consumers` records dependency contracts, and `independent` maps independent PR IDs to their planned head SHAs. Resuming uses this snapshot together with the rebuilt graph, because merged PRs can disappear from the plan. A changed or new head without saved proof is blocked. Older state files still load, but a failed deploy without this metadata stops safely. Do not delete or edit pending state to bypass that protection.
 
-Text results use green for completed steps, red for failures, yellow for blocked skips and stopped gates, and gray for normal skips such as already merged PRs or workflows skipped by filters. An all-skipped deploy is a normal `skipped` result with its merge SHA retained and pending record removed after the usual two settled polls. A successful workflow alongside skipped auxiliary workflows remains green; a failed workflow alongside skipped workflows remains red. Colors respect `--color`, `NO_COLOR` and redirected output. JSON remains plain and retains the full report.
+Text results use green for completed steps, red for failures, yellow for blocked skips and stopped gates, and gray for normal skips such as already merged PRs or workflows skipped by filters. An all-skipped deploy is a normal `skipped` result with its merge SHA retained and pending record removed after the usual two settled polls. With a saved expected list, auxiliary conclusions do not affect the result: expected successes remain green and expected failures remain red. Legacy polling continues to judge every observed push workflow. Colors respect `--color`, `NO_COLOR` and redirected output. JSON remains plain and retains the full report.
 
 ## Parallel execution
 

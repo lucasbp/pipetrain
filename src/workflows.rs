@@ -10,6 +10,10 @@ use crate::github::Client;
 pub enum PushRuns {
     Expected {
         workflows: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        chained_workflows: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        untracked_chains: Vec<String>,
     },
     Dispensed {
         workflows: Vec<Exclusion>,
@@ -37,10 +41,26 @@ impl PushRuns {
 
     pub fn detail(&self, branch: &str) -> String {
         match self {
-            Self::Expected { workflows } => format!(
-                "expected: workflow {} runs on push to {branch}",
-                workflows.join(", ")
-            ),
+            Self::Expected {
+                workflows,
+                chained_workflows,
+                untracked_chains,
+            } => {
+                let mut detail = format!(
+                    "expected: workflow {} runs on push to {branch}",
+                    workflows.join(", ")
+                );
+                if !chained_workflows.is_empty() {
+                    detail.push_str(&format!(
+                        "; chained workflows: {}",
+                        chained_workflows.join(", ")
+                    ));
+                }
+                for workflow in untracked_chains {
+                    detail.push_str(&format!("; chained workflow {workflow} cannot be tracked"));
+                }
+                detail
+            }
             Self::Dispensed { workflows, reason } => {
                 let evidence = workflows
                     .iter()
@@ -348,10 +368,94 @@ fn evaluate(files: &[(String, String)], branch: &str, changed: Option<&[String]>
             workflows: excluded,
         }
     } else {
+        let (chained_workflows, untracked_chains) = chains(files, &expected);
         PushRuns::Expected {
             workflows: expected,
+            chained_workflows,
+            untracked_chains,
         }
     }
+}
+
+fn chains(files: &[(String, String)], expected: &[String]) -> (Vec<String>, Vec<String>) {
+    let documents: Vec<_> = files
+        .iter()
+        .map(|(path, text)| (path, YamlLoader::load_from_str(text).unwrap_or_default()))
+        .collect();
+    let mut names = std::collections::BTreeMap::<String, Vec<&String>>::new();
+    let mut triggers = Vec::new();
+    let mut untracked = std::collections::BTreeSet::new();
+    for (path, documents) in &documents {
+        let Some(map) = documents.first().and_then(Yaml::as_hash) else {
+            continue;
+        };
+        if let Some(name) = lookup(map, "name").and_then(Yaml::as_str) {
+            names.entry(name.to_string()).or_default().push(path);
+        }
+        let on = map
+            .iter()
+            .find(|(key, _)| key_is(key, "on") || matches!(key, Yaml::Boolean(true)))
+            .map(|(_, value)| value);
+        let trigger = on
+            .and_then(Yaml::as_hash)
+            .and_then(|events| lookup(events, "workflow_run"));
+        let Some(trigger) = trigger else {
+            if on.is_some_and(|on| {
+                key_is(on, "workflow_run")
+                    || on.as_vec().is_some_and(|events| {
+                        events.iter().any(|event| key_is(event, "workflow_run"))
+                    })
+            }) {
+                untracked.insert((*path).clone());
+            }
+            continue;
+        };
+        let workflows = trigger
+            .as_hash()
+            .and_then(|trigger| lookup(trigger, "workflows"))
+            .and_then(|value| match value {
+                Yaml::String(name) => Some(vec![name.clone()]),
+                Yaml::Array(names) if !names.is_empty() => names
+                    .iter()
+                    .map(|name| name.as_str().map(str::to_string))
+                    .collect(),
+                _ => None,
+            });
+        match workflows {
+            Some(workflows) => triggers.push((*path, workflows)),
+            None => {
+                untracked.insert((*path).clone());
+            }
+        }
+    }
+    let mut tracked: std::collections::BTreeSet<_> = expected.iter().cloned().collect();
+    loop {
+        let before = tracked.len();
+        for (path, workflows) in &triggers {
+            for workflow in workflows {
+                match names.get(workflow) {
+                    Some(paths) if paths.len() == 1 => {
+                        if tracked.contains(paths[0]) {
+                            tracked.insert((*path).clone());
+                        }
+                    }
+                    _ => {
+                        untracked.insert((*path).clone());
+                    }
+                }
+            }
+        }
+        if tracked.len() == before {
+            break;
+        }
+    }
+    (
+        tracked
+            .into_iter()
+            .filter(|path| !expected.contains(path))
+            .collect(),
+        untracked.into_iter().collect(),
+    )
 }
 
 #[cfg(test)]
@@ -458,7 +562,7 @@ mod tests {
             (".github/workflows/b.yml".into(), "on: push".into()),
         ];
         assert!(
-            matches!(push_runs(&files, "main", &[]), PushRuns::Expected { workflows } if workflows.len() == 2)
+            matches!(push_runs(&files, "main", &[]), PushRuns::Expected { workflows, .. } if workflows.len() == 2)
         );
         files.push((".github/workflows/c.yml".into(), "on: [".into()));
         assert!(matches!(
