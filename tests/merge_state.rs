@@ -110,6 +110,20 @@ fn state_lock_excludes_another_store_and_releases_on_drop() {
 }
 
 #[test]
+fn consecutive_executions_on_the_same_state_each_acquire_the_lock() {
+    let file = StateFile::new();
+    for round in 0..5 {
+        let mut store = file.open();
+        store.lock().unwrap();
+        store.state.queue_id = Some(format!("queue-{round}"));
+        store.save().unwrap();
+    }
+    let mut last = file.open();
+    last.lock().unwrap();
+    assert_eq!(last.state.queue_id.as_deref(), Some("queue-4"));
+}
+
+#[test]
 fn state_lock_is_exclusive_between_processes() {
     let file = StateFile::new();
     let mut store = file.open();
