@@ -20,9 +20,25 @@ need tar
 need mktemp
 
 if command -v curl >/dev/null 2>&1; then
-  fetch() { curl --fail --silent --show-error --location --proto '=https,http' --output "$2" "$1"; }
+  fetch() { curl --fail --silent --show-error --location --connect-timeout 15 --max-time 120 --proto '=https,http' --output "$2" "$1"; }
 elif command -v wget >/dev/null 2>&1; then
-  fetch() { wget --quiet --output-document="$2" "$1"; }
+  fetch() {
+    wget --quiet --connect-timeout=15 --timeout=120 --tries=1 --output-document="$2" "$1" &
+    transfer=$!
+    (
+      trap 'kill "${timer_sleep:-}" 2>/dev/null || :; exit 0' TERM INT
+      sleep 120 &
+      timer_sleep=$!
+      wait "$timer_sleep"
+      kill "$transfer" 2>/dev/null || :
+    ) &
+    timer=$!
+    status=0
+    wait "$transfer" || status=$?
+    kill "$timer" 2>/dev/null || :
+    wait "$timer" 2>/dev/null || :
+    return "$status"
+  }
 else
   fail "curl or wget is required"
 fi
@@ -51,7 +67,7 @@ target="$arch-$os"
 
 if [ "$VERSION" = latest ]; then
   command -v curl >/dev/null 2>&1 || fail "finding the latest release needs curl; set PIPETRAIN_VERSION to a version such as 0.2.0"
-  tag=$(curl --silent --show-error --location --proto '=https,http' --output /dev/null --write-out '%{url_effective}' "$BASE/latest" 2>/dev/null | sed 's|.*/||') || tag=""
+  tag=$(curl --silent --show-error --location --connect-timeout 15 --max-time 120 --proto '=https,http' --output /dev/null --write-out '%{url_effective}' "$BASE/latest" 2>/dev/null | sed 's|.*/||') || tag=""
   case "$tag" in v[0-9]*) ;; *) fail "could not find the latest release at $BASE/latest" ;; esac
 else
   case "$VERSION" in v*) tag="$VERSION" ;; *) tag="v$VERSION" ;; esac

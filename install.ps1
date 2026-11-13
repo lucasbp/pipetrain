@@ -22,6 +22,8 @@ if ($Version -eq 'latest') {
     try {
         $request = [System.Net.HttpWebRequest]::Create("$ReleaseBase/latest")
         $request.AllowAutoRedirect = $false
+        $request.Timeout = 120000
+        $request.ReadWriteTimeout = 120000
         $response = $request.GetResponse()
         $location = $response.Headers['Location']
         $response.Close()
@@ -47,8 +49,8 @@ New-Item -ItemType Directory -Path $work | Out-Null
 try {
     Write-Host "Downloading $asset"
     try {
-        Invoke-WebRequest -Uri "$ReleaseBase/download/$tag/$asset" -OutFile (Join-Path $work $asset) -UseBasicParsing
-        Invoke-WebRequest -Uri "$ReleaseBase/download/$tag/SHA256SUMS" -OutFile (Join-Path $work 'SHA256SUMS') -UseBasicParsing
+        Invoke-WebRequest -Uri "$ReleaseBase/download/$tag/$asset" -OutFile (Join-Path $work $asset) -UseBasicParsing -TimeoutSec 120
+        Invoke-WebRequest -Uri "$ReleaseBase/download/$tag/SHA256SUMS" -OutFile (Join-Path $work 'SHA256SUMS') -UseBasicParsing -TimeoutSec 120
     } catch {
         Stop-Install "could not download $asset or SHA256SUMS for $tag from $ReleaseBase"
     }
@@ -70,17 +72,33 @@ try {
     $installed = Join-Path $InstallDir 'pipetrain.exe'
     $staged = "$installed.new"
     Copy-Item $exe $staged -Force
-    if (Test-Path $installed) {
-        $old = "$installed.old"
-        Remove-Item $old -Force -ErrorAction SilentlyContinue
-        Move-Item $installed $old -Force
-    }
-    Move-Item $staged $installed -Force
+    $old = "$installed.old"
+    $backedUp = $false
+    $promoted = $false
+    try {
+        if (Test-Path $installed) {
+            Remove-Item $old -Force -ErrorAction SilentlyContinue
+            Move-Item $installed $old -Force
+            $backedUp = $true
+        }
+        Move-Item $staged $installed -Force
+        $promoted = $true
 
-    Write-Host "Installed pipetrain $tag to $installed"
-    $onPath = ($env:PATH -split ';') -contains $InstallDir
-    if (-not $onPath) {
-        Write-Host "Add $InstallDir to your PATH to run it: `$env:PATH += ';$InstallDir'"
+        Write-Host "Installed pipetrain $tag to $installed"
+        $onPath = ($env:PATH -split ';') -contains $InstallDir
+        if (-not $onPath) {
+            Write-Host "Add $InstallDir to your PATH to run it: `$env:PATH += ';$InstallDir'"
+        }
+    } catch {
+        if ($backedUp) {
+            Remove-Item -LiteralPath $installed -Force -ErrorAction SilentlyContinue
+            Move-Item -LiteralPath $old -Destination $installed -Force
+        } elseif ($promoted) {
+            Remove-Item -LiteralPath $installed -Force
+        }
+        throw
+    } finally {
+        Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
     }
 } finally {
     Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue

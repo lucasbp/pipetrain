@@ -2,11 +2,11 @@
 
 pipetrain is a command-line tool that plans the order in which pull requests should merge across several repositories. It reads GitHub, builds a dependency graph from what it finds, and prints the order: what can merge at the same time, what has to wait for what, and why.
 
-It is read-only by default. It never pushes or comments, and it stores nothing but a cache, the resume state of `merge` and, only if you turn it on, a [local usage log](#local-usage-log). Only two commands write to GitHub, both only with `--apply`: `pipetrain bundle --apply` creates a deploy branch, changes the base of the PRs bundled into it and, with `--open-pr`, opens the deploy PR, and `pipetrain merge --apply` merges the PRs of the plan one at a time, waiting for each deploy.
+It is read-only by default. Planning uses read-only GitHub requests. Local files include the cache, merge resume state and audit history, and, only if you turn it on, a [local usage log](#local-usage-log). Only two commands write to GitHub, both only with `--apply`: `pipetrain bundle --apply` creates a deploy branch, changes the base of the PRs bundled into it and, with `--open-pr`, opens the deploy PR, and `pipetrain merge --apply` merges independent PRs in parallel, waiting for each deploy before dependent work. Its optional `--bump` preparation can also push isolated dependency branches and open draft PRs after proving a new package publication.
 
 ## Requirements
 
-- **No Git needed.** pipetrain talks to the GitHub API over HTTPS. It never clones, fetches or runs `git`.
+- **Git is optional for planning and ordinary merges.** These use the GitHub API over HTTPS. `merge --bump --apply` requires local Git, Git authentication and commit identity, plus the .NET SDK for its NuGet restore checks; it fetches into isolated workspaces and can commit and push a bump branch. See [publication-backed preparation](docs/publication-bump.md).
 - **A GitHub token**, from one of two places: the GitHub CLI (`gh`, optional) once you ran `gh auth login`, or the `GH_TOKEN` environment variable. You need only one of them.
 - **Rust only to build from source.** A prebuilt binary needs nothing else. Building needs a recent stable Rust toolchain (the crate uses edition 2024).
 
@@ -18,7 +18,7 @@ Pick one. Every prebuilt option comes from a [GitHub Release](https://github.com
 
 ### Install script
 
-Both scripts install into a folder you own, without admin rights or `sudo`, and stop without installing anything if the SHA-256 does not match. They never edit your `PATH`: they print the line to add.
+Both scripts install into a folder you own, without admin rights or `sudo`, and stop without installing anything if the SHA-256 does not match. They never edit your `PATH`: they print the line to add. Downloads have a 120 second deadline, with a 15 second connection timeout in the shell installer. The wget fallback enforces the total deadline with a watchdog. The PowerShell installer restores the previous binary if replacement or the final installation step fails.
 
 Linux and macOS (`~/.local/bin`):
 
@@ -200,7 +200,7 @@ pipetrain plan [OPTIONS] [PRS]...
 | `pipetrain bundle` | Dry run of the bundle suggestion: shows the branch it would create and the PRs it would retarget. Writes nothing. Takes the same PR arguments and options as `plan`. |
 | `pipetrain bundle --apply` | Creates the deploy branch (`deploy/<date>-<base>`), retargets the bundled PRs and, with `--open-pr`, opens the deploy PR. Asks for confirmation unless `--yes` is given. See [Applying the bundle suggestion](#applying-the-bundle-suggestion). |
 | `pipetrain merge` | Dry run of the merge: the steps it would take in the order of the plan. Writes nothing. Takes the same PR arguments and options as `plan`. |
-| `pipetrain merge --apply` | Merges the PRs of the plan one at a time and waits for each deploy before the next. Asks for confirmation unless `--yes` is given. See [Merging the queue](#merging-the-queue). |
+| `pipetrain merge --apply` | Merges independent PRs in parallel up to `max_parallel`, with one active PR per repository, and waits for deploys before dependent work. Asks for confirmation unless `--yes` is given. See [Merging the queue](#merging-the-queue). |
 | `pipetrain state show --json` | Inspects local merge state, pending ages, deploy PRs, active jobs and audit history. Uses the same `--state`, `--profile` and `--config` selection as merge. See [State inspection and recovery](docs/state.md). |
 | `pipetrain state discard <id> --reason <text>` | Discards one pending record locally with an audit entry, without confirming a deploy. Requires typing `yes`, or `--yes` without a terminal. Never writes to GitHub. |
 | `pipetrain feed <PACKAGE> [--version <V>]` | Read-only: tells whether a package version is published in its NuGet or npm feed; `--wait` blocks until it is. See [Checking a package feed](#checking-a-package-feed). |
@@ -784,7 +784,7 @@ A line holds the time, the version, the subcommand name, the exit code, the erro
 
 ## Merging the queue
 
-`pipetrain merge --apply` runs the order of `plan --emit queue`: it merges one PR, waits until the workflow runs of that push finish, and only then merges the next. Before each merge it reads the PR again and refuses one that is not approved, green and `clean`, or whose head moved after the plan, so a PR the plan marked as not ready is never merged. DDL and infra gates and unpublished package waits ask for confirmation (`--gates-confirmed` answers them; without a terminal the run stops there). A stop, a timeout or a failed deploy leaves a state file, and running the same command again resumes from there. Without `--apply` it only prints the steps. A leaf deploy failure keeps its failed status and pending record while proven independent PRs continue. Dependency publisher failures stop by default; `--dependency-failure skip` blocks their consumers and continues independent PRs. Legacy pending records without independence metadata stop safely on failure. A cancelled workflow run that a newer run of the same workflow replaced is ignored. A merge into a deploy branch skips the wait only after reading the workflow files and finding that none runs on a push to it; when one does, or the files cannot be read, it waits. With `--open-pr`, the deploy PR of a bundle is opened after the last PR of the bundle is merged, never before.
+`pipetrain merge --apply` runs the order of `plan --emit queue`: it merges independent PRs in parallel up to `max_parallel` (one active PR per repository), waits for each expected deploy, and releases dependent work only after its prerequisites finish. Before each merge it reads the PR again and refuses one that is not approved, green and `clean`, or whose head moved after the plan, so a PR the plan marked as not ready is never merged. DDL and infra gates and unpublished package waits ask for confirmation (`--gates-confirmed` answers them; without a terminal the run stops there). A stop, a timeout or a failed deploy leaves a state file, and running the same command again resumes from there. Without `--apply` it only prints the steps. A leaf deploy failure keeps its failed status and pending record while proven independent PRs continue. Dependency publisher failures stop by default; `--dependency-failure skip` blocks their consumers and continues independent PRs. Legacy pending records without independence metadata stop safely on failure. A cancelled workflow run that a newer run of the same workflow replaced is ignored. On any base branch, including `main`, workflow branch and path filters can dispense the deploy wait with evidence; unreadable or indeterminate inputs retain polling. With `--open-pr`, the deploy PR of a bundle is opened after the last PR of the bundle is merged, never before.
 
 ```toml
 [merge]
@@ -794,6 +794,12 @@ no_deploy_repos = ["acme/docs"]
 [merge.repo_timeout_minutes]
 "acme/api" = 60
 ```
+
+Deploy deadlines count HTTP, pacing and retry time as well as sleeps. Transient transport and server failures get up to three consecutive read retries, then stop resumably. The preview estimates discovery, checks and deploy polls for the configured per-repository timeouts and warns when `api.max_requests` is too small. The warning does not change that budget or block confirmation.
+
+Inspect inherited work and its age with `pipetrain state show` or `pipetrain state show --json`. `pipetrain state discard <id> --reason <text>` requires confirmation and moves the pending record into local audit history; it does not confirm a deploy or write to GitHub. Both commands use merge's state path and profile selection. See [state inspection and recovery](docs/state.md).
+
+`pipetrain merge --bump` can prepare draft dependency bump PRs only after proving a new publication from a publisher merged by the recorded queue execution. It is off by default; `--no-bump` explicitly disables it. `--apply` and confirmation are required for writes. It uses local Git and .NET restore in isolated workspaces. Consumers stay blocked for CI and review, while independent items can continue. Skipped or duplicate publication does not create a bump PR or skip the consumer. See [publication-backed preparation](docs/publication-bump.md).
 
 Exit code `5` means stopped and resumable. Everything else, the checks, the JSON and the design questions that were left open on purpose: [docs/merge.md](docs/merge.md).
 
@@ -822,7 +828,7 @@ The tools, the result format, the errors and the protocol choice are in [docs/mc
 
 ## Out of scope
 
-pipetrain does not push, approve, comment, label or re-run checks, and nothing in it is a deploy tool. It writes to GitHub only through two commands that need `--apply`: `pipetrain bundle --apply` creates a deploy branch and changes the base of the PRs bundled into it, and `pipetrain merge --apply` merges the PRs of the plan one at a time and waits for their deploy. It decides order, not safety: it does not know whether a migration is backward compatible, only that it has to go first.
+pipetrain does not approve, comment, label or re-run checks, and it does not execute deployments. It writes to GitHub only through two commands that need `--apply`: `pipetrain bundle --apply` creates a deploy branch and changes the base of the PRs bundled into it, and `pipetrain merge --apply` merges independent PRs in parallel and waits for their deploy. With the additional `--bump` opt-in it can commit and push an isolated bump branch and open a draft PR after proving publication. Default planning and standalone `bump` remain read-only. It decides order, not safety: it does not know whether a migration is backward compatible, only that it has to go first.
 
 ## Documentation
 
@@ -851,10 +857,3 @@ cargo test --locked
 
 MIT, by Lucas Passos. See [LICENSE](LICENSE).
 
-`pipetrain merge --bump` can prepare draft dependency bump PRs only after proving
-a new publication from a publisher merged by the recorded queue execution. It is
-off by default; `--no-bump` explicitly disables it. `--apply` and confirmation are
-required for writes. Consumers stay blocked for CI and review, while independent
-items can continue. Skipped/duplicate publication does not create a bump PR or
-skip the consumer. See [publication-backed preparation](docs/publication-bump.md)
-for exact feed evidence, isolated workspaces and durable resume.

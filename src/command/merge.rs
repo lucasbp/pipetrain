@@ -32,7 +32,7 @@ mod parallel;
 mod recovery;
 mod stacked;
 
-const MERGEABILITY_TRIES: usize = 13;
+const MERGEABILITY_TIMEOUT: Duration = Duration::from_secs(60);
 const MERGEABILITY_PAUSE: Duration = Duration::from_secs(5);
 const TRAIN_NOTICE: &str =
     "intermediate train branch; promotion to the release target is still required";
@@ -70,6 +70,7 @@ pub struct Hooks<'a> {
     pub confirm: &'a mut dyn FnMut(&str) -> bool,
     pub gate: &'a mut dyn FnMut(&str) -> bool,
     pub sleep: &'a mut dyn FnMut(Duration),
+    pub now: &'a (dyn Fn() -> Instant + Sync),
     pub observe: &'a mut dyn FnMut(&StepReport),
     pub progress: &'a mut dyn FnMut(&str),
 }
@@ -274,19 +275,30 @@ fn settled_live(
     number: u64,
     hooks: &mut Hooks,
 ) -> Result<LivePr, crate::github::ApiError> {
+    let started = (hooks.now)();
     let mut tries = 0;
     loop {
+        if (hooks.now)().saturating_duration_since(started) >= MERGEABILITY_TIMEOUT {
+            return Err(crate::github::ApiError::Stopped {
+                message: "GitHub mergeability did not settle within 60s; no merge was attempted, run again to resume".to_string(),
+            });
+        }
         let live = client.live_pr(slug, number)?;
         tries += 1;
+        let remaining =
+            MERGEABILITY_TIMEOUT.saturating_sub((hooks.now)().saturating_duration_since(started));
+        if remaining.is_zero() {
+            continue;
+        }
         let unsettled = live.open && matches!(live.mergeable_state.as_str(), "unknown" | "");
-        if !unsettled || tries >= MERGEABILITY_TRIES {
+        if !unsettled {
             return Ok(live);
         }
         (hooks.progress)(&format!(
-            "GitHub is recalculating mergeability of {slug}#{number}; retry {tries}/{} in 5s",
-            MERGEABILITY_TRIES - 1
+            "GitHub is recalculating mergeability of {slug}#{number}; retry {tries} in {:.1}s",
+            MERGEABILITY_PAUSE.min(remaining).as_secs_f64()
         ));
-        (hooks.sleep)(MERGEABILITY_PAUSE);
+        (hooks.sleep)(MERGEABILITY_PAUSE.min(remaining));
     }
 }
 
@@ -316,15 +328,43 @@ fn wait_for_deploy(
     let mut emit =
         |message: &str| (hooks.progress)(&format!("waiting for deploy: {workflows}; {message}"));
     let poll = limits.poll.max(Duration::from_millis(1));
-    let mut waited = Duration::ZERO;
+    let started = (hooks.now)();
+    let mut consecutive_errors = 0;
     let mut settled: Option<usize> = None;
     let mut last = "no workflow run yet".to_string();
     let mut auxiliary_failures = std::collections::BTreeSet::new();
     let outcome = loop {
+        if (hooks.now)().saturating_duration_since(started) >= limits.timeout {
+            break Deploy::TimedOut(last);
+        }
         let (runs, complete) = match client.workflow_runs(slug, sha, expected.is_none()) {
-            Ok(reading) => reading,
+            Ok(reading) => {
+                consecutive_errors = 0;
+                reading
+            }
+            Err(error) if transient_read(&error) => {
+                consecutive_errors += 1;
+                settled = None;
+                last = format!("transient workflow read error: {error}");
+                let remaining = limits
+                    .timeout
+                    .saturating_sub((hooks.now)().saturating_duration_since(started));
+                if remaining.is_zero() {
+                    break Deploy::TimedOut(last);
+                }
+                if consecutive_errors > 3 {
+                    break Deploy::Unreadable(format!("{error}; exhausted 3 consecutive retries"));
+                }
+                emit(&format!("{last}; retry {consecutive_errors}/3"));
+                (hooks.sleep)(poll.min(remaining));
+                continue;
+            }
             Err(error) => break Deploy::Unreadable(error.to_string()),
         };
+        let elapsed = (hooks.now)().saturating_duration_since(started);
+        if elapsed >= limits.timeout {
+            break Deploy::TimedOut(last);
+        }
         let observed = runs
             .iter()
             .map(|run| format!("{}: {}", run.name, run.url))
@@ -368,6 +408,7 @@ fn wait_for_deploy(
                 "workflow run response is incomplete; cannot confirm deploy".to_string(),
             );
         }
+        let no_runs = matches!(verdict, Verdict::NoRuns);
         match verdict {
             Verdict::Failed(text) => break Deploy::Failed(text),
             verdict @ (Verdict::Passed(count) | Verdict::Skipped(count)) => {
@@ -393,18 +434,34 @@ fn wait_for_deploy(
             Verdict::NoRuns => {
                 settled = None;
                 emit(&format!("deploy {slug}: waiting for a workflow to start"));
-                if waited >= limits.grace {
+                if elapsed >= limits.grace {
                     break Deploy::NoRun(limits.grace);
                 }
             }
         }
-        if waited >= limits.timeout {
-            break Deploy::TimedOut(last);
-        }
-        (hooks.sleep)(poll);
-        waited += poll;
+        let remaining = limits
+            .timeout
+            .saturating_sub((hooks.now)().saturating_duration_since(started));
+        let remaining = if no_runs {
+            remaining.min(limits.grace.saturating_sub(elapsed))
+        } else {
+            remaining
+        };
+        (hooks.sleep)(poll.min(remaining));
     };
     (outcome, auxiliary_failures.into_iter().collect())
+}
+
+fn transient_read(error: &crate::github::ApiError) -> bool {
+    match error {
+        crate::github::ApiError::Network => true,
+        crate::github::ApiError::Other { message } => message
+            .strip_prefix("GitHub answered ")
+            .and_then(|text| text.split_whitespace().next())
+            .and_then(|status| status.parse::<u16>().ok())
+            .is_some_and(|status| (500..600).contains(&status)),
+        _ => false,
+    }
 }
 
 fn deploy_phase(
@@ -530,14 +587,29 @@ fn merge_one(
     let key = PrKey::new(&item.org, &item.repo, item.number);
     let slug = key.slug();
     (hooks.progress)(&format!("checking merge readiness of {}", item.id));
+    let started = (hooks.now)();
     let mut tries = 0;
     let pr = loop {
+        if (hooks.now)().saturating_duration_since(started) >= MERGEABILITY_TIMEOUT {
+            return stop(
+                report,
+                "GitHub mergeability is still unknown after 60s; no merge was attempted, run again to resume",
+            );
+        }
         let pr = match client.pr(&key) {
             Ok(Some(pr)) => pr,
             Ok(None) => return fail(report, "not found on GitHub"),
             Err(error) => return fail(report, format!("{error:#}")),
         };
         tries += 1;
+        let remaining =
+            MERGEABILITY_TIMEOUT.saturating_sub((hooks.now)().saturating_duration_since(started));
+        if remaining.is_zero() {
+            return stop(
+                report,
+                "GitHub readiness check exceeded 60s; no merge was attempted, run again to resume",
+            );
+        }
         let mut settled = pr.clone();
         settled.mergeable_unknown = false;
         if !(pr.mergeable_unknown || pr.merge_state_status.eq_ignore_ascii_case("UNKNOWN"))
@@ -545,18 +617,12 @@ fn merge_one(
         {
             break pr;
         }
-        if tries >= MERGEABILITY_TRIES {
-            return stop(
-                report,
-                "GitHub mergeability is still unknown after 60s; no merge was attempted, run again to resume",
-            );
-        }
         (hooks.progress)(&format!(
-            "GitHub is recalculating mergeability of {}; retry {tries}/{} in 5s",
+            "GitHub is recalculating mergeability of {}; retry {tries} in {:.1}s",
             item.id,
-            MERGEABILITY_TRIES - 1
+            MERGEABILITY_PAUSE.min(remaining).as_secs_f64()
         ));
-        (hooks.sleep)(MERGEABILITY_PAUSE);
+        (hooks.sleep)(MERGEABILITY_PAUSE.min(remaining));
     };
     if pr.state == PrState::Merged {
         report.status = Status::Skipped;
@@ -588,6 +654,7 @@ fn merge_one(
     }
     let live = match settled_live(client, &slug, item.number, hooks) {
         Ok(live) => live,
+        Err(crate::github::ApiError::Stopped { message }) => return stop(report, message),
         Err(error) => return fail(report, error.to_string()),
     };
     if live.merged {
@@ -1077,7 +1144,9 @@ pub fn merge_plan(
         readings: RefCell::new(BTreeMap::new()),
         stacked: stacked::Evidence::default(),
     };
+    let requests = client.requests();
     let mut report = Report {
+        api_estimate: estimate(plan, cfg, settings, store, requests, &[]),
         max_parallel: cfg.max_parallel,
         summary: Summary::default(),
         preflight: plan
@@ -1117,6 +1186,7 @@ pub fn merge_plan(
             }
         }
         arrange(&mut report, plan, store, settings);
+        report.api_estimate = estimate(plan, cfg, settings, store, requests, &report.steps);
         return Ok(Outcome {
             report,
             aborted: false,
@@ -1190,6 +1260,7 @@ pub fn merge_plan(
                 confirm: &mut *hooks.confirm,
                 gate: &mut *hooks.gate,
                 sleep: &mut *hooks.sleep,
+                now: hooks.now,
                 observe: &mut *hooks.observe,
                 progress: &mut progress,
             };
@@ -1275,6 +1346,72 @@ pub fn merge_plan(
     })
 }
 
+fn deploy_polls(cfg: &Config, settings: &Settings, slug: &str) -> u64 {
+    let timeout = settings
+        .timeout
+        .unwrap_or_else(|| cfg.merge.timeout_for(slug));
+    let interval = Duration::from_secs(cfg.merge.poll_seconds.max(1));
+    u64::try_from(timeout.as_nanos().div_ceil(interval.as_nanos()))
+        .unwrap_or(u64::MAX)
+        .saturating_add(1)
+}
+
+fn estimate(
+    plan: &Plan,
+    cfg: &Config,
+    settings: &Settings,
+    store: &Store,
+    requests: u32,
+    evaluated: &[StepReport],
+) -> crate::merge::ApiEstimate {
+    let mut discovery = u64::from(requests.max(plan.stats.requests));
+    let mut checks = 0u64;
+    let mut polls = 0u64;
+    for step in planned_steps(plan, cfg) {
+        if step.kind != Kind::Merge {
+            continue;
+        }
+        let Some(item) = plan.items.iter().find(|item| item.id == step.target) else {
+            continue;
+        };
+        let slug = format!("{}/{}", item.org, item.repo);
+        checks = checks.saturating_add(3);
+        if plan.items.iter().any(|child| {
+            child.org.eq_ignore_ascii_case(&item.org)
+                && child.repo.eq_ignore_ascii_case(&item.repo)
+                && child.base == item.head
+        }) {
+            checks = checks.saturating_add(3);
+        }
+        if cfg.merge.waits_for_deploy(&slug) {
+            discovery = discovery.saturating_add(7);
+            if !evaluated.iter().any(|step| {
+                step.target == item.id
+                    && matches!(step.deploy_prediction, Some(PushRuns::Dispensed { .. }))
+            }) {
+                polls = polls.saturating_add(deploy_polls(cfg, settings, &slug));
+            }
+        }
+    }
+    for pending in &store.state.pending {
+        checks = checks.saturating_add(4 + u64::from(pending.sha.is_none()));
+        if cfg.merge.waits_for_deploy(&pending.repo)
+            && !matches!(pending.deploy_prediction, Some(PushRuns::Dispensed { .. }))
+        {
+            polls = polls.saturating_add(deploy_polls(cfg, settings, &pending.repo));
+        }
+    }
+    let total = discovery.saturating_add(checks).saturating_add(polls);
+    crate::merge::ApiEstimate {
+        discovery,
+        checks,
+        deploy_polls: polls,
+        total,
+        budget: cfg.api.max_requests,
+        exceeds_budget: total > u64::from(cfg.api.max_requests),
+    }
+}
+
 fn step_text(step: &StepReport, color: bool) -> String {
     let what = match step.kind {
         Kind::Resume => format!("wait for the deploy of {}", step.target),
@@ -1353,6 +1490,11 @@ fn render_with_steps(report: &Report, color: bool, include_steps: bool) -> Strin
             report.max_parallel
         ));
         out.push_str(&report.state.render());
+        let estimate = &report.api_estimate;
+        out.push_str(&format!("estimated API requests: {} (discovery {}, checks and merges {}, deploy polls {}); budget {}\n", estimate.total, estimate.discovery, estimate.checks, estimate.deploy_polls, estimate.budget));
+        if estimate.exceeds_budget {
+            out.push_str("warning: this queue may exceed its API request budget; raise api.max_requests in the config. This estimate does not block execution.\n");
+        }
         for pr in &report.preflight {
             for line in pr.lines() {
                 out.push_str(&format!("{line}\n"));
@@ -1529,6 +1671,7 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
         confirm: &mut confirm,
         gate: &mut at_gate,
         sleep: &mut pause,
+        now: &Instant::now,
         observe: &mut observe,
         progress: &mut progress,
     };

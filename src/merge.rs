@@ -591,7 +591,18 @@ pub struct NotMerging {
 }
 
 #[derive(Debug, Serialize)]
+pub struct ApiEstimate {
+    pub discovery: u64,
+    pub checks: u64,
+    pub deploy_polls: u64,
+    pub total: u64,
+    pub budget: u32,
+    pub exceeds_budget: bool,
+}
+
+#[derive(Debug, Serialize)]
 pub struct Report {
+    pub api_estimate: ApiEstimate,
     pub max_parallel: usize,
     pub summary: Summary,
     pub preflight: Vec<crate::model::Readiness>,

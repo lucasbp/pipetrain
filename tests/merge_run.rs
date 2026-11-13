@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 mod common;
 use common::{Server, pr, serve_requests};
@@ -19,6 +19,9 @@ use serde_json::{Value, json};
 const TRAIN: &str = "deploy/05-11-2026";
 
 struct Script {
+    http_elapsed: BTreeMap<String, Duration>,
+    run_errors: std::collections::VecDeque<u16>,
+    run_delays: std::collections::VecDeque<Duration>,
     base: String,
     review: BTreeMap<u64, String>,
     unknown_reads: BTreeMap<u64, usize>,
@@ -380,6 +383,9 @@ fn green() -> Vec<Value> {
 impl Script {
     fn new() -> Self {
         Self {
+            http_elapsed: BTreeMap::new(),
+            run_errors: Default::default(),
+            run_delays: Default::default(),
             base: "main".to_string(),
             review: BTreeMap::new(),
             unknown_reads: BTreeMap::new(),
@@ -586,6 +592,11 @@ fn respond(script: &Mutex<Script>, line: &str, payload: &str) -> (u16, Value) {
         return (200, script.live(rest.parse().unwrap()));
     }
     if line.starts_with("GET /repos/acme/api/actions/runs") {
+        if let Some(status) = script.run_errors.pop_front()
+            && status != 200
+        {
+            return (status, json!({"message": "temporarily unavailable"}));
+        }
         let sha = line
             .split("head_sha=")
             .nth(1)
@@ -633,6 +644,8 @@ impl Run {
 }
 
 struct Rig {
+    request_timeout: Duration,
+    clock: Arc<Mutex<Instant>>,
     script: Arc<Mutex<Script>>,
     server: Server,
     store: Store,
@@ -647,13 +660,39 @@ impl Rig {
     fn with_top(top: &str, extra: &str) -> Self {
         let script = Arc::new(Mutex::new(Script::new()));
         let shared = Arc::clone(&script);
-        let server = serve_requests(move |line, payload| respond(&shared, line, payload));
+        let clock = Arc::new(Mutex::new(Instant::now()));
+        let server_clock = Arc::clone(&clock);
+        let server = serve_requests(move |line, payload| {
+            let elapsed = shared
+                .lock()
+                .unwrap()
+                .http_elapsed
+                .iter()
+                .filter(|(route, _)| line.starts_with(route.as_str()))
+                .map(|(_, duration)| *duration)
+                .sum::<Duration>();
+            *server_clock.lock().unwrap() += elapsed;
+            let delay = if line.contains("/actions/runs?") {
+                shared
+                    .lock()
+                    .unwrap()
+                    .run_delays
+                    .pop_front()
+                    .unwrap_or_default()
+            } else {
+                Duration::ZERO
+            };
+            std::thread::sleep(delay);
+            respond(&shared, line, payload)
+        });
         let mut cfg = Config::parse(&format!(
             "orgs = [\"acme\"]\n{top}[merge]\npoll_seconds = 1\ntimeout_minutes = 1\nno_run_grace_seconds = 3\n{extra}"
         ))
         .unwrap();
         cfg.max_parallel = 1;
         Self {
+            request_timeout: Duration::from_secs(40),
+            clock,
             script,
             server,
             store: Store::in_memory(),
@@ -677,11 +716,12 @@ impl Rig {
             max_per_minute: 1000,
             min_remaining: 0,
         };
-        let mut client = Client::with_base_url(
+        let mut client = Client::with_timeout(
             "ghp_FAKE0123456789".to_string(),
             &api,
             false,
             &self.server.base,
+            self.request_timeout,
         );
         let mut confirms = 0;
         let mut confirmation_text = Vec::new();
@@ -701,16 +741,27 @@ impl Rig {
             };
             let mut sleep_hook = |pause: Duration| {
                 slept += pause;
+                *self.clock.lock().unwrap() += pause;
                 if settings.feed_registry.is_some() {
                     std::thread::sleep(pause);
                 }
             };
             let mut observe_hook = |_: &StepReport| observed += 1;
             let mut progress_hook = |text: &str| phases.push(text.to_string());
+            let run_started = Instant::now();
+            let now = || {
+                *self.clock.lock().unwrap()
+                    + if self.cfg.max_parallel > 1 {
+                        run_started.elapsed()
+                    } else {
+                        Duration::ZERO
+                    }
+            };
             let mut hooks = Hooks {
                 confirm: &mut confirm_hook,
                 gate: &mut gate_hook,
                 sleep: &mut sleep_hook,
+                now: &now,
                 observe: &mut observe_hook,
                 progress: &mut progress_hook,
             };
@@ -1202,7 +1253,7 @@ fn unknown_mergeability_is_retried_for_a_minute_and_then_stops_without_merging()
         .iter()
         .filter(|line| line.as_str() == "GET /repos/acme/api/pulls/1")
         .count();
-    assert_eq!(reads, 13);
+    assert_eq!(reads, 12);
     assert_eq!(run.outcome.code, EXIT_STOPPED);
     assert!(rig.puts().is_empty());
 }
@@ -2541,6 +2592,7 @@ fn parallel_http_merges_overlap_and_pending_state_is_durable_before_put() {
             confirm: &mut confirm,
             gate: &mut gate,
             sleep: &mut sleep,
+            now: &Instant::now,
             observe: &mut observe,
             progress: &mut progress,
         },
@@ -3037,13 +3089,15 @@ fn apply_records_utc_pending_timestamp_and_keeps_stale_resume_behavior() {
 
 impl FilterState {
     fn attach(rig: &mut Rig) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let directory = std::env::temp_dir().join(format!(
-            "pipetrain-deploy-filters-{}-{}",
+            "pipetrain-deploy-filters-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         rig.store = Store::open(Some(directory.join("state.json"))).unwrap();
         Self { directory }
@@ -3530,7 +3584,17 @@ fn auxiliary_success_waits_until_the_expected_deploy_finishes() {
         auxiliary,
         workflow_run("deploy.yml", "Deploy", "completed", Some("success")),
     ];
-    let run = short_deploy(&mut rig);
+    let run = rig
+        .run(
+            &plan_on(&[1]),
+            Settings {
+                timeout: Some(Duration::from_secs(4)),
+                ..applied()
+            },
+            true,
+            true,
+        )
+        .unwrap();
     assert_eq!(run.step(0).status, Status::Done);
     assert_eq!(rig.polls(), 4);
     assert!(
@@ -3636,7 +3700,17 @@ fn workflow_run_chain_is_followed_by_path_and_same_sha_until_success() {
     child["status"] = json!("completed");
     child["conclusion"] = json!("success");
     rig.script().runs = vec![parent, child];
-    let run = short_deploy(&mut rig);
+    let run = rig
+        .run(
+            &plan_on(&[1]),
+            Settings {
+                timeout: Some(Duration::from_secs(4)),
+                ..applied()
+            },
+            true,
+            true,
+        )
+        .unwrap();
     assert_eq!(run.step(0).status, Status::Done);
     assert_eq!(rig.polls(), 4);
     for request in rig
@@ -3674,7 +3748,7 @@ fn unresolved_chain_times_out_and_is_preserved_for_resume() {
         }
         let run = short_deploy(&mut rig);
         assert_eq!(run.step(0).status, Status::Stopped);
-        assert_eq!(rig.polls(), 4);
+        assert_eq!(rig.polls(), 3);
         assert!(
             run.said(0)
                 .contains("chained workflow .github/workflows/release.yml cannot be tracked")
@@ -4320,7 +4394,7 @@ fn untrackable_chain_uses_timeout_even_without_runs() {
     rig.script().runs.clear();
     let run = short_deploy(&mut rig);
     assert_eq!(run.step(0).status, Status::Stopped);
-    assert_eq!(rig.polls(), 4);
+    assert_eq!(rig.polls(), 3);
     assert_eq!(run.slept, Duration::from_secs(3));
     assert!(
         run.said(0)
@@ -4774,5 +4848,329 @@ fn package_wait_uses_nuget_service_index_and_records_feed_evidence() {
     assert!(run.step(1).detail.contains("Acme.Kit 1.1.0: published in"));
     assert!(run.step(1).detail.contains(&registry));
     assert_eq!(rig.puts().len(), 2);
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn deploy_deadline_counts_time_spent_in_http_and_preserves_pending() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    rig.script().http_elapsed.insert(
+        "GET /repos/acme/api/actions/runs".into(),
+        Duration::from_secs(6),
+    );
+    let run = rig
+        .run(
+            &plan_on(&[1]),
+            Settings {
+                timeout: Some(Duration::from_secs(5)),
+                ..applied()
+            },
+            true,
+            true,
+        )
+        .unwrap();
+    assert_eq!(run.step(0).status, Status::Stopped);
+    assert_eq!(run.outcome.code, EXIT_STOPPED);
+    assert_eq!(rig.polls(), 1);
+    assert_eq!(run.slept, Duration::ZERO);
+    assert_eq!(state.reopen().state.pending.len(), 1);
+}
+
+#[test]
+fn deploy_sleep_is_capped_by_remaining_deadline() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    rig.cfg.merge.poll_seconds = 15;
+    rig.script().runs = vec![run_json("deploy", "in_progress", None)];
+    let run = rig
+        .run(
+            &plan_on(&[1]),
+            Settings {
+                timeout: Some(Duration::from_millis(2500)),
+                ..applied()
+            },
+            true,
+            true,
+        )
+        .unwrap();
+    assert_eq!(run.step(0).status, Status::Stopped);
+    assert_eq!(rig.polls(), 1);
+    assert_eq!(run.slept, Duration::from_millis(2500));
+    assert_eq!(state.reopen().state.pending.len(), 1);
+}
+
+#[test]
+fn no_run_grace_counts_http_and_caps_the_sleep() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    rig.cfg.merge.poll_seconds = 15;
+    rig.script().http_elapsed.insert(
+        "GET /repos/acme/api/actions/runs".into(),
+        Duration::from_secs(2),
+    );
+    rig.script().runs.clear();
+    let run = rig.go(&plan_on(&[1]));
+    assert_eq!(run.step(0).status, Status::Stopped);
+    assert!(run.said(0).contains("no workflow run appeared"));
+    assert_eq!(run.slept, Duration::from_secs(1));
+    assert_eq!(state.reopen().state.pending.len(), 1);
+}
+
+#[test]
+fn both_mergeability_deadlines_count_slow_http_and_cap_sleeps() {
+    for route in ["POST /graphql", "GET /repos/acme/api/pulls/1"] {
+        let mut rig = Rig::new("");
+        let state = FilterState::attach(&mut rig);
+        rig.script()
+            .http_elapsed
+            .insert(route.into(), Duration::from_secs(28));
+        if route == "POST /graphql" {
+            rig.script().graphql_states.insert(1, "UNKNOWN".into());
+        } else {
+            rig.script().live_state.insert(1, "unknown".into());
+        }
+        let run = rig.go(&plan_on(&[1]));
+        assert_eq!(run.step(0).status, Status::Stopped, "{route}");
+        assert_eq!(run.outcome.code, EXIT_STOPPED);
+        assert_eq!(run.slept, Duration::from_secs(5));
+        assert!(rig.puts().is_empty());
+        assert!(state.reopen().state.pending.is_empty());
+    }
+}
+
+#[test]
+fn mergeability_sleep_uses_only_the_remaining_real_time() {
+    for route in ["POST /graphql", "GET /repos/acme/api/pulls/1"] {
+        let mut rig = Rig::new("");
+        let state = FilterState::attach(&mut rig);
+        rig.script()
+            .http_elapsed
+            .insert(route.into(), Duration::from_secs(58));
+        if route == "POST /graphql" {
+            rig.script().graphql_states.insert(1, "UNKNOWN".into());
+        } else {
+            rig.script().live_state.insert(1, "unknown".into());
+        }
+        let run = rig.go(&plan_on(&[1]));
+        assert_eq!(run.step(0).status, Status::Stopped);
+        assert_eq!(run.slept, Duration::from_secs(2));
+        assert!(rig.puts().is_empty());
+        assert!(state.reopen().state.pending.is_empty());
+    }
+}
+
+#[test]
+fn deploy_read_retries_three_server_failures_then_recovers() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    rig.script().run_errors = [500, 502, 503].into();
+    let run = rig.go(&plan_on(&[1]));
+    assert_eq!(run.step(0).status, Status::Done);
+    assert_eq!(rig.polls(), 5);
+    assert_eq!(run.slept, Duration::from_secs(4));
+    assert!(run.phases.iter().any(|phase| phase.contains("retry 3/3")));
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn deploy_read_stops_resumably_after_three_failed_retries() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    rig.script().run_errors = [503, 503, 503, 503, 503].into();
+    let run = rig.go(&plan_on(&[1]));
+    assert_eq!(run.step(0).status, Status::Stopped);
+    assert_eq!(run.outcome.code, EXIT_STOPPED);
+    assert_eq!(rig.polls(), 4);
+    assert_eq!(run.slept, Duration::from_secs(3));
+    assert!(run.said(0).contains("exhausted 3 consecutive retries"));
+    assert_eq!(state.reopen().state.pending.len(), 1);
+    rig.script().run_errors.clear();
+    rig.store = state.reopen();
+    let resumed = rig.go(&plan_on(&[]));
+    assert_eq!(resumed.step(0).status, Status::Done);
+    assert_eq!(rig.puts().len(), 1);
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn deploy_read_transport_timeout_is_retried_and_recovers() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    rig.request_timeout = Duration::from_millis(100);
+    rig.script()
+        .run_delays
+        .push_back(Duration::from_millis(250));
+    let run = rig
+        .run(
+            &plan_on(&[1]),
+            Settings {
+                feed_registry: Some(rig.server.base.clone()),
+                ..applied()
+            },
+            true,
+            true,
+        )
+        .unwrap();
+    assert_eq!(run.step(0).status, Status::Done, "{}", run.said(0));
+    assert!(
+        run.phases
+            .iter()
+            .any(|phase| phase.contains("transient workflow read error"))
+    );
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn deploy_authentication_failure_is_not_retried() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    rig.script().run_errors = [401].into();
+    let run = rig.go(&plan_on(&[1]));
+    assert_eq!(run.step(0).status, Status::Stopped);
+    assert_eq!(rig.polls(), 1);
+    assert_eq!(run.slept, Duration::ZERO);
+    assert_eq!(state.reopen().state.pending.len(), 1);
+}
+
+#[test]
+fn deploy_read_retry_sleep_is_capped_by_deadline() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    rig.cfg.merge.poll_seconds = 15;
+    rig.script().run_errors = [503, 503].into();
+    let run = rig
+        .run(
+            &plan_on(&[1]),
+            Settings {
+                timeout: Some(Duration::from_secs(2)),
+                ..applied()
+            },
+            true,
+            true,
+        )
+        .unwrap();
+    assert_eq!(run.step(0).status, Status::Stopped);
+    assert_eq!(rig.polls(), 1);
+    assert_eq!(run.slept, Duration::from_secs(2));
+    assert_eq!(state.reopen().state.pending.len(), 1);
+}
+
+#[test]
+fn api_budget_preview_warns_for_repo_timeouts_without_blocking_confirmation() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    rig.cfg.merge.poll_seconds = 15;
+    rig.cfg.merge.timeout_minutes = 30;
+    rig.cfg
+        .merge
+        .repo_timeout_minutes
+        .insert("acme/web".into(), 60);
+    let plan = plan_of(
+        vec![
+            pr("acme/api", 1, "feat/1", "main"),
+            pr("acme/web", 2, "feat/2", "main"),
+        ],
+        Vec::new(),
+    );
+    let run = rig.run(&plan, dry(), true, true).unwrap();
+    let estimate = &run.outcome.report.api_estimate;
+    assert_eq!(estimate.deploy_polls, 362);
+    assert_eq!(estimate.checks, 6);
+    assert_eq!(estimate.discovery, u64::from(plan.stats.requests) + 14);
+    assert!(estimate.exceeds_budget);
+    let text = render(&run.outcome.report, false);
+    assert!(text.contains("raise api.max_requests"));
+    let json = serde_json::to_value(&run.outcome.report).unwrap();
+    assert_eq!(json["api_estimate"]["exceeds_budget"], true);
+    assert_eq!(run.outcome.code, 0);
+    assert!(rig.puts().is_empty());
+    assert!(state.reopen().state.pending.is_empty());
+    let confirmed = rig.run(&plan, applied(), false, false).unwrap();
+    assert!(confirmed.outcome.aborted);
+    assert!(confirmed.confirmation_text[0].contains("raise api.max_requests"));
+    assert!(rig.puts().is_empty());
+}
+
+#[test]
+fn api_budget_preview_honors_cli_timeout_and_excludes_dispensed_waits() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    rig.cfg.merge.poll_seconds = 15;
+    rig.cfg.api.max_requests = 1000;
+    rig.script().workflows = path_workflow("    paths: 'service/**'");
+    let dispensed = rig.run(&plan_on(&[1]), dry(), true, true).unwrap();
+    assert_eq!(dispensed.outcome.report.api_estimate.deploy_polls, 0);
+    rig.script().workflows = vec![("deploy.yml".into(), "on: push".into())];
+    let overridden = rig
+        .run(
+            &plan_on(&[1]),
+            Settings {
+                timeout: Some(Duration::from_secs(31)),
+                ..dry()
+            },
+            true,
+            true,
+        )
+        .unwrap();
+    assert_eq!(overridden.outcome.report.api_estimate.deploy_polls, 4);
+    assert!(!overridden.outcome.report.api_estimate.exceeds_budget);
+    assert!(!render(&overridden.outcome.report, false).contains("raise api.max_requests"));
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn parallel_deploy_worker_uses_the_injected_http_clock() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    rig.cfg.max_parallel = 2;
+    rig.script().http_elapsed.insert(
+        "GET /repos/acme/api/actions/runs".into(),
+        Duration::from_secs(61),
+    );
+    let run = rig.go(&plan_on(&[1]));
+    assert_eq!(run.step(0).status, Status::Stopped);
+    assert_eq!(rig.polls(), 1);
+    assert_eq!(state.reopen().state.pending.len(), 1);
+}
+
+#[test]
+fn deploy_read_recovery_resets_retry_and_confirmation_counters() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    rig.script().run_errors = [503, 503, 503, 200, 503, 503, 503, 200].into();
+    let run = rig.go(&plan_on(&[1]));
+    assert_eq!(run.step(0).status, Status::Done);
+    assert_eq!(rig.polls(), 9);
+    assert_eq!(run.slept, Duration::from_secs(8));
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn api_budget_saturates_large_waits_and_recomputes_dispensed_polls() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    let settings = Settings {
+        timeout: Some(Duration::MAX),
+        ..dry()
+    };
+    let expected = rig.run(&plan_on(&[1, 2]), settings, true, true).unwrap();
+    assert_eq!(expected.outcome.report.api_estimate.deploy_polls, u64::MAX);
+    assert_eq!(expected.outcome.report.api_estimate.total, u64::MAX);
+    rig.script().workflows = path_workflow("    paths: 'service/**'");
+    let dispensed = rig
+        .run(
+            &plan_on(&[1, 2]),
+            Settings {
+                timeout: Some(Duration::MAX),
+                ..dry()
+            },
+            true,
+            true,
+        )
+        .unwrap();
+    let estimate = dispensed.outcome.report.api_estimate;
+    assert_eq!(estimate.deploy_polls, 0);
+    assert_eq!(estimate.total, estimate.discovery + estimate.checks);
     assert!(state.reopen().state.pending.is_empty());
 }

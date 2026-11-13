@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Merge deploy waits and both mergeability checks use injectable monotonic wall-clock deadlines, include HTTP, pacing and retry time, and cap every wait sleep by the remaining time, including no-run grace.
+- Merge retries transient transport and HTTP 5xx deploy reads up to three consecutive times, resetting on recovery and stopping resumably with pending state after exhaustion.
+- Merge previews and confirmations estimate discovery, readiness/merge checks and deploy polls using per-repository deadlines; additive JSON api_estimate and advisory warnings identify api.max_requests without changing its default or blocking confirmation.
+- Add six end-to-end incident regressions for path-filter dispensing on main, simultaneous PR phases, later-deploy recovery, blocked planning, stacked merges, and stale pending state with cross-process locking.
+- Installers bound downloads to 120 seconds, shell connections to 15 seconds, and wget total runtime with a watchdog; PowerShell restores the previous binary if replacement or its final step fails, preserving download URLs and checksum verification.
+- README describes parallel merges, local state inspection/discard and optional merge --bump Git/.NET preparation while retaining read-only defaults.
+
 - Merge package waits recheck and poll the feed after the publisher finishes, automatically releasing consumers with version and feed evidence; configure the interval and timeout with merge.package_poll_seconds (10) and merge.package_wait_seconds (600).
 - Merge retains manual package confirmation after an absence timeout, while feed authentication refusals stop immediately with their cause and failed final lookups stop after retries; --gates-confirmed retains its manual gate meaning.
 

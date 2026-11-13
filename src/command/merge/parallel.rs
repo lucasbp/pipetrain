@@ -356,6 +356,7 @@ pub(super) fn execute(
         DependencyFailure::Skip => scheduler::FailurePolicy::SkipDescendants,
     };
     let total = steps.len();
+    let now = hooks.now;
     let mut coordinator = Coordinator {
         env,
         store,
@@ -414,6 +415,7 @@ pub(super) fn execute(
                 gate: &mut gate,
                 observe: &mut observe,
                 sleep: &mut sleep,
+                now,
                 progress: &mut emit,
             };
             (hooks.progress)("starting");
