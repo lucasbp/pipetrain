@@ -17,7 +17,7 @@ use crate::github::{Client, LivePr, PrWrite};
 use crate::merge::{
     DependencyFailure, DeployOutcome, Kind, NotMerging, Pending, REPORT_SCHEMA, Report, STOPPED,
     State, Status, Step, StepReport, Store, Summary, Verdict, judge, judge_expected,
-    resolve_state_path, steps, wait_is_published,
+    resolve_state_path, steps,
 };
 use crate::model::{PrKey, PrState};
 use crate::plan::Plan;
@@ -27,6 +27,7 @@ use crate::workflows::{self, PushRuns};
 
 pub mod bump;
 mod failure;
+mod package;
 mod parallel;
 mod recovery;
 mod stacked;
@@ -58,6 +59,7 @@ pub struct Settings {
     pub allow_questions: bool,
     pub method: Option<String>,
     pub timeout: Option<Duration>,
+    pub feed_registry: Option<String>,
     pub open_pr: bool,
     pub dependency_failure: DependencyFailure,
     pub bump: bool,
@@ -818,10 +820,10 @@ fn resume_one(
 }
 
 fn gate_step(env: &Env, hooks: &mut Hooks, report: &mut StepReport) {
-    if report.kind == Kind::Wait && wait_is_published(&report.target) {
-        report.status = Status::Skipped;
-        report.detail = "the feed already has it".to_string();
-    } else if env.settings.gates_confirmed {
+    if report.kind == Kind::Wait && package::check(env, hooks, report) {
+        return;
+    }
+    if env.settings.gates_confirmed {
         report.status = Status::Done;
         report.detail = "confirmed with --gates-confirmed".to_string();
     } else if (hooks.gate)(&report.target) {
@@ -1466,6 +1468,7 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
         timeout: opts
             .timeout_minutes
             .map(|minutes| Duration::from_secs(minutes.saturating_mul(60))),
+        feed_registry: None,
         open_pr: opts.open_pr,
         dependency_failure: opts.dependency_failure,
         bump: opts.bump,

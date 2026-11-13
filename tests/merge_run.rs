@@ -699,7 +699,12 @@ impl Rig {
                 gates += 1;
                 gate
             };
-            let mut sleep_hook = |pause: Duration| slept += pause;
+            let mut sleep_hook = |pause: Duration| {
+                slept += pause;
+                if settings.feed_registry.is_some() {
+                    std::thread::sleep(pause);
+                }
+            };
             let mut observe_hook = |_: &StepReport| observed += 1;
             let mut progress_hook = |text: &str| phases.push(text.to_string());
             let mut hooks = Hooks {
@@ -782,6 +787,7 @@ fn applied() -> Settings {
         allow_questions: false,
         method: None,
         timeout: None,
+        feed_registry: None,
         open_pr: false,
         dependency_failure: DependencyFailure::Stop,
         bump: false,
@@ -4398,4 +4404,375 @@ fn hooks_pass_preflight_but_executor_still_requires_clean_from_rest() {
     assert!(run.step(0).detail.contains("not clean"));
     assert!(rig.puts().is_empty());
     assert!(state_file.reopen().state.pending.is_empty());
+}
+
+fn package_plan(package: &str, version: Option<&str>, published: Option<bool>) -> Plan {
+    let mut consumer = pr("acme/api", 2, "feat/2", "main");
+    consumer.body = "depends-on: acme/api#1".into();
+    let mut plan = plan_of(
+        vec![pr("acme/api", 1, "feat/1", "main"), consumer],
+        Vec::new(),
+    );
+    let dependency = &mut plan
+        .items
+        .iter_mut()
+        .find(|item| item.number == 2)
+        .unwrap()
+        .after[0];
+    dependency.rule = pipetrain::planner::Rule::Package;
+    dependency.package = Some(package.into());
+    dependency.version = version.map(str::to_string);
+    dependency.published = published;
+    plan
+}
+
+fn package_feed_rig(
+    handler: impl Fn(usize) -> (u16, Value) + Send + 'static,
+) -> (Rig, Settings, Arc<std::sync::atomic::AtomicUsize>) {
+    let mut rig = Rig::new(
+        "no_deploy_repos = ['acme/api']\npackage_poll_seconds = 1\npackage_wait_seconds = 5",
+    );
+    let shared = rig.script.clone();
+    let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = reads.clone();
+    rig.server = serve_requests(move |line, payload| {
+        if line == "GET /@acme%2fkit" {
+            let merged = &shared.lock().unwrap().merged;
+            assert!(merged.contains(&1));
+            assert!(!merged.contains(&2));
+            return handler(count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1);
+        }
+        respond(&shared, line, payload)
+    });
+    let settings = Settings {
+        feed_registry: Some(rig.server.base.clone()),
+        ..applied()
+    };
+    (rig, settings, reads)
+}
+
+#[test]
+fn package_wait_rechecks_after_publisher_and_releases_consumer_without_prompt() {
+    for parallel in [1, 2] {
+        let (mut rig, settings, reads) = package_feed_rig(|attempt| {
+            if attempt < 3 {
+                (200, json!({"versions": {"1.0.0": {}}}))
+            } else {
+                (200, json!({"versions": {"1.0.0": {}, "1.1.0": {}}}))
+            }
+        });
+        rig.cfg.max_parallel = parallel;
+        let state = FilterState::attach(&mut rig);
+        let run = rig
+            .run(
+                &package_plan("@acme/kit", Some("1.1.0"), Some(false)),
+                settings,
+                true,
+                false,
+            )
+            .unwrap();
+        assert_eq!(run.outcome.code, 0);
+        assert_eq!(
+            run.statuses(),
+            vec![Status::Done, Status::Skipped, Status::Done]
+        );
+        assert_eq!(run.gates, 0);
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 3);
+        assert!(run.step(1).detail.contains("@acme/kit 1.1.0: published in"));
+        assert!(run.step(1).detail.contains(&rig.server.base));
+        assert_eq!(rig.puts().len(), 2);
+        assert!(state.reopen().state.pending.is_empty());
+        assert!(
+            rig.lines()
+                .iter()
+                .filter(|line| line.contains("@acme%2fkit"))
+                .all(|line| line.starts_with("GET "))
+        );
+    }
+}
+
+#[test]
+fn package_wait_timeout_keeps_manual_confirmation_and_gates_confirmed() {
+    for (gate, confirmed) in [(false, false), (true, false), (false, true)] {
+        let (mut rig, mut settings, reads) = package_feed_rig(|_| (200, json!({"versions": {}})));
+        rig.cfg.merge.package_wait_seconds = 1;
+        settings.gates_confirmed = confirmed;
+        let state = FilterState::attach(&mut rig);
+        let run = rig
+            .run(
+                &package_plan("@acme/kit", Some("1.1.0"), None),
+                settings,
+                true,
+                gate,
+            )
+            .unwrap();
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(run.gates, usize::from(!confirmed));
+        if gate || confirmed {
+            assert_eq!(
+                run.statuses(),
+                vec![Status::Done, Status::Done, Status::Done]
+            );
+            assert_eq!(run.outcome.code, 0);
+            assert_eq!(rig.puts().len(), 2);
+            if confirmed {
+                assert!(run.step(1).detail.contains("--gates-confirmed"));
+            }
+        } else {
+            assert_eq!(
+                run.statuses(),
+                vec![Status::Done, Status::Stopped, Status::Skipped]
+            );
+            assert_eq!(run.outcome.code, EXIT_STOPPED);
+            assert!(run.step(1).detail.contains("not confirmed"));
+            assert_eq!(rig.puts().len(), 1);
+        }
+        assert!(state.reopen().state.pending.is_empty());
+    }
+}
+
+#[test]
+fn package_wait_refused_feed_stops_with_cause_even_with_gates_confirmed() {
+    for parallel in [1, 2] {
+        for status in [401, 403] {
+            let (mut rig, mut settings, reads) = package_feed_rig(move |_| (status, json!({})));
+            rig.cfg.max_parallel = parallel;
+            settings.gates_confirmed = true;
+            let state = FilterState::attach(&mut rig);
+            let run = rig
+                .run(
+                    &package_plan("@acme/kit", Some("1.1.0"), Some(true)),
+                    settings,
+                    true,
+                    true,
+                )
+                .unwrap();
+            assert_eq!(run.step(1).status, Status::Stopped);
+            assert_eq!(run.step(2).status, Status::Skipped);
+            assert_eq!(run.outcome.code, EXIT_STOPPED);
+            assert_eq!(run.gates, 0);
+            assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert!(run.step(1).detail.contains("401/403"));
+            assert!(run.step(1).detail.contains("read:packages"));
+            assert_eq!(rig.puts().len(), 1);
+            assert!(state.reopen().state.pending.is_empty());
+        }
+    }
+}
+
+#[test]
+fn package_wait_without_version_keeps_manual_gate_without_reading_feed() {
+    let (mut rig, settings, reads) = package_feed_rig(|_| panic!("no version to check"));
+    let state = FilterState::attach(&mut rig);
+    let run = rig
+        .run(
+            &package_plan("@acme/kit", None, None),
+            settings,
+            true,
+            false,
+        )
+        .unwrap();
+    assert_eq!(run.step(1).status, Status::Stopped);
+    assert_eq!(run.gates, 1);
+    assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(rig.puts().len(), 1);
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn package_wait_dry_run_does_not_read_feed() {
+    let (mut rig, settings, reads) = package_feed_rig(|_| panic!("dry run must not check"));
+    let state = FilterState::attach(&mut rig);
+    let run = rig
+        .run(
+            &package_plan("@acme/kit", Some("1.1.0"), None),
+            Settings {
+                apply: false,
+                ..settings
+            },
+            true,
+            true,
+        )
+        .unwrap();
+    assert!(
+        run.statuses()
+            .iter()
+            .all(|status| *status == Status::Planned)
+    );
+    assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(run.gates, 0);
+    assert!(rig.puts().is_empty());
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn package_wait_retries_first_release_not_found() {
+    let (mut rig, settings, reads) = package_feed_rig(|attempt| {
+        if attempt == 1 {
+            (404, json!({}))
+        } else {
+            (200, json!({"versions": {"1.1.0": {}}}))
+        }
+    });
+    let state = FilterState::attach(&mut rig);
+    let run = rig
+        .run(
+            &package_plan("@acme/kit", Some("1.1.0"), None),
+            settings,
+            true,
+            false,
+        )
+        .unwrap();
+    assert_eq!(run.outcome.code, 0);
+    assert_eq!(run.gates, 0);
+    assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(rig.puts().len(), 2);
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn package_wait_failed_feed_stops_with_cause_at_timeout() {
+    let (mut rig, settings, reads) = package_feed_rig(|_| (500, json!({})));
+    rig.cfg.merge.package_wait_seconds = 0;
+    let state = FilterState::attach(&mut rig);
+    let run = rig
+        .run(
+            &package_plan("@acme/kit", Some("1.1.0"), None),
+            settings,
+            true,
+            true,
+        )
+        .unwrap();
+    assert_eq!(run.step(1).status, Status::Stopped);
+    assert_eq!(run.gates, 0);
+    assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(run.step(1).detail.contains("status 500"));
+    assert_eq!(run.outcome.code, EXIT_STOPPED);
+    assert_eq!(rig.puts().len(), 1);
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn package_wait_config_defaults_to_ten_minutes_and_ten_second_polls() {
+    let cfg = Config::parse("orgs = ['acme']").unwrap();
+    assert_eq!(cfg.merge.package_wait_seconds, 600);
+    assert_eq!(cfg.merge.package_poll_seconds, 10);
+}
+
+#[test]
+fn package_wait_published_snapshot_is_rechecked_and_cannot_release_absent_version() {
+    let (mut rig, settings, reads) = package_feed_rig(|_| (200, json!({"versions": {}})));
+    rig.cfg.merge.package_wait_seconds = 0;
+    let state = FilterState::attach(&mut rig);
+    let run = rig
+        .run(
+            &package_plan("@acme/kit", Some("1.1.0"), Some(true)),
+            settings,
+            true,
+            false,
+        )
+        .unwrap();
+    assert_eq!(run.step(1).status, Status::Stopped);
+    assert_eq!(run.gates, 1);
+    assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(rig.puts().len(), 1);
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn package_wait_retries_transient_errors_and_normalizes_zero_interval() {
+    let (mut rig, settings, reads) = package_feed_rig(|attempt| {
+        if attempt == 1 {
+            (500, json!({}))
+        } else {
+            (200, json!({"versions": {"1.1.0": {}}}))
+        }
+    });
+    rig.cfg.merge.package_poll_seconds = 0;
+    let state = FilterState::attach(&mut rig);
+    let run = rig
+        .run(
+            &package_plan("@acme/kit", Some("1.1.0"), None),
+            settings,
+            true,
+            false,
+        )
+        .unwrap();
+    assert_eq!(run.outcome.code, 0);
+    assert_eq!(run.gates, 0);
+    assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(run.slept, Duration::from_secs(1));
+    assert!(run.phases.iter().any(|text| text.contains("status 500")));
+    assert_eq!(rig.puts().len(), 2);
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn package_wait_zero_timeout_still_checks_a_published_version() {
+    let (mut rig, settings, reads) =
+        package_feed_rig(|_| (200, json!({"versions": {"1.1.0": {}}})));
+    rig.cfg.merge.package_wait_seconds = 0;
+    let state = FilterState::attach(&mut rig);
+    let run = rig
+        .run(
+            &package_plan("@acme/kit", Some("1.1.0"), None),
+            settings,
+            true,
+            false,
+        )
+        .unwrap();
+    assert_eq!(run.outcome.code, 0);
+    assert_eq!(run.gates, 0);
+    assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(run.slept, Duration::ZERO);
+    assert_eq!(rig.puts().len(), 2);
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn package_wait_uses_nuget_service_index_and_records_feed_evidence() {
+    let mut rig = Rig::new(
+        "no_deploy_repos = ['acme/api']\npackage_poll_seconds = 1\npackage_wait_seconds = 5",
+    );
+    let state = FilterState::attach(&mut rig);
+    let shared = rig.script.clone();
+    let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = reads.clone();
+    let versions = common::serve_handler(move |line| {
+        assert_eq!(line, "GET /flat/acme.kit/index.json");
+        assert!(shared.lock().unwrap().merged.contains(&1));
+        if count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            (200, json!({"versions": ["1.0.0"]}))
+        } else {
+            (200, json!({"versions": ["1.0.0", "1.1.0"]}))
+        }
+    });
+    let address = format!("{}/flat/", versions.base);
+    let index = common::serve_handler(move |line| {
+        assert_eq!(line, "GET /index.json");
+        (
+            200,
+            json!({"resources": [{"@id": address, "@type": "PackageBaseAddress/3.0.0"}]}),
+        )
+    });
+    let registry = format!("{}/index.json", index.base);
+    let run = rig
+        .run(
+            &package_plan("Acme.Kit", Some("1.1.0"), None),
+            Settings {
+                feed_registry: Some(registry.clone()),
+                ..applied()
+            },
+            true,
+            false,
+        )
+        .unwrap();
+    assert_eq!(run.outcome.code, 0);
+    assert_eq!(run.gates, 0);
+    assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(index.seen.lock().unwrap().len(), 2);
+    assert!(run.step(1).detail.contains("Acme.Kit 1.1.0: published in"));
+    assert!(run.step(1).detail.contains(&registry));
+    assert_eq!(rig.puts().len(), 2);
+    assert!(state.reopen().state.pending.is_empty());
 }

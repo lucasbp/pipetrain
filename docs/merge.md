@@ -129,8 +129,12 @@ acme/ui#42 → main | readiness: checking merge readiness of acme/ui#42 · 2.0 s
 Phases include readiness, merging, waiting for deploy (with expected workflow paths, or a legacy polling label), resolving a later deploy and gate confirmation. Every active row is retained, including in narrow terminals; each line is truncated to the current terminal width. Total and per-PR clocks advance between polls, and a phase update retains the PR's start time. The total clock continues across gate prompts. The spinner pauses before gate prompts and clears before final results. `--no-progress`, JSON output, CI and redirected stderr disable the animation. These status updates do not change merge order, checks, polling intervals or resumability. Cancellation does not undo merges already accepted by GitHub; durable pending records remain available for recovery.
 
 - `--apply` shows the steps and asks you to type `yes`. `--yes` skips only this question.
-- Every gate and unpublished package wait asks again, even with `--yes`. Without a terminal it does not ask: the step is `stopped` and the run ends.
+- Every gate asks again, even with `--yes`. A package wait with a known version first checks the feed again when execution reaches that step, after its publishers have finished. It uses the same lookup and bounded polling loop as `feed --wait`, independently of any earlier `plan --check-feeds` snapshot. Publication completes the wait as `skipped`, with the package, version and feed URL in `detail`, and releases the consumer without a question.
+- If the version is still missing at the package timeout, the package wait asks as before. Without a terminal it does not ask: the step is `stopped` and the run ends. A package dependency without a known version keeps this manual confirmation path without a feed request.
+- A feed authentication refusal (401 or 403) stops immediately with the cause and `read:packages` hint, without asking, including with `--gates-confirmed`. Transient lookup failures are retried; if the final attempt at the timeout fails, the wait is `stopped` with that cause rather than treating an unreadable feed as an absent version.
 - `--gates-confirmed` answers all of them for you. Use it on the run that follows the gate you did by hand, or when you already did the DDL and infra changes.
+
+`--gates-confirmed` retains its meaning for manual DDL/infra gates and package confirmation after an absence timeout. It does not suppress the new feed check or recover an authentication failure. Dry runs do not poll package feeds. Sequential and parallel execution use the same package wait check. Package checks only read feeds and never publish a package.
 
 ## Open questions in the plan
 
@@ -143,11 +147,13 @@ When the plan has open questions (`? ...` lines, the ones that make `plan --emit
 | `merge.timeout_minutes` | `30` | How long to wait for the deploy of one merge. |
 | `merge.repo_timeout_minutes` | none | Table of `"org/repo" = minutes`, overrides the default for that repo (case-insensitive). |
 | `merge.poll_seconds` | `15` | Time between two polls. |
+| `merge.package_poll_seconds` | `10` | Seconds between package feed checks; values below 1 use 1 second. |
+| `merge.package_wait_seconds` | `600` | Package wait timeout in seconds, independently of deploy timeouts. `0` checks once without sleeping. |
 | `merge.no_run_grace_seconds` | `120` | How long to wait for the first workflow run to appear. |
 | `merge.no_deploy_repos` | `[]` | Globs of repos that have no deploy workflow on push. |
 | `merge.method` | `"merge"` | `merge`, `squash` or `rebase`. |
 
-`--timeout-minutes N` overrides the timeout of every repo for one run and `--method` overrides `merge.method`. A timeout stops the run; it never merges the next PR.
+`--timeout-minutes N` overrides the deploy timeout of every repo for one run and `--method` overrides `merge.method`. A deploy timeout stops the run; it never merges the next PR. Package wait timeouts use the manual confirmation fallback described above. Feed HTTP requests retain the request timeout used by `feed --wait`; an in-flight request can finish after the package wait deadline.
 
 ```toml
 [merge]

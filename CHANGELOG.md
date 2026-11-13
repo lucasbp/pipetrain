@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Merge package waits recheck and poll the feed after the publisher finishes, automatically releasing consumers with version and feed evidence; configure the interval and timeout with merge.package_poll_seconds (10) and merge.package_wait_seconds (600).
+- Merge retains manual package confirmation after an absence timeout, while feed authentication refusals stop immediately with their cause and failed final lookups stop after retries; --gates-confirmed retains its manual gate meaning.
+
 - Merge accepts a stacked parent's changed head only with recorded child merge evidence, planned-SHA ancestry and fresh readiness for that exact head; lost approval or pending checks stop with the next step, and the merge request uses the verified SHA.
 - Plan notes, merge dry runs and confirmations show complete selected stack chains and explain that children land into the parent branch before the parent is revalidated.
 
