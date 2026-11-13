@@ -1,17 +1,12 @@
+mod common;
+
 use pipetrain::consumer_bump::backend::{Invocation, ProcessRunner, Runner};
 use std::fs;
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
-fn workspace(mode: &str) -> PathBuf {
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let root =
-        std::env::temp_dir().join(format!("pipetrain-process-{}-{stamp}", std::process::id()));
-    fs::create_dir(&root).unwrap();
+fn workspace(mode: &str) -> common::TempDir {
+    let root = common::TempDir::new("process");
     fs::write(root.join("fixture-mode"), mode).unwrap();
     root
 }
@@ -63,7 +58,7 @@ fn timeout_case(mode: &str) {
             "owned_process_fixture".into(),
             "--nocapture".into(),
         ],
-        directory: root.clone(),
+        directory: root.path().to_path_buf(),
         timeout: Duration::from_millis(600),
     });
     assert!(result.is_err());
@@ -78,7 +73,6 @@ fn timeout_case(mode: &str) {
         fs::read_to_string(root.join("preserved-workspace")).unwrap(),
         "keep"
     );
-    fs::remove_dir_all(root).unwrap();
     assert!(!survived, "descendant continued after runner timeout");
 }
 
@@ -103,10 +97,9 @@ fn normal_owned_process_returns_output() {
                 "owned_process_fixture".into(),
                 "--nocapture".into(),
             ],
-            directory: root.clone(),
+            directory: root.path().to_path_buf(),
             timeout: Duration::from_secs(3),
         })
         .unwrap();
     assert!(result.contains("normal operation"));
-    fs::remove_dir_all(root).unwrap();
 }

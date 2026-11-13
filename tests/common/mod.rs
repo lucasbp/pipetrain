@@ -1,12 +1,52 @@
 #![allow(dead_code)]
 
-use std::io::{Read, Write};
+use std::fs;
+use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use pipetrain::model::{Checks, Pr, PrKey, PrState, Review};
 use serde_json::Value;
+
+pub struct TempDir {
+    path: PathBuf,
+}
+
+impl TempDir {
+    pub fn new(prefix: &str) -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        loop {
+            let pid = std::process::id();
+            let n = NEXT.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!("pipetrain-{prefix}-{pid}-{n}"));
+            match fs::create_dir(&path) {
+                Ok(()) => return Self { path },
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!(
+                    "failed to create temporary directory {}: {error}",
+                    path.display()
+                ),
+            }
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn join(&self, name: impl AsRef<Path>) -> PathBuf {
+        self.path.join(name)
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
 
 pub struct Canned {
     pub status: &'static str,

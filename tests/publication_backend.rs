@@ -1,3 +1,5 @@
+mod common;
+
 use anyhow::{Result, bail};
 use pipetrain::config::ApiConfig;
 use pipetrain::consumer_bump::backend::{ConsumerRemote, Invocation, LocalBackend, Runner};
@@ -9,7 +11,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 const SHA: &str = "1111111111111111111111111111111111111111";
 fn execution() -> PublisherExecution {
@@ -146,15 +148,8 @@ fn consumer() -> Consumer {
         manifests: vec!["src/App.csproj".into()],
     }
 }
-fn root() -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "pipetrain-bump-fixture-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ))
+fn root() -> common::TempDir {
+    common::TempDir::new("bump-fixture")
 }
 fn proof() -> publication::PublicationResult {
     publication::verify(
@@ -176,7 +171,12 @@ fn proof() -> publication::PublicationResult {
 #[test]
 fn concrete_backend_builds_shell_free_commands_and_preserves_exact_locked_graph() {
     let root = root();
-    let mut backend = LocalBackend::new(root, Commands::default(), Remote, Duration::from_secs(30));
+    let mut backend = LocalBackend::new(
+        root.path().to_path_buf(),
+        Commands::default(),
+        Remote,
+        Duration::from_secs(30),
+    );
     consumer_bump::prepare(&proof(), &consumer(), &mut backend).unwrap();
     let commands = &backend.runner.calls;
     assert_eq!(commands.iter().filter(|c| c.program == "dotnet").count(), 2);
@@ -216,10 +216,9 @@ fn concrete_backend_builds_shell_free_commands_and_preserves_exact_locked_graph(
 #[test]
 fn restore_failure_retains_new_workspace_without_pushing_or_touching_existing_files() {
     let root = root();
-    fs::create_dir_all(&root).unwrap();
     fs::write(root.join("existing-work.txt"), "keep").unwrap();
     let mut backend = LocalBackend::new(
-        root.clone(),
+        root.path().to_path_buf(),
         Commands {
             fail_restore: true,
             ..Commands::default()
