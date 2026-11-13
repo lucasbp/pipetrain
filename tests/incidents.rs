@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -170,17 +171,20 @@ struct Fixture {
     cfg: Config,
 }
 
+fn unique_directory() -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let directory = std::env::temp_dir().join(format!(
+        "pipetrain-incidents-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&directory).unwrap();
+    directory
+}
+
 impl Fixture {
     fn new(script: Script) -> Self {
-        let directory = std::env::temp_dir().join(format!(
-            "pipetrain-incidents-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&directory).unwrap();
+        let directory = unique_directory();
         let text = "orgs = ['acme']\n[api]\nmax_requests = 300\nmax_per_minute = 10000\nmin_remaining = 0\n[merge]\nstate_file = 'state.json'\npoll_seconds = 1\ntimeout_minutes = 1\nno_run_grace_seconds = 120\n";
         fs::write(directory.join("config.toml"), text).unwrap();
         fs::write(
@@ -289,7 +293,26 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        fs::remove_dir_all(&self.directory).unwrap();
+        let _ = fs::remove_dir_all(&self.directory);
+    }
+}
+
+#[test]
+fn fixture_directories_never_collide_across_threads() {
+    let handles: Vec<_> = (0..8)
+        .map(|_| std::thread::spawn(|| (0..32).map(|_| unique_directory()).collect::<Vec<_>>()))
+        .collect();
+    let mut all = BTreeSet::new();
+    let mut total = 0;
+    for handle in handles {
+        for directory in handle.join().unwrap() {
+            total += 1;
+            all.insert(directory);
+        }
+    }
+    assert_eq!(all.len(), total);
+    for directory in all {
+        fs::remove_dir_all(directory).unwrap();
     }
 }
 
