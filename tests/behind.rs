@@ -35,14 +35,8 @@ fn a_behind_pr_has_a_blocker() {
 }
 
 #[test]
-fn other_merge_states_and_a_missing_field_keep_the_pr_ready() {
-    for state in [
-        None,
-        Some("CLEAN"),
-        Some("BLOCKED"),
-        Some("UNSTABLE"),
-        Some("HAS_HOOKS"),
-    ] {
+fn clean_hooks_unknown_and_a_missing_field_keep_the_pr_ready() {
+    for state in [None, Some("CLEAN"), Some("UNKNOWN"), Some("HAS_HOOKS")] {
         let pr = parse_pr(&node(state)).unwrap();
 
         assert!(!pr.behind, "{state:?}");

@@ -436,6 +436,12 @@ struct InitArgs {
 #[derive(clap::Args)]
 struct PlanArgs {
     #[arg(
+        long,
+        help = "Exit 4 when no selected PR is eligible, including a merge dry run with no merge steps"
+    )]
+    strict: bool,
+
+    #[arg(
         help = "PRs to plan as org/repo#123 or repo#123 (the org is searched in the profile's orgs); without any, today's train is discovered"
     )]
     prs: Vec<String>,
@@ -642,6 +648,12 @@ struct BundleArgs {
 
 #[derive(clap::Args)]
 struct MergeArgs {
+    #[arg(
+        long,
+        help = "Exit 4 when no selected PR is eligible, including a merge dry run with no merge steps"
+    )]
+    strict: bool,
+
     #[arg(
         help = "PRs to merge as org/repo#123 or repo#123 (the org is searched in the profile's orgs); without any, today's train is discovered"
     )]
@@ -874,6 +886,7 @@ fn run_plan(args: PlanArgs) -> Result<i32> {
         cache: CacheMode::from_flags(args.no_cache, args.refresh),
         progress,
         check_feeds: args.check_feeds,
+        strict: args.strict,
     })
 }
 
@@ -895,6 +908,7 @@ fn run_bundle(args: BundleArgs) -> Result<i32> {
             cache: CacheMode::from_flags(args.no_cache, args.refresh),
             progress,
             check_feeds: false,
+            strict: false,
         },
         apply: args.apply,
         yes: args.yes,
@@ -920,6 +934,7 @@ fn run_merge(args: MergeArgs) -> Result<i32> {
             cache: CacheMode::from_flags(args.no_cache, args.refresh),
             progress,
             check_feeds: true,
+            strict: args.strict,
         },
         apply: args.apply,
         yes: args.yes,

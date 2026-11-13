@@ -21,6 +21,7 @@ The structs live in `src/plan.rs` (`Plan`, `SkippedOut`, `Stats`), `src/bundle.r
 | `deploy_branch` | string | The train branch of the run date (`train_prefix` + the date in the configured `train_date_format`, default `dd-mm-yyyy`). Unlike `train`, it is always a real branch name, even when PRs were passed on the command line. It is the branch a bundle suggestion names. Never `null`. |
 | `profile` | Profile | The config profile in use: `name` (string, `default` for a flat config) and `source` (string), one of `flag`, `args`, `folder`, `default` or `only`, meaning which selection rule chose it. The field is omitted when no profile was resolved. Added without a schema bump: readers that ignore unknown fields are unaffected. |
 | `orgs` | string[] | Organizations searched, after `--org` or the config. |
+| `preflight` | Readiness[] | Additive per-PR readiness snapshot, sorted by ID, including items and skipped PRs. See Readiness below. |
 | `items` | Item[] | Every ready PR in the plan, sorted by `org`, `repo`, `number`. Gate PRs are included. |
 | `gate` | string[] | Ids of the PRs that are gates, sorted by `org`, `repo`, `number`. Empty when there is none. |
 | `lanes` | string[][] | Chains of PR ids. Within a lane, PRs merge in the order listed. Gate PRs never appear in a lane. |
@@ -114,7 +115,7 @@ A file-overlap report between two ready PRs of the same repo: a hint that they m
 | `hidden` | boolean (optional) | `true` when the author filter hides this PR. Omitted otherwise. |
 | `scope` | string | `train`, `shared-branch`, `into-train`, `explicit` or `released`. |
 | `head` | string | The head branch of the skipped PR, so a `shared-branch` skip can be traced to the branch name that matched. |
-| `reasons` | string[] | One or more of: `already merged`, `closed`, `draft`, `changes requested`, `review required`, `not approved`, `checks pending`, `checks failing`, `checks failing: <names>`, `no checks reported`, `merge conflict`, `branch behind its base, update it`, `mergeability unknown, retry in a minute`, `already in <ref>`, `already in <ref> (same content)`. `branch behind its base, update it` is read from GitHub's `mergeStateStatus` and appears only when it is `BEHIND`, which GitHub reports when branch protection requires the branch to be up to date; a PR with a merge conflict carries `merge conflict` instead. A merged or closed PR carries only that one reason. `already in <ref>` also stands alone, where `<ref>` is the branch that already contains the PR head: its base branch, or `deploy_branch`. `already in <ref> (same content)` stands alone too: every file the PR changes has identical content in `<ref>`, though the commits differ (for example after a squash merge). `checks failing: <names>` lists the failing checks, for example `checks failing: build, test`: sorted, at most 5 names and then `, +N more`; the plain `checks failing` stays when GitHub gives no name. These are the only reasons with a variable part, so match them by the `already in ` and `checks failing` prefixes; the `(same content)` suffix tells the two `already in` forms apart. |
+| `reasons` | string[] | One or more of: `already merged`, `closed`, `draft`, `changes requested`, `review required`, `not approved`, `checks pending`, `checks failing`, `checks failing: <names>`, `no checks reported`, `merge conflict`, `branch behind its base, update it`, `already in <ref>`, `already in <ref> (same content)`. `branch behind its base, update it` is read from GitHub's `mergeStateStatus` and appears only when it is `BEHIND`, which GitHub reports when branch protection requires the branch to be up to date; a PR with a merge conflict carries `merge conflict` instead. A merged or closed PR carries only that one reason. `already in <ref>` also stands alone, where `<ref>` is the branch that already contains the PR head: its base branch, or `deploy_branch`. `already in <ref> (same content)` stands alone too: every file the PR changes has identical content in `<ref>`, though the commits differ (for example after a squash merge). `checks failing: <names>` lists the failing checks, for example `checks failing: build, test`: sorted, at most 5 names and then `, +N more`; the plain `checks failing` stays when GitHub gives no name. Full merge-state blockers can also add `branch protection blocks merge (BLOCKED)`, `merge conflict (DIRTY)`, `checks are not passing (UNSTABLE)` and `draft (DRAFT)`. UNKNOWN mergeability is a preflight warning rather than a skipped reason. The `already in ` and `checks failing` reasons have a variable part, so match them by the `already in ` and `checks failing` prefixes; the `(same content)` suffix tells the two `already in` forms apart. |
 
 ## Question
 
@@ -243,3 +244,27 @@ A non-empty `bundles` entry, for two PRs of `acme/billing-api` against `main`, a
 ```
 
 Both examples are hand-written to show shapes, not captured from a run.
+
+## Readiness
+
+`preflight` is additive; schema stays `1` and existing fields keep their names, types and meanings. It covers the selected PRs, including those excluded by readiness or containment. `items`, `lanes`, `gate` and `after` still define the queue and its ordering. A waiting PR can remain in the queue because an earlier step or manual confirmation can release it. Match `id` against the existing item/skipped `hidden` flags when applying author visibility. Merge reports include only visible preflight entries.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | PR ID, `org/repo#number`. |
+| `status` | string | `eligible`, `blocked` or `waiting`. Eligible passes the current preflight; blocked has readiness/containment causes and is excluded from the queue; waiting passes readiness but has internal predecessors, unresolved questions or a manual gate. |
+| `causes` | string[] | Human explanations. Eligible uses `preflight passed`; waiting names earlier PRs and their ordering reasons, unresolved questions or the manual gate. Do not parse this text. |
+| `next_step` | string | How to proceed. Blocked checks ask for inspection/fix or rerun, without inferring policy from a check name. |
+| `base` | string | PR base branch, including for skipped PRs. |
+| `default_branch` | string | Repository default branch from `repository.defaultBranchRef.name`; empty when unavailable. |
+| `merge_state_status` | string | Full GraphQL `mergeStateStatus`, preserved as returned; empty when unavailable. The internal `behind` flag is retained. |
+| `warnings` | string[] | Informational, never new ordering edges. UNKNOWN or unknown mergeability warns `GitHub still computing`; the executor retries for up to a minute. A non-default, non-train base warns `base not landed` when no other selected PR in the same repo has that base as its head. Missing default-branch metadata does not invent a destination. |
+| `checks` | CheckDetail[] | Reported check contexts, sorted and deduplicated by name, state and URL. Each is `{name: string, state: string, url: string or null}`. CheckRun uses conclusion, falling back to status, and `detailsUrl`; StatusContext uses state and `targetUrl`. Unknown URLs remain null. |
+
+BLOCKED, DIRTY, UNSTABLE, DRAFT and BEHIND block through the same readiness rules used for executor revalidation. CLEAN and HAS_HOOKS pass this preflight. UNKNOWN only warns; any independent blocker still blocks. The executor's final REST check still requires exactly `clean`, including after a HAS_HOOKS preflight. Passing a plan never substitutes for that live check, the head SHA guard, approval or checks. Feature-base warnings do not retarget PRs or change stack order.
+
+## Strict exit code
+
+`plan --strict` exits `4` when no visible selected PR is `eligible`, including an empty selection or a selection consisting only of blocked/waiting PRs. It still prints the full requested text, JSON or queue report. This condition takes precedence over queue exit `3` for open questions. If an eligible PR exists, the previous exit behavior remains, including queue exit `3` for questions. Without `--strict`, normal text/JSON plans retain exit `0` and queue mode retains its existing question/error codes. Errors and usage failures retain their existing codes.
+
+`merge --strict` uses the same code for a fully ineligible selection or a dry run with no merge step; see [merge.md](merge.md). Code `4` was previously unused by the binary.

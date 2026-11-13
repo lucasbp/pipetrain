@@ -196,6 +196,7 @@ Neither stale markers nor a different current selection or profile filter, disca
 | `0` | Dry run, or everything done. |
 | `1` | A step failed, or you did not confirm. |
 | `3` | The plan has open questions and `--allow-questions` was not given. |
+| `4` | Only with `--strict`: no visible selected PR is eligible, or a dry run contains no merge step. Existing errors, open-question apply refusal and resumable failures retain their codes. |
 | `5` | Stopped and resumable: a deploy timed out or has no run, a gate was not confirmed, or a state could not be read from GitHub. Run the same command again. |
 
 ## JSON
@@ -210,6 +211,7 @@ Neither stale markers nor a different current selection or profile filter, disca
 | `steps` | Step[] | In execution order. Steps resumed from an earlier run come first. |
 | `not_merging` | `{id, reasons[]}[]` | PRs the plan left out and why. |
 | `questions` | string[] | The `? ...` lines of the plan. |
+| `preflight` | Readiness[] | Additive readiness snapshot for every visible selected PR, including blocked PRs, using the same shape as [plan-json.md](plan-json.md#readiness). |
 | `state` | StatePreview | Additive snapshot of local state before execution, also present in dry runs. |
 
 `StatePreview` contains `path: string | null`, `file_age_seconds: integer | null`, `file_age: string`, `created_at: string | null`, `updated_at: string | null`, `profile: string | null` (recorded origin), `selected_profile: string | null` (current selection), `queue_id: string | null`, `stale_pending_hours: integer` and `pending: PendingPreview[]`. Unknown metadata is `null`; age strings use `age Hh Mm Ss` or `age unknown`. File age measures the last filesystem modification, independently of the stored timestamps. `path` is null only for library callers using memory-only storage.
@@ -293,3 +295,13 @@ The JSON report adds `bump_enabled` when enabled, optional `bump_candidates`, an
 schema 1. Events are appended after fixed queue steps and streamed at preparation
 time. A draft requiring review or a partial operation contributes a stopped
 attention event and exit code 5 without changing the dependency graph.
+
+## Shared preflight
+
+The preview and JSON include each selected PR as `eligible`, `blocked` or `waiting`, with causes, next step, base, repository default branch, full GraphQL merge state, warnings and check names/states/URLs. The additive `preflight` array uses the [plan Readiness contract](plan-json.md#readiness); it is a snapshot before execution and never changes existing step status semantics or report schema `1`. Text previews and confirmations show the same information, including PRs excluded from merge steps. Author-hidden PRs are omitted from the merge preflight.
+
+Plan discovery and executor revalidation share the merge-state readiness rules near `Pr::blockers_with`. BLOCKED, DIRTY, UNSTABLE, DRAFT and BEHIND block with a cause and corrective step. UNKNOWN warns `GitHub still computing`, without blocking a plan; executor GraphQL and REST revalidation still retry for up to a minute and stop resumably if GitHub does not settle. CLEAN and HAS_HOOKS pass preflight, but the final REST mergeability guard still requires exactly `clean`. Head SHA, base, review and check guards remain in force.
+
+CheckRun `detailsUrl` and StatusContext `targetUrl` are reported with each check's name and state, including failures. A missing URL is null. Check names supply evidence only; no private check policy is inferred. `base not landed` is a warning when the known default branch differs from the PR base, the base is not a train branch, and no other selected PR in that repository has the base as its head. It neither retargets the PR nor changes stack ordering.
+
+`--strict` preserves the normal report and returns previously unused code `4` after an otherwise successful invocation when no visible selected PR is eligible, including an empty or fully blocked selection. A dry run also returns `4` if its arranged steps contain no `merge` step, even if inherited resume/open-PR steps exist. Waiting means an earlier step, unresolved question or manual gate must be addressed before the PR is currently eligible. Existing nonzero errors and apply refusals keep precedence. Without `--strict`, a dry run or an empty/fully blocked selection retains its previous exit code. Strict mode does not authorize writes or weaken any executor guard.

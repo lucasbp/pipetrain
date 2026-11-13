@@ -654,6 +654,17 @@ pub fn text(plan: &Plan) -> String {
         }
     }
 
+    let preflight = plan.preflight_lines();
+    if !preflight.is_empty() {
+        let _ = writeln!(out, "\n{}", bold("PREFLIGHT"));
+        for mut line in preflight {
+            for pr in &plan.preflight {
+                line = line.replace(&pr.id, &names.short(&pr.id));
+            }
+            let _ = writeln!(out, "  {line}");
+        }
+    }
+
     if !visible_questions.is_empty() {
         let _ = writeln!(
             out,

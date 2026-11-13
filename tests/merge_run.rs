@@ -22,6 +22,7 @@ struct Script {
     base: String,
     review: BTreeMap<u64, String>,
     unknown_reads: BTreeMap<u64, usize>,
+    graphql_states: BTreeMap<u64, String>,
     live_state: BTreeMap<u64, String>,
     live_head: BTreeMap<u64, String>,
     put_status: u16,
@@ -76,6 +77,7 @@ impl Script {
             base: "main".to_string(),
             review: BTreeMap::new(),
             unknown_reads: BTreeMap::new(),
+            graphql_states: BTreeMap::new(),
             live_state: BTreeMap::new(),
             live_head: BTreeMap::new(),
             put_status: 200,
@@ -144,6 +146,7 @@ impl Script {
             "state": if merged { "MERGED" } else { "OPEN" },
             "reviewDecision": decision,
             "mergeable": "MERGEABLE",
+            "mergeStateStatus": self.graphql_states.get(&number).map_or("CLEAN", String::as_str),
             "author": {"login": "octocat"},
             "labels": {"nodes": []},
             "repository": {"name": "api", "owner": {"login": "acme"}},
@@ -3845,4 +3848,46 @@ fn saved_push_prediction_without_chain_fields_still_tracks_expected_paths() {
     assert_eq!(resumed.step(0).expected_runs.len(), 1);
     assert!(rig.puts().is_empty());
     assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn shared_preflight_rejects_new_graphql_blockers_before_any_merge_write() {
+    for state in ["BLOCKED", "DIRTY", "UNSTABLE", "DRAFT", "BEHIND"] {
+        let mut rig = Rig::new("");
+        let state_file = FilterState::attach(&mut rig);
+        rig.script().graphql_states.insert(1, state.to_string());
+        let run = rig.go(&plan_on(&[1]));
+        assert_eq!(run.step(0).status, Status::Failed);
+        assert!(run.step(0).detail.contains("no longer ready"));
+        assert!(!run.step(0).detail.trim().is_empty());
+        assert!(rig.puts().is_empty());
+        assert!(state_file.reopen().state.pending.is_empty());
+    }
+}
+
+#[test]
+fn graphql_unknown_merge_state_alone_retries_for_a_minute_without_writes() {
+    let mut rig = Rig::new("");
+    let state_file = FilterState::attach(&mut rig);
+    rig.script().graphql_states.insert(1, "UNKNOWN".to_string());
+    let run = rig.go(&plan_on(&[1]));
+    assert_eq!(run.step(0).status, Status::Stopped);
+    assert_eq!(run.slept, Duration::from_secs(60));
+    assert!(rig.puts().is_empty());
+    assert!(state_file.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn hooks_pass_preflight_but_executor_still_requires_clean_from_rest() {
+    let mut rig = Rig::new("");
+    let state_file = FilterState::attach(&mut rig);
+    rig.script()
+        .graphql_states
+        .insert(1, "HAS_HOOKS".to_string());
+    rig.script().live_state.insert(1, "has_hooks".to_string());
+    let run = rig.go(&plan_on(&[1]));
+    assert_eq!(run.step(0).status, Status::Failed);
+    assert!(run.step(0).detail.contains("not clean"));
+    assert!(rig.puts().is_empty());
+    assert!(state_file.reopen().state.pending.is_empty());
 }

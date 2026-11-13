@@ -97,6 +97,9 @@ pub struct Pr {
     pub body: String,
     pub head_ref: String,
     pub base_ref: String,
+    pub default_branch: String,
+    pub merge_state_status: String,
+    pub check_details: Vec<CheckDetail>,
     pub head_sha: String,
     pub base_sha: String,
     pub is_draft: bool,
@@ -109,6 +112,86 @@ pub struct Pr {
     pub files: Vec<ChangedFile>,
     pub files_complete: bool,
     pub labels: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct CheckDetail {
+    pub name: String,
+    pub state: String,
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Readiness {
+    pub id: String,
+    pub status: String,
+    pub causes: Vec<String>,
+    pub next_step: String,
+    pub base: String,
+    pub default_branch: String,
+    pub merge_state_status: String,
+    pub warnings: Vec<String>,
+    pub checks: Vec<CheckDetail>,
+}
+
+impl Readiness {
+    pub fn lines(&self) -> Vec<String> {
+        let mut lines = vec![format!(
+            "{}: {}; base {}; default {}; cause: {}; next: {}",
+            self.id,
+            self.status,
+            self.base,
+            if self.default_branch.is_empty() {
+                "unknown"
+            } else {
+                &self.default_branch
+            },
+            self.causes.join("; "),
+            self.next_step
+        )];
+        lines.extend(
+            self.warnings
+                .iter()
+                .map(|warning| format!("{}: warning: {warning}", self.id)),
+        );
+        lines.extend(self.checks.iter().map(|check| {
+            format!(
+                "{}: check {}: {}{}",
+                self.id,
+                check.name,
+                check.state,
+                check
+                    .url
+                    .as_ref()
+                    .map(|url| format!(" {url}"))
+                    .unwrap_or_default()
+            )
+        }));
+        lines
+    }
+}
+
+pub fn merge_state_blocker(state: &str) -> Option<(&'static str, &'static str)> {
+    match state.to_ascii_uppercase().as_str() {
+        "BLOCKED" => Some((
+            "branch protection blocks merge (BLOCKED)",
+            "satisfy the required reviews, checks and branch protection rules, then retry",
+        )),
+        "DIRTY" => Some((
+            "merge conflict (DIRTY)",
+            "resolve conflicts with the base branch, then retry",
+        )),
+        "UNSTABLE" => Some((
+            "checks are not passing (UNSTABLE)",
+            "inspect the reported checks and fix or rerun them, then retry",
+        )),
+        "DRAFT" => Some(("draft (DRAFT)", "mark the PR ready for review, then retry")),
+        "BEHIND" => Some((
+            "branch behind its base, update it",
+            "update the branch from its base and wait for checks, then retry",
+        )),
+        _ => None,
+    }
 }
 
 const MAX_FAILED_NAMES: usize = 5;
@@ -134,6 +217,70 @@ impl Pr {
             format!("checks failing: {shown}")
         } else {
             format!("checks failing: {shown}, +{extra} more")
+        }
+    }
+
+    pub fn readiness(&self, reasons: Vec<String>) -> Readiness {
+        let next_step = if reasons.is_empty() {
+            "run merge to revalidate reviews, checks, head SHA and clean mergeability".to_string()
+        } else {
+            let mut steps = Vec::new();
+            if let Some((_, next)) = merge_state_blocker(&self.merge_state_status) {
+                steps.push(next.to_string());
+            }
+            for reason in &reasons {
+                let next = match reason.as_str() {
+                    "already merged" | "closed" => "select an open PR",
+                    "draft" => "mark the PR ready for review",
+                    "changes requested" => "address the requested changes and obtain approval",
+                    "review required" | "not approved" => "obtain the required approval",
+                    "checks pending" => "wait for checks to complete",
+                    "no checks reported" => {
+                        "verify that the required checks are configured and reported"
+                    }
+                    "merge conflict" => "resolve conflicts with the base branch",
+                    value if value.starts_with("checks failing") => {
+                        "inspect the reported checks and fix or rerun them"
+                    }
+                    value if value.starts_with("already in ") => {
+                        "select a PR whose changes are not already contained"
+                    }
+                    _ => continue,
+                };
+                if !steps.iter().any(|step| step == next) {
+                    steps.push(next.to_string());
+                }
+            }
+            if steps.is_empty() {
+                steps.push("resolve the reported causes and run the plan again".to_string());
+            }
+            steps.join("; ")
+        };
+        let mut warnings = Vec::new();
+        if self.mergeable_unknown || self.merge_state_status.eq_ignore_ascii_case("UNKNOWN") {
+            warnings.push(
+                "GitHub still computing; merge retries mergeability for up to a minute".to_string(),
+            );
+        }
+        Readiness {
+            id: self.key.to_string(),
+            status: if reasons.is_empty() {
+                "eligible"
+            } else {
+                "blocked"
+            }
+            .to_string(),
+            causes: if reasons.is_empty() {
+                vec!["preflight passed".to_string()]
+            } else {
+                reasons
+            },
+            next_step,
+            base: self.base_ref.clone(),
+            default_branch: self.default_branch.clone(),
+            merge_state_status: self.merge_state_status.clone(),
+            warnings,
+            checks: self.check_details.clone(),
         }
     }
 
@@ -180,8 +327,12 @@ impl Pr {
             reasons.push("merge conflict".to_string());
         } else if self.behind {
             reasons.push("branch behind its base, update it".to_string());
-        } else if self.mergeable_unknown {
-            reasons.push("mergeability unknown, retry in a minute".to_string());
+        }
+        if !(self.conflicting && self.merge_state_status.eq_ignore_ascii_case("BEHIND"))
+            && let Some((cause, _)) = merge_state_blocker(&self.merge_state_status)
+            && !reasons.iter().any(|reason| reason == cause)
+        {
+            reasons.push(cause.to_string());
         }
         reasons
     }

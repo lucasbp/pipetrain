@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Plan and merge share preflight blockers for full GitHub merge states; UNKNOWN warns while the executor retains its one-minute retry and final clean-only guard.
+- Plan and merge previews and additive JSON preflight entries show eligibility, causes, next steps, bases, repository default branches and check names, states and URLs.
+- Plan and merge warn about feature bases without a selected parent; queue output adds only preflight comments and preserves existing step ordering.
+- Add opt-in `plan --strict` and `merge --strict` exit code 4 for selections without an eligible PR, including merge dry runs with no merge steps; default codes remain unchanged.
+
 - Add local `state show` inspection in text and JSON, using merge state path and profile selection without contacting GitHub.
 - Add confirmed `state discard` with a required reason, the merge state lock and atomic audit history; discarded records never count as confirmed deploys.
 - Resume failed deploys through a later successful deploy only with ancestry proof, complete expected workflow evidence and two settled readings; save the later SHA and run URLs in audit and additive report resolution fields.

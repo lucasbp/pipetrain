@@ -538,6 +538,7 @@ pub struct NotMerging {
 
 #[derive(Debug, Serialize)]
 pub struct Report {
+    pub preflight: Vec<crate::model::Readiness>,
     pub state: StatePreview,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub bump_enabled: bool,

@@ -244,21 +244,18 @@ fn stop(report: &mut StepReport, detail: impl Into<String>) {
 }
 
 fn not_clean(state: &str) -> Option<String> {
-    let why = match state {
-        "clean" => return None,
-        "behind" => "the branch is behind its base: update it, then run again".to_string(),
-        "dirty" => "the branch has a merge conflict".to_string(),
-        "blocked" => {
-            "branch protection blocks it: a required review or check is missing".to_string()
-        }
-        "unstable" => "some checks are not passing".to_string(),
-        "draft" => "it is a draft".to_string(),
+    if state == "clean" {
+        return None;
+    }
+    if let Some((cause, next)) = crate::model::merge_state_blocker(state) {
+        return Some(format!("{cause}: {next}"));
+    }
+    Some(match state {
         "unknown" | "" => {
             "GitHub has not finished working out mergeability: run again in a minute".to_string()
         }
         other => format!("GitHub reports the state `{other}`, not clean"),
-    };
-    Some(why)
+    })
 }
 
 fn settled_live(
@@ -507,7 +504,9 @@ fn merge_one(
         tries += 1;
         let mut settled = pr.clone();
         settled.mergeable_unknown = false;
-        if !pr.mergeable_unknown || !env.cfg.blockers(&settled).is_empty() {
+        if !(pr.mergeable_unknown || pr.merge_state_status.eq_ignore_ascii_case("UNKNOWN"))
+            || !env.cfg.blockers(&settled).is_empty()
+        {
             break pr;
         }
         if tries >= MERGEABILITY_TRIES {
@@ -530,7 +529,15 @@ fn merge_one(
     }
     let reasons = env.cfg.blockers(&pr);
     if !reasons.is_empty() {
-        return fail(report, format!("no longer ready: {}", reasons.join(", ")));
+        let readiness = pr.readiness(reasons);
+        return fail(
+            report,
+            format!(
+                "no longer ready: {}; next: {}",
+                readiness.causes.join(", "),
+                readiness.next_step
+            ),
+        );
     }
     let live = match settled_live(client, &slug, item.number, hooks) {
         Ok(live) => live,
@@ -1012,6 +1019,12 @@ pub fn merge_plan(
         readings: RefCell::new(BTreeMap::new()),
     };
     let mut report = Report {
+        preflight: plan
+            .preflight
+            .iter()
+            .filter(|pr| !plan.is_hidden(&pr.id))
+            .cloned()
+            .collect(),
         state: store.preview(profile, cfg.merge.stale_pending_hours),
         bump_enabled: settings.bump,
         bump_candidates: if settings.bump {
@@ -1270,6 +1283,11 @@ fn render_with_steps(report: &Report, color: bool, include_steps: bool) -> Strin
     }
     if include_steps {
         out.push_str(&report.state.render());
+        for pr in &report.preflight {
+            for line in pr.lines() {
+                out.push_str(&format!("{line}\n"));
+            }
+        }
     }
     if report.bump_enabled && include_steps {
         out.push_str("--bump enabled: with --apply this run may create isolated bump branches and draft PRs targeting consumer heads, then block those consumers for CI and review. Dry runs perform no writes.\n");
@@ -1439,7 +1457,19 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
         observe: &mut observe,
         progress: &mut progress,
     };
-    let outcome = merge_plan(&built, &cfg, &mut client, &settings, &mut store, &mut hooks)?;
+    let mut outcome = merge_plan(&built, &cfg, &mut client, &settings, &mut store, &mut hooks)?;
+    if opts.plan.strict
+        && outcome.code == 0
+        && (!built.has_eligible()
+            || (!opts.apply
+                && !outcome
+                    .report
+                    .steps
+                    .iter()
+                    .any(|step| step.kind == Kind::Merge)))
+    {
+        outcome.code = emit::EXIT_NO_ELIGIBLE;
+    }
     display.borrow_mut().take();
     if outcome.aborted {
         eprintln!("aborted, nothing was merged");

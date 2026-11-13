@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use serde_json::Value;
 
 use crate::detect;
-use crate::model::{ChangedFile, Checks, Pr, PrKey, PrState, Review};
+use crate::model::{ChangedFile, CheckDetail, Checks, Pr, PrKey, PrState, Review};
 
 fn text_field(node: &Value, field: &str) -> String {
     node.get(field)
@@ -88,6 +88,37 @@ fn parse_failed_checks(node: &Value) -> Vec<String> {
     names.into_iter().collect()
 }
 
+fn parse_check_details(node: &Value) -> Vec<CheckDetail> {
+    let details: BTreeSet<CheckDetail> = node
+        .pointer("/commits/nodes/0/commit/statusCheckRollup/contexts/nodes")
+        .and_then(Value::as_array)
+        .map(|nodes| {
+            nodes
+                .iter()
+                .filter_map(|context| {
+                    let run = context.get("__typename")?.as_str()? == "CheckRun";
+                    let name = context
+                        .get(if run { "name" } else { "context" })?
+                        .as_str()?
+                        .to_string();
+                    let state = context
+                        .get(if run { "conclusion" } else { "state" })
+                        .and_then(Value::as_str)
+                        .or_else(|| context.get("status").and_then(Value::as_str))
+                        .unwrap_or("UNKNOWN")
+                        .to_string();
+                    let url = context
+                        .get(if run { "detailsUrl" } else { "targetUrl" })
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    Some(CheckDetail { name, state, url })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    details.into_iter().collect()
+}
+
 fn parse_labels(node: &Value) -> Vec<String> {
     node.pointer("/labels/nodes")
         .and_then(|v| v.as_array())
@@ -120,6 +151,13 @@ pub fn parse_pr(node: &Value) -> Option<Pr> {
         body: text_field(node, "body"),
         head_ref: text_field(node, "headRefName"),
         base_ref: text_field(node, "baseRefName"),
+        default_branch: repo
+            .pointer("/defaultBranchRef/name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        merge_state_status: text_field(node, "mergeStateStatus"),
+        check_details: parse_check_details(node),
         head_sha: text_field(node, "headRefOid"),
         base_sha: node
             .pointer("/baseRef/target/oid")
