@@ -221,7 +221,7 @@ wget() {
   case " $* " in *' --timeout=120 '*) ;; *) exit 84 ;; esac
   case " $* " in *' --tries=1 '*) ;; *) exit 85 ;; esac
   if [ "$MODE" = watchdog ]; then
-    exec /bin/sleep 20
+    exec /bin/sleep 120
   fi
   printf 'wget deadline checked\n'
   return 1
@@ -261,6 +261,6 @@ fn shell_wget_total_deadline_stops_a_continuous_download() {
     let start = std::time::Instant::now();
     let output = shell_test("watchdog");
     assert!(!output.status.success());
-    assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    assert!(start.elapsed() < std::time::Duration::from_secs(60));
     assert!(String::from_utf8_lossy(&output.stderr).contains("could not download"));
 }

@@ -14,13 +14,8 @@ const FAKE: &str = "ghp_FAKE0123456789";
 const HEAD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const SLUG: &str = "acme/api";
 
-fn temp(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "pipetrain-content-test-{}-{name}",
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&dir);
-    dir
+fn temp(name: &str) -> common::TempDir {
+    common::TempDir::new(&format!("content-test-{name}"))
 }
 
 fn client(base: &str, dir: &Path, mode: CacheMode) -> Client {
@@ -95,7 +90,8 @@ fn asks_live(request: &str, path: &str) -> bool {
 
 #[test]
 fn second_run_skips_the_fixed_probe() {
-    let dir = temp("second");
+    let scratch = temp("second");
+    let dir = scratch.join("cache");
     let checks = wanted(&["src/a.rs"]);
     let full = reply(&[Some("c1"), Some("aaa"), Some("aaa")]);
     let (first, seen) = run(&dir, CacheMode::Use, vec![full], &checks);
@@ -107,12 +103,12 @@ fn second_run_skips_the_fixed_probe() {
     assert_eq!(probe_count(&seen[0]), 2);
     assert!(!asks_fixed(&seen[0], "src/a.rs"));
     assert!(asks_live(&seen[0], "src/a.rs"));
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn deleted_path_is_cached_as_null() {
-    let dir = temp("deleted");
+    let scratch = temp("deleted");
+    let dir = scratch.join("cache");
     let checks = wanted(&["src/gone.rs"]);
     let full = reply(&[Some("c1"), Some("aaa"), None]);
     let (first, seen) = run(&dir, CacheMode::Use, vec![full], &checks);
@@ -123,12 +119,12 @@ fn deleted_path_is_cached_as_null() {
     assert_eq!(second, vec![false]);
     assert_eq!(probe_count(&seen[0]), 2);
     assert!(!asks_fixed(&seen[0], "src/gone.rs"));
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn cached_oid_never_gives_a_stale_true() {
-    let dir = temp("stale");
+    let scratch = temp("stale");
+    let dir = scratch.join("cache");
     let checks = wanted(&["src/a.rs"]);
     let full = reply(&[Some("c1"), Some("aaa"), Some("aaa")]);
     let (first, _) = run(&dir, CacheMode::Use, vec![full], &checks);
@@ -137,12 +133,12 @@ fn cached_oid_never_gives_a_stale_true() {
     let (second, seen) = run(&dir, CacheMode::Use, vec![moved], &checks);
     assert_eq!(second, vec![false]);
     assert_eq!(probe_count(&seen[0]), 2);
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn off_mode_always_sends_every_probe() {
-    let dir = temp("off");
+    let scratch = temp("off");
+    let dir = scratch.join("cache");
     let checks = wanted(&["src/a.rs"]);
     for _ in 0..2 {
         let full = reply(&[Some("c1"), Some("aaa"), Some("aaa")]);
@@ -151,12 +147,12 @@ fn off_mode_always_sends_every_probe() {
         assert_eq!(probe_count(&seen[0]), 3);
         assert!(asks_fixed(&seen[0], "src/a.rs"));
     }
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn refresh_mode_asks_everything_and_rewrites() {
-    let dir = temp("refresh");
+    let scratch = temp("refresh");
+    let dir = scratch.join("cache");
     let checks = wanted(&["src/a.rs"]);
     let seed = reply(&[Some("c1"), Some("aaa"), Some("aaa")]);
     run(&dir, CacheMode::Use, vec![seed], &checks);
@@ -172,7 +168,6 @@ fn refresh_mode_asks_everything_and_rewrites() {
     let (used, seen) = run(&dir, CacheMode::Use, vec![live], &checks);
     assert_eq!(used, vec![true]);
     assert_eq!(probe_count(&seen[0]), 2);
-    let _ = fs::remove_dir_all(&dir);
 }
 
 fn paths_of(count: usize) -> Vec<String> {
@@ -214,7 +209,8 @@ fn second_run_reply(count: usize, bad: Option<usize>) -> String {
 }
 
 fn many(bad: Option<usize>, name: &str) {
-    let dir = temp(name);
+    let scratch = temp(name);
+    let dir = scratch.join("cache");
     let owned = paths_of(30);
     let names: Vec<&str> = owned.iter().map(String::as_str).collect();
     let checks = wanted(&names);
@@ -231,7 +227,6 @@ fn many(bad: Option<usize>, name: &str) {
     assert_eq!(total_probes(&seen), 31);
     assert_eq!(second, first);
     assert_eq!(first, vec![bad.is_none()]);
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -246,7 +241,8 @@ fn many_paths_with_a_changed_file_stay_false() {
 
 #[test]
 fn cache_files_hold_no_token() {
-    let dir = temp("secret");
+    let scratch = temp("secret");
+    let dir = scratch.join("cache");
     let checks = wanted(&["src/a.rs"]);
     let full = reply(&[Some("c1"), Some("aaa"), Some("aaa")]);
     run(&dir, CacheMode::Use, vec![full], &checks);
@@ -258,5 +254,4 @@ fn cache_files_hold_no_token() {
         assert!(!text.contains(&FAKE.to_lowercase()));
         assert!(!text.contains("authorization"));
     }
-    let _ = fs::remove_dir_all(&dir);
 }

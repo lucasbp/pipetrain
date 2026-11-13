@@ -1,12 +1,11 @@
-use std::path::PathBuf;
 use std::process::{Command, Output};
+
+mod common;
 
 use serde_json::Value;
 
-fn empty_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("pipetrain-doctor-{name}-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+fn empty_dir(name: &str) -> common::TempDir {
+    common::TempDir::new(&format!("doctor-{name}"))
 }
 
 fn doctor(args: &[&str]) -> Output {
@@ -15,8 +14,8 @@ fn doctor(args: &[&str]) -> Output {
         .arg("doctor")
         .args(args)
         .env_clear()
-        .env("PATH", &dir)
-        .current_dir(&dir)
+        .env("PATH", dir.path())
+        .current_dir(dir.path())
         .output()
         .unwrap()
 }

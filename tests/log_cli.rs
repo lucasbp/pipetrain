@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU32, Ordering};
 
+mod common;
+
 use serde_json::Value;
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -119,7 +121,12 @@ fn a_typed_error_logs_only_its_type_and_variant() {
     let dir = scratch();
     let out = base(&dir)
         .env("PIPETRAIN_LOG", "1")
-        .args(["update", "--check", "--api-url", "http://127.0.0.1:1/x"])
+        .args([
+            "update",
+            "--check",
+            "--api-url",
+            &format!("{}/x", common::closed_base()),
+        ])
         .output()
         .unwrap();
     assert!(!out.status.success());

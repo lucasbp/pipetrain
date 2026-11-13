@@ -604,15 +604,14 @@ fn the_proposal_with_no_orgs_is_still_valid_config() {
     assert!(ProfileSet::parse(&text).is_ok());
 }
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("pipetrain-profile-{}-{name}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    dir
+fn scratch(name: &str) -> common::TempDir {
+    common::TempDir::new(&format!("profile-{name}"))
 }
 
 #[test]
 fn init_refuses_to_overwrite_without_force() {
-    let dir = scratch("refuse");
+    let scratch = scratch("refuse");
+    let dir = scratch.join("config");
     fs::create_dir_all(&dir).unwrap();
     let path = dir.join("config.toml");
     fs::write(&path, "orgs = [\"keep\"]\n").unwrap();
@@ -625,16 +624,15 @@ fn init_refuses_to_overwrite_without_force() {
     assert_eq!(fs::read_to_string(&path).unwrap(), "orgs = [\"keep\"]\n");
     init::write_config(&path, "orgs = [\"new\"]\n", true).unwrap();
     assert_eq!(fs::read_to_string(&path).unwrap(), "orgs = [\"new\"]\n");
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
 fn init_creates_missing_folders_when_writing() {
-    let dir = scratch("create");
+    let scratch = scratch("create");
+    let dir = scratch.join("config");
     let path = dir.join("nested").join("config.toml");
     init::write_config(&path, "orgs = [\"acme\"]\n", false).unwrap();
     assert_eq!(fs::read_to_string(&path).unwrap(), "orgs = [\"acme\"]\n");
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
