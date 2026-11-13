@@ -2103,6 +2103,7 @@ fn parallel_resume_reconciles_saved_sha_without_repeating_merge() {
     rig.script().merged.insert(1);
     rig.store
         .add(pipetrain::merge::Pending {
+            recorded_at: None,
             id: "acme/api#1".to_string(),
             repo: "acme/api".to_string(),
             base: "main".to_string(),
@@ -2319,6 +2320,7 @@ fn parallel_legacy_failed_resume_stops_before_dispatching_new_independent_work()
     rig.cfg.max_parallel = 2;
     rig.store
         .add(pipetrain::merge::Pending {
+            recorded_at: None,
             id: "acme/sdk#1".to_string(),
             repo: "acme/sdk".to_string(),
             base: "main".to_string(),
@@ -2503,6 +2505,210 @@ fn bump_all_skipped_publisher_does_not_skip_its_consumer_or_create_review_work()
 }
 struct FilterState {
     directory: std::path::PathBuf,
+}
+
+fn inherited_state(state: &FilterState) -> Vec<u8> {
+    std::fs::create_dir_all(&state.directory).unwrap();
+    let recorded_at = (chrono::Utc::now() - chrono::Duration::hours(26))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let bytes = serde_json::to_vec_pretty(&json!({
+        "schema": 2,
+        "created_at": recorded_at,
+        "updated_at": recorded_at,
+        "profile": "acme",
+        "queue_id": "original-queue",
+        "pending": [
+            {"id": "acme/api#1", "repo": "acme/api", "base": "main", "sha": merge_sha(1), "recorded_at": recorded_at},
+            {"id": "acme/api#2", "repo": "acme/api", "base": "release", "sha": null}
+        ]
+    })).unwrap();
+    std::fs::write(state.directory.join("state.json"), &bytes).unwrap();
+    bytes
+}
+
+#[test]
+fn dry_run_lists_inherited_pending_age_origin_and_stale_in_text_and_json() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    let bytes = inherited_state(&state);
+    rig.store = state.reopen();
+    let run = rig.run(&plan_on(&[3]), dry(), false, false).unwrap();
+    let text = render(&run.outcome.report, false);
+    for expected in [
+        "State\n",
+        "state.json",
+        "file age 0h",
+        "profile: acme (selected: default)",
+        "queue: original-queue",
+        "inherited pending: acme/api#1 into main at 0000000 (age 26h",
+        "stale (warning only)",
+        "inherited pending: acme/api#2 into release at SHA unknown (age unknown)",
+    ] {
+        assert!(text.contains(expected), "missing {expected}: {text}");
+    }
+    let value = serde_json::to_value(&run.outcome.report).unwrap();
+    assert_eq!(value["schema"], 1);
+    let preview = &value["state"];
+    assert_eq!(
+        preview["path"],
+        state.directory.join("state.json").display().to_string()
+    );
+    assert!(preview["file_age_seconds"].as_u64().unwrap() < 60);
+    assert_eq!(preview["profile"], "acme");
+    assert_eq!(preview["selected_profile"], "default");
+    assert_eq!(preview["queue_id"], "original-queue");
+    assert_eq!(preview["stale_pending_hours"], 24);
+    assert_eq!(preview["pending"][0]["id"], "acme/api#1");
+    assert_eq!(preview["pending"][0]["base"], "main");
+    assert_eq!(preview["pending"][0]["sha"], "0000000");
+    assert!(preview["pending"][0]["age_seconds"].as_u64().unwrap() >= 26 * 3600);
+    assert_eq!(preview["pending"][0]["stale"], true);
+    assert_eq!(preview["pending"][1]["age"], "age unknown");
+    assert!(preview["pending"][1]["age_seconds"].is_null());
+    assert_eq!(preview["pending"][1]["stale"], false);
+    assert_eq!(run.step(0).kind, Kind::Resume);
+    assert_eq!(run.step(1).kind, Kind::Resume);
+    assert!(rig.puts().is_empty());
+    assert_eq!(
+        std::fs::read(state.directory.join("state.json")).unwrap(),
+        bytes
+    );
+    assert!(!state.directory.join("state.json.lock").exists());
+}
+
+#[test]
+fn configured_stale_pending_hours_changes_only_the_warning() {
+    let mut rig = Rig::new("stale_pending_hours = 48");
+    let state = FilterState::attach(&mut rig);
+    inherited_state(&state);
+    rig.store = state.reopen();
+    let plan = plan_on(&[3]);
+    let fresh = rig.run(&plan, dry(), false, false).unwrap();
+    assert!(!fresh.outcome.report.state.pending[0].stale);
+    assert!(!render(&fresh.outcome.report, false).contains("stale (warning only)"));
+    rig.cfg = Config::parse("orgs = ['acme']\n[merge]\nstale_pending_hours = 1").unwrap();
+    let stale = rig.run(&plan, dry(), false, false).unwrap();
+    assert!(stale.outcome.report.state.pending[0].stale);
+    assert_eq!(stale.outcome.report.state.stale_pending_hours, 1);
+    assert_eq!(fresh.statuses(), stale.statuses());
+    assert_eq!(
+        fresh
+            .outcome
+            .report
+            .steps
+            .iter()
+            .map(|step| &step.target)
+            .collect::<Vec<_>>(),
+        stale
+            .outcome
+            .report
+            .steps
+            .iter()
+            .map(|step| &step.target)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(rig.store.state.pending.len(), 2);
+}
+
+#[test]
+fn apply_confirmation_shows_inherited_state_without_rewriting_on_refusal() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    let bytes = inherited_state(&state);
+    rig.store = state.reopen();
+    let run = rig.run(&plan_on(&[3]), applied(), false, false).unwrap();
+    assert!(run.outcome.aborted);
+    assert_eq!(run.confirms, 1);
+    for expected in [
+        "State\n",
+        "profile: acme",
+        "acme/api#1",
+        "age 26h",
+        "stale (warning only)",
+        "age unknown",
+    ] {
+        assert!(
+            run.confirmation_text[0].contains(expected),
+            "{}",
+            run.confirmation_text[0]
+        );
+    }
+    assert!(rig.puts().is_empty());
+    assert_eq!(
+        std::fs::read(state.directory.join("state.json")).unwrap(),
+        bytes
+    );
+    let mut second = state.reopen();
+    assert!(second.lock().is_err());
+    rig.store = Store::in_memory();
+    second.lock().unwrap();
+    drop(second);
+}
+
+#[test]
+fn apply_fails_before_confirmation_when_state_is_locked_but_dry_run_can_read_it() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    let bytes = inherited_state(&state);
+    let mut other = state.reopen();
+    other.lock().unwrap();
+    rig.store = state.reopen();
+    let plan = plan_on(&[3]);
+    let error = rig
+        .run(&plan, applied(), true, true)
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(
+        error.contains("another merge execution is active"),
+        "{error}"
+    );
+    assert!(error.contains("state.json.lock"), "{error}");
+    assert!(rig.lines().is_empty());
+    let run = rig.run(&plan, dry(), false, false).unwrap();
+    assert_eq!(run.outcome.report.state.pending.len(), 2);
+    assert_eq!(
+        std::fs::read(state.directory.join("state.json")).unwrap(),
+        bytes
+    );
+    drop(other);
+}
+
+#[test]
+fn apply_records_utc_pending_timestamp_and_keeps_stale_resume_behavior() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    rig.script().runs = vec![run_json("deploy", "in_progress", None)];
+    let run = rig.go(&plan_on(&[1]));
+    assert_eq!(run.outcome.code, EXIT_STOPPED);
+    let saved = state.reopen();
+    let timestamp = saved.state.pending[0].recorded_at.as_deref().unwrap();
+    assert!(timestamp.ends_with('Z'));
+    chrono::DateTime::parse_from_rfc3339(timestamp).unwrap();
+    assert_eq!(saved.state.profile.as_deref(), Some("default"));
+    assert_eq!(saved.state.schema, 2);
+    let identity = saved.state.queue_id.clone();
+    let mut value: Value =
+        serde_json::from_slice(&std::fs::read(state.directory.join("state.json")).unwrap())
+            .unwrap();
+    value["pending"][0]["recorded_at"] = json!("2000-01-01T00:00:00Z");
+    rig.store = Store::in_memory();
+    std::fs::write(
+        state.directory.join("state.json"),
+        serde_json::to_vec(&value).unwrap(),
+    )
+    .unwrap();
+    rig.store = state.reopen();
+    rig.script().runs = green();
+    let resumed = rig.go(&plan_on(&[]));
+    assert!(resumed.outcome.report.state.pending[0].stale);
+    assert_eq!(resumed.step(0).kind, Kind::Resume);
+    assert_eq!(resumed.step(0).status, Status::Done);
+    assert_eq!(rig.puts().len(), 1);
+    let saved = state.reopen();
+    assert!(saved.state.pending.is_empty());
+    assert_eq!(saved.state.queue_id, identity);
+    rig.store = Store::in_memory();
 }
 
 impl FilterState {

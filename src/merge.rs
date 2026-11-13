@@ -1,8 +1,7 @@
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::emit::PAUSE_LINE;
@@ -10,9 +9,10 @@ use crate::github::Run;
 
 mod storage;
 
-pub use storage::resolve_state_path;
+pub use storage::{StatePreview, resolve_state_path};
 
-pub const SCHEMA: u32 = 1;
+pub const SCHEMA: u32 = 2;
+pub const REPORT_SCHEMA: u32 = 1;
 pub const STOPPED: &str = "stopped after an earlier failure";
 pub const EXIT_STOPPED: i32 = 5;
 
@@ -216,6 +216,8 @@ pub enum DependencyFailure {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pending {
+    #[serde(default)]
+    pub recorded_at: Option<String>,
     pub id: String,
     pub repo: String,
     pub base: String,
@@ -235,6 +237,14 @@ pub struct DeployPr {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct State {
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+    #[serde(default)]
+    pub profile: Option<String>,
+    #[serde(default)]
+    pub queue_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bump: Option<crate::consumer_bump::journal::Journal>,
     #[serde(default)]
@@ -272,6 +282,7 @@ pub struct Store {
     path: Option<PathBuf>,
     pub state: State,
     remote: Option<RemoteStore>,
+    lock: Option<std::fs::File>,
 }
 
 pub fn default_state_path() -> Option<PathBuf> {
@@ -284,31 +295,13 @@ impl Store {
     pub fn in_memory() -> Self {
         Self {
             path: None,
-            state: State::default(),
+            state: State {
+                schema: SCHEMA,
+                ..State::default()
+            },
             remote: None,
+            lock: None,
         }
-    }
-
-    pub fn open(path: Option<PathBuf>) -> Result<Self> {
-        let Some(path) = path else {
-            return Ok(Self::in_memory());
-        };
-        let state = match fs::read_to_string(&path) {
-            Ok(text) => serde_json::from_str(&text)
-                .with_context(|| format!("the merge state file {} is not valid", path.display()))?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => State::default(),
-            Err(error) => {
-                return Err(anyhow!(
-                    "cannot read the merge state file {}: {error}",
-                    path.display()
-                ));
-            }
-        };
-        Ok(Self {
-            path: Some(path),
-            state,
-            remote: None,
-        })
     }
 
     pub fn remote(
@@ -319,6 +312,7 @@ impl Store {
             path: None,
             state,
             remote: Some(Box::new(forward)),
+            lock: None,
         }
     }
 
@@ -341,20 +335,6 @@ impl Store {
                 self.remove_deploy_pr(&slug, &branch)
             }
         }
-    }
-
-    pub fn save(&mut self) -> Result<()> {
-        self.state.schema = SCHEMA;
-        let Some(path) = &self.path else {
-            return Ok(());
-        };
-        if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
-        }
-        let temp = path.with_extension("json.tmp");
-        fs::write(&temp, serde_json::to_string_pretty(&self.state)?)
-            .with_context(|| format!("cannot write {}", temp.display()))?;
-        fs::rename(&temp, path).with_context(|| format!("cannot write {}", path.display()))
     }
 
     pub fn add(&mut self, pending: Pending) -> Result<()> {
@@ -486,6 +466,7 @@ pub struct NotMerging {
 
 #[derive(Debug, Serialize)]
 pub struct Report {
+    pub state: StatePreview,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub bump_enabled: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -520,6 +501,7 @@ impl Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn run(name: &str, status: &str, conclusion: Option<&str>) -> Run {
         Run {
@@ -722,6 +704,7 @@ mod tests {
         assert!(store.state.pending.is_empty());
         store
             .add(Pending {
+                recorded_at: None,
                 id: "acme/api#1".to_string(),
                 repo: "acme/api".to_string(),
                 base: "main".to_string(),

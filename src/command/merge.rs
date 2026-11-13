@@ -15,8 +15,8 @@ use crate::config::Config;
 use crate::emit;
 use crate::github::{Client, LivePr, PrWrite};
 use crate::merge::{
-    DependencyFailure, Kind, NotMerging, Pending, Report, SCHEMA, STOPPED, State, Status, Step,
-    StepReport, Store, Verdict, judge, judge_expected, resolve_state_path, steps,
+    DependencyFailure, Kind, NotMerging, Pending, REPORT_SCHEMA, Report, STOPPED, State, Status,
+    Step, StepReport, Store, Verdict, judge, judge_expected, resolve_state_path, steps,
     wait_is_published,
 };
 use crate::model::{PrKey, PrState};
@@ -556,6 +556,7 @@ fn merge_one(
         return fail(report, why);
     }
     let pending = Pending {
+        recorded_at: Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)),
         id: item.id.clone(),
         repo: slug.clone(),
         base: item.base.clone(),
@@ -976,6 +977,14 @@ pub fn merge_plan(
     hooks: &mut Hooks,
 ) -> Result<Outcome> {
     let method = method_of(settings, cfg)?;
+    if settings.apply {
+        store.lock()?;
+    }
+    let profile = Some(
+        plan.profile
+            .as_ref()
+            .map_or(crate::profile::IMPLICIT, |profile| profile.name.as_str()),
+    );
     let env = Env {
         plan,
         cfg,
@@ -984,6 +993,7 @@ pub fn merge_plan(
         readings: RefCell::new(BTreeMap::new()),
     };
     let mut report = Report {
+        state: store.preview(profile, cfg.merge.stale_pending_hours),
         bump_enabled: settings.bump,
         bump_candidates: if settings.bump {
             plan.items
@@ -994,7 +1004,7 @@ pub fn merge_plan(
         } else {
             Vec::new()
         },
-        schema: SCHEMA,
+        schema: REPORT_SCHEMA,
         applied: false,
         requested: settings.apply,
         stopped: None,
@@ -1045,6 +1055,9 @@ pub fn merge_plan(
         });
     }
     report.applied = true;
+    if store.state.profile.is_none() {
+        store.state.profile = profile.map(str::to_string);
+    }
     if cfg.max_parallel > 1 || settings.bump {
         parallel::execute(&env, client, store, hooks, &mut report.steps, &bundles)?;
         let code = report.exit_code();
@@ -1235,6 +1248,9 @@ fn render_with_steps(report: &Report, color: bool, include_steps: bool) -> Strin
     if !report.applied && !report.requested && report.stopped.is_none() {
         let banner = "dry run, nothing was merged; pass --apply to do it";
         out.push_str(&format!("{}\n\n", tint(color, yellow, banner)));
+    }
+    if include_steps {
+        out.push_str(&report.state.render());
     }
     if report.bump_enabled && include_steps {
         out.push_str("--bump enabled: with --apply this run may create isolated bump branches and draft PRs targeting consumer heads, then block those consumers for CI and review. Dry runs perform no writes.\n");

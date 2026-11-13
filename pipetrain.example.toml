@@ -117,6 +117,7 @@ min_remaining = 200
 
 # pipetrain merge --apply: how long to wait for each deploy, per repo.
 [merge]
+stale_pending_hours = 24
 method = "merge"
 timeout_minutes = 30
 poll_seconds = 15

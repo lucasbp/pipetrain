@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Merge state schema 2 records queue identity, profile and UTC timestamps; legacy schemas 0 and 1 upgrade on save, while newer schemas are refused without changing the file.
+- Merge apply holds an exclusive process lock beside the state file, reloads under the lock and uses unique temporary files for atomic state replacement.
+- Merge dry runs, confirmations and JSON show state origin, file age and inherited pending records, with warning-only stale markers controlled by `merge.stale_pending_hours` (default 24).
+
 - Merge confirms deploys only from saved expected workflow paths; auxiliary runs cannot decide the verdict and their failures remain visible.
 - Merge follows resolved and transitive `workflow_run` chains on the merge SHA, persists them for resume, and keeps untrackable chains pending with a diagnostic.
 - Merge refuses deploy confirmation from incomplete workflow-run responses, including more than 100 runs for a SHA.

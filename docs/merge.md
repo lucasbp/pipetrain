@@ -153,7 +153,7 @@ Before it merges, pipetrain records the PR in a state file. After the deploy pas
 
 State is local and durable by default. Named profiles use `pipetrain/queues/<profile-key>/merge-state.json` in the user state directory (the local data directory on Windows). The selected canonical profile name identifies one stable queue across repositories and invocations; aliases and case changes do not create another queue. Simple names use their lowercase form. Other UTF-8 bytes are percent-encoded, including dots, path separators and percent signs; Windows reserved names escape their first byte. Different names cannot collide through replacement of punctuation. The implicit `default` profile retains `pipetrain/merge-state.json`.
 
-Path precedence is `--state FILE`, then `merge.state_file` from the selected configuration, then the automatic profile path. Relative configured paths resolve from the loaded config file's directory; relative `--state` paths retain their command-line working-directory meaning. The effective path is shown once on stderr except with `--json` or `--no-progress`. No state contents are printed. A missing user directory is an error unless a path override is provided; production commands never silently use memory-only storage.
+Path precedence is `--state FILE`, then `merge.state_file` from the selected configuration, then the automatic profile path. Relative configured paths resolve from the loaded config file's directory; relative `--state` paths retain their command-line working-directory meaning. The effective path is also shown once on stderr except with `--json` or `--no-progress`. Dry runs and apply confirmations include the State preview described below, including with `--no-progress`. A missing user directory is an error unless a path override is provided; production commands never silently use memory-only storage.
 
 To persist a custom path without repeating a command flag:
 
@@ -163,6 +163,27 @@ state_file = 'queues/acme.json'
 ```
 
 Without a path override, unfinished work in the legacy global state blocks a named profile before any GitHub writes, even if a profile state already exists. Choose that legacy file explicitly with `--state` or `merge.state_file`, reconcile it, and then deliberately choose how to continue. Pending deploys, queued deploy PRs, active jobs and dependency bump journals are checked. State is never automatically migrated, deleted or combined. An empty legacy state is left in place. An unreadable or invalid state file is an error, never a reset.
+
+### State identity, locking and age
+
+The local state file uses schema `2`, independently of the merge report's schema `1`. Reading accepts an absent schema (schema `0`), `0`, `1` and `2`, normalizing to `2` in memory. Reading alone does not rewrite a file. The next normal save writes schema `2` in the same location and preserves pending work. A schema above `2` fails with `written by a newer pipetrain` before writing the state or acquiring its lock. A future schema detected on the locked re-read also fails without rewriting the state.
+
+State adds nullable `created_at`, `updated_at`, `profile` and `queue_id`. The first save establishes a UTC RFC 3339 creation timestamp and a locally generated opaque queue ID, and every save updates the UTC RFC 3339 update timestamp. The queue ID identifies the state file's persistent queue across invocations, including after all work completes; it is not a hash of the current selection or an execution ID. Existing identity and creation time are retained. A confirmed apply records the selected canonical profile if the state has no recorded profile. An explicit state override retains an existing profile so its origin remains visible. For legacy files, absent identity and timestamps remain unknown until the next normal save adopts them; the adoption timestamp does not reconstruct the original creation time.
+
+Each newly recorded pending merge adds `recorded_at` in UTC RFC 3339 before its merge request. Later SHA updates and resume preserve that timestamp. Missing legacy timestamps remain unknown, including after saving, rather than inventing an age.
+
+An apply acquires an exclusive OS lock with `std::fs::File::try_lock` on `<state>.lock` before confirmation or any state writes, re-reads the state under that lock, and holds the handle until the store is dropped at the end of the invocation. Another apply fails immediately, names the lock file and reports that another execution is active. The file can remain after release; ownership is the OS lock on its handle, not file existence, so interruption does not require deleting it. Dry runs never acquire a lock or create state directories or lock files. Read-only previews can inspect a locked state.
+
+Every save exclusively creates a unique `<state>.<pid>.<n>.tmp` sibling and atomically renames it over the state file. Existing temporary files are not overwritten. Failed writes leave the prior state in place and clean up only the temporary file created by that write. No legacy temporary file is reused.
+
+The dry run and apply confirmation show a `State` block with the path, file age since its last filesystem modification, recorded profile, selected profile, queue ID and every inherited pending record. Each record shows its ID, base, seven-character SHA (or `SHA unknown`) and age since `recorded_at`. Missing or invalid timestamps display `age unknown`; unknown ages are never marked stale. Future timestamps display age zero. Records strictly older than `merge.stale_pending_hours` are marked `stale (warning only)`. The threshold is an unsigned number of hours, defaults to `24`, and accepts `0` to warn on any known positive age:
+
+```toml
+[merge]
+stale_pending_hours = 24
+```
+
+Neither stale markers nor a different current selection or profile filter, discard or change the order of inherited pending work. Apply still resumes all pending records first. The preview is a snapshot taken before confirmation and execution, including in the final JSON report.
 
 ## Exit codes
 
@@ -185,6 +206,11 @@ Without a path override, unfinished work in the legacy global state blocks a nam
 | `steps` | Step[] | In execution order. Steps resumed from an earlier run come first. |
 | `not_merging` | `{id, reasons[]}[]` | PRs the plan left out and why. |
 | `questions` | string[] | The `? ...` lines of the plan. |
+| `state` | StatePreview | Additive snapshot of local state before execution, also present in dry runs. |
+
+`StatePreview` contains `path: string | null`, `file_age_seconds: integer | null`, `file_age: string`, `created_at: string | null`, `updated_at: string | null`, `profile: string | null` (recorded origin), `selected_profile: string | null` (current selection), `queue_id: string | null`, `stale_pending_hours: integer` and `pending: PendingPreview[]`. Unknown metadata is `null`; age strings use `age Hh Mm Ss` or `age unknown`. File age measures the last filesystem modification, independently of the stored timestamps. `path` is null only for library callers using memory-only storage.
+
+Each `PendingPreview` is `{id: string, base: string, sha: string | null, recorded_at: string | null, age_seconds: integer | null, age: string, stale: boolean}`. `sha` is the first seven characters of the saved merge SHA. `pending` includes every inherited record, even outside the current plan. These are additive report fields; the existing report schema, fields and resume behavior retain their meanings.
 
 A step is `{kind, target, status, detail}` plus `merge_sha`, `deploy`, `blocked_by`, `deploy_prediction` and `expected_runs` when they apply. `blocked_by` identifies the failed PR responsible for a blocked step. `kind` is `resume`, `merge`, `gate`, `wait` or `open-pr`. `status` is `planned`, `done`, `skipped`, `failed` or `stopped`; after a global stop the steps that did not run are `skipped` with the detail `stopped after an earlier failure`. Dependency and same-target skips include a specific reason.
 
