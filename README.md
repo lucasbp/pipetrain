@@ -839,6 +839,7 @@ pipetrain does not approve, comment, label or re-run checks, and it does not exe
 - [docs/log.md](docs/log.md): the opt-in local usage log, what a line holds and what never enters it.
 - [docs/mcp.md](docs/mcp.md): the MCP server, its five read-only tools, results, errors and the protocol choice.
 - [docs/merge.md](docs/merge.md): the contract of `pipetrain merge`: what it checks, what it waits for, resuming, exit codes, JSON and the open design questions.
+- [docs/e2e-sandbox.md](docs/e2e-sandbox.md): manually activated integration tests against disposable GitHub repositories, isolated state and cleanup.
 - [docs/releasing.md](docs/releasing.md): how a release is cut, what the workflow builds and the optional crates.io step.
 - [docs/repo-names.md](docs/repo-names.md): how `repo#123` is resolved to an org, and what it costs.
 - [docs/saving-pipelines.md](docs/saving-pipelines.md): why the plan checks "already in the base", why it suggests a deploy branch, and how to apply it by hand.
