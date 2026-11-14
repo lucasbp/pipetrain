@@ -448,6 +448,7 @@ mod tests {
             repo: "acme/api".to_string(),
             base: "main".to_string(),
             sha: Some("abc123".to_string()),
+            admin_override: None,
             continuation: None,
             deploy_prediction: None,
         };

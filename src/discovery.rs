@@ -151,6 +151,11 @@ fn stacked_questions(out: &Discovered, train: &str) -> Vec<Question> {
     questions
 }
 
+pub(crate) fn refresh_questions(out: &mut Discovered, train: &str) {
+    out.questions = sibling_questions(out);
+    out.questions.extend(stacked_questions(out, train));
+}
+
 pub fn discover(all: Vec<Pr>, cfg: &Config, train: &str) -> Discovered {
     let shared = shared_branches(&all, cfg, train);
     let mut out = Discovered::default();

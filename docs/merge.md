@@ -50,6 +50,52 @@ The merge request uses this verified new head SHA. Workflow file prediction also
 
 A parent that lost approval or has pending checks is `stopped` before any parent merge request, naming the cause and readiness next step, including `re-approve acme/api#10 after its stacked child landed`. Children already merged remain merged; rerun after the required review or checks are complete. Ordinary readiness failures keep their existing status.
 
+## --admin
+
+`pipetrain merge --apply --admin` can merge past a missing required review only.
+The PR must be open, not draft, conflict-free, not behind, have known mergeability,
+and report `REVIEW_REQUIRED` with `BLOCKED`. Checks must pass, or be absent where
+missing checks are already allowed. Every required check from classic protection
+and rulesets must appear by name in the PR's check details with `SUCCESS`,
+`NEUTRAL` or `SKIPPED` (case-insensitive); missing or non-passing required names
+are listed in the refusal even when other checks are green. Strict status-check
+policies additionally require the base-to-head comparison to report `behind_by == 0`.
+
+Repository admin permission, GitHub's `viewerCanMergeAsAdmin`, classic protection
+and branch rules are checked before adding the override to the plan. Ruleset
+`required_review_thread_resolution` refuses. Every `allowed_merge_methods` list
+must include the configured method. Classic or ruleset `required_linear_history`
+refuses the `merge` method. Signatures, conversation resolution, locked branches,
+unknown rules and other unverifiable requirements keep refusing. Without
+`--apply`, this only previews the override.
+
+Before execution, confirmation lists the affected PRs and the token's login.
+With `--yes`, the same notice goes to stderr in text mode. A marked step waits
+for unknown GraphQL mergeability with the existing 60 second deadline and pause,
+even while review is required. Unknown or empty REST mergeability also retains
+the normal 60 second settle loop. After REST settles, execution rereads GraphQL,
+requires its head SHA and base to match REST, and runs the same verification used
+at plan time with fresh permissions and branch requirements. REST
+`mergeable_state` must be exactly `blocked`. Failed checks, changes requested,
+conflicts, draft, behind, unstable and other blockers keep refusing, as do head
+SHA and base changes. An unmarked step cannot acquire an override during
+execution. A PR that becomes approved and `clean` merges normally without an
+override record.
+
+The merge request is unchanged and carries the verified SHA. GitHub applies the
+bypass server-side and any refusal, including HTTP 405, retains GitHub's message.
+Successful overrides add `admin_override` to the step and pending record, with
+reason `REVIEW_REQUIRED`, `requested_by` login and UTC RFC3339 `at`. The timestamp
+and durable `admin_overrides` history are saved together with the merge SHA.
+Failed, stopped or skipped execution steps without a merge SHA omit the marker
+from their report. An uncertain merge outcome can retain an untimestamped marker
+in pending state for confirmation on resume. Resume reuses the pending marker,
+including when the next invocation omits `--admin`.
+Text summaries list `merged by admin override: <id> (REVIEW_REQUIRED)`.
+See [merge-admin.md](merge-admin.md) for the confirmed GitHub mechanism, the
+preflight's race and check-origin limits, and [state.md](state.md) for the additive
+state fields.
+
 ## What it waits for
 
 Before waiting, pipetrain evaluates the workflow files (`.github/workflows/*.yml` and `*.yaml`) for every PR base, including `main`, feature branches and train branches. Execution reads them at the merge commit SHA. A dry run reads them at the planned PR head SHA, so its prediction is provisional until the merge. Within an executor, readings are cached by repository, exact base branch, workflow SHA and the sorted set of changed filenames.
@@ -239,6 +285,7 @@ Neither stale markers nor a different current selection or profile filter, disca
 | `applied` | boolean | `false` for a dry run, or when nothing was confirmed. |
 | `stopped` | string, optional | Why it did not start (open questions). |
 | `steps` | Step[] | In execution order. Steps resumed from an earlier run come first. |
+| `steps[].admin_override` | AdminOverride, optional | Review-only admin override: `{reason, requested_by, at?}`. Dry runs omit `at`; successful overrides and resumed merges retain their UTC RFC3339 timestamp. |
 | `not_merging` | `{id, reasons[]}[]` | PRs the plan left out and why. |
 | `questions` | string[] | The `? ...` lines of the plan. |
 | `preflight` | Readiness[] | Additive readiness snapshot for every visible selected PR, including blocked PRs, using the same shape as [plan-json.md](plan-json.md#readiness). |
@@ -257,7 +304,7 @@ Neither stale markers nor a different current selection or profile filter, disca
 
 Each `PendingPreview` is `{id: string, base: string, sha: string | null, recorded_at: string | null, age_seconds: integer | null, age: string, stale: boolean}`. `sha` is the first seven characters of the saved merge SHA. `pending` includes every inherited record, even outside the current plan. These are additive report fields; the existing report schema, fields and resume behavior retain their meanings.
 
-A step is `{kind, target, status, detail}` plus `merge_sha`, `deploy`, `blocked_by`, `deploy_prediction` and `expected_runs` when they apply. `blocked_by` identifies the failed PR responsible for a blocked step. `kind` is `resume`, `merge`, `gate`, `wait` or `open-pr`. `status` is `planned`, `done`, `skipped`, `failed` or `stopped`; after a global stop the steps that did not run are `skipped` with the detail `stopped after an earlier failure`. Dependency and same-target skips include a specific reason.
+A step is `{kind, target, status, detail}` plus `merge_sha`, `deploy`, `blocked_by`, `deploy_prediction`, `admin_override` and `expected_runs` when they apply. `blocked_by` identifies the failed PR responsible for a blocked step. `kind` is `resume`, `merge`, `gate`, `wait` or `open-pr`. `status` is `planned`, `done`, `skipped`, `failed` or `stopped`; after a global stop the steps that did not run are `skipped` with the detail `stopped after an earlier failure`. Dependency and same-target skips include a specific reason.
 
 `deploy_prediction` is an additive optional object on merge and resume steps. It is present for each evaluated PR in a dry run and for merged PRs after evaluation. Gates and unevaluated steps omit it. The same object is stored on new pending records with `serde(default)` compatibility for older state files. Existing fields and schema `1` keep their meaning.
 

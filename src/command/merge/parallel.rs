@@ -73,6 +73,13 @@ impl scheduler::Coordinator for Coordinator<'_, '_> {
             }
             scheduler::Status::Pending => {}
         }
+        if !matches!(
+            status,
+            scheduler::Status::Running | scheduler::Status::Pending
+        ) && step.merge_sha.is_none()
+        {
+            step.admin_override = None;
+        }
         self.store.save().map_err(|error| error.to_string())?;
         if *status == scheduler::Status::Running {
             let step = &self.steps[index];
@@ -503,6 +510,9 @@ pub(super) fn execute(
         {
             let step = &mut coordinator.steps[index];
             step.status = Status::Skipped;
+            if step.merge_sha.is_none() {
+                step.admin_override = None;
+            }
             step.detail = STOPPED.to_string();
             step.blocked_by = stopped_by.clone();
             coordinator.progress_state.finish(index, step);

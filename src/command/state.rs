@@ -98,6 +98,17 @@ fn render(store: &Store, profile: &str, stale_pending_hours: u64) -> Result<Stri
         "audit: {}",
         serde_json::to_string_pretty(&store.state.audit)?
     )?;
+    for record in &store.state.admin_overrides {
+        writeln!(
+            out,
+            "admin override: {} merged past {} by {} at {} ({})",
+            record.id,
+            record.reason,
+            record.requested_by,
+            record.at,
+            record.sha.chars().take(7).collect::<String>()
+        )?;
+    }
     Ok(out)
 }
 

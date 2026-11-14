@@ -223,6 +223,8 @@ pub struct Pending {
     pub base: String,
     pub sha: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_override: Option<AdminOverride>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation: Option<Continuation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deploy_prediction: Option<crate::workflows::PushRuns>,
@@ -299,6 +301,8 @@ pub struct State {
     pub active_jobs: Vec<String>,
     #[serde(default)]
     pub audit: Vec<AuditEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub admin_overrides: Vec<AdminOverrideRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -307,6 +311,8 @@ pub enum StoreOperation {
     SetSha {
         id: String,
         sha: String,
+        #[serde(default)]
+        admin_override: Option<AdminOverride>,
     },
     Remove(String),
     Archive(AuditEntry),
@@ -371,7 +377,11 @@ impl Store {
     pub fn apply(&mut self, operation: StoreOperation) -> Result<()> {
         match operation {
             StoreOperation::Add(pending) => self.add(pending),
-            StoreOperation::SetSha { id, sha } => self.set_sha(&id, &sha),
+            StoreOperation::SetSha {
+                id,
+                sha,
+                admin_override,
+            } => self.set_sha_record(&id, &sha, admin_override),
             StoreOperation::Remove(id) => self.remove(&id),
             StoreOperation::Archive(entry) => self.archive(entry),
             StoreOperation::AddDeployPr { slug, branch, id } => {
@@ -391,12 +401,53 @@ impl Store {
     }
 
     pub fn set_sha(&mut self, id: &str, sha: &str) -> Result<()> {
+        let mut admin_override = self
+            .state
+            .pending
+            .iter()
+            .find(|pending| pending.id == id)
+            .and_then(|pending| pending.admin_override.clone());
+        if let Some(admin) = &mut admin_override {
+            admin.at.get_or_insert_with(|| {
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
+            });
+        }
+        self.set_sha_record(id, sha, admin_override)
+    }
+
+    fn set_sha_record(
+        &mut self,
+        id: &str,
+        sha: &str,
+        admin_override: Option<AdminOverride>,
+    ) -> Result<()> {
         self.forward(StoreOperation::SetSha {
             id: id.to_string(),
             sha: sha.to_string(),
+            admin_override: admin_override.clone(),
         })?;
         if let Some(found) = self.state.pending.iter_mut().find(|p| p.id == id) {
             found.sha = Some(sha.to_string());
+            found.admin_override = admin_override;
+            if let Some(admin) = &found.admin_override
+                && let Some(at) = &admin.at
+                && !self.state.admin_overrides.iter().any(|record| {
+                    record.id == found.id
+                        && record.repo == found.repo
+                        && record.base == found.base
+                        && record.sha == sha
+                })
+            {
+                self.state.admin_overrides.push(AdminOverrideRecord {
+                    id: found.id.clone(),
+                    repo: found.repo.clone(),
+                    base: found.base.clone(),
+                    sha: sha.to_string(),
+                    reason: admin.reason.clone(),
+                    requested_by: admin.requested_by.clone(),
+                    at: at.clone(),
+                });
+            }
         }
         self.save()
     }
@@ -490,12 +541,33 @@ pub enum Status {
     Stopped,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminOverride {
+    pub reason: String,
+    pub requested_by: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminOverrideRecord {
+    pub id: String,
+    pub repo: String,
+    pub base: String,
+    pub sha: String,
+    pub reason: String,
+    pub requested_by: String,
+    pub at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepReport {
     pub kind: Kind,
     pub target: String,
     pub status: Status,
     pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_override: Option<AdminOverride>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub merge_sha: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -521,6 +593,7 @@ impl StepReport {
             target: target.to_string(),
             status,
             detail: detail.to_string(),
+            admin_override: None,
             merge_sha: None,
             deploy: None,
             blocked_by: None,
@@ -849,6 +922,7 @@ mod tests {
                 repo: "acme/api".to_string(),
                 base: "main".to_string(),
                 sha: None,
+                admin_override: None,
                 continuation: None,
                 deploy_prediction: None,
             })

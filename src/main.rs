@@ -650,6 +650,12 @@ struct BundleArgs {
 struct MergeArgs {
     #[arg(
         long,
+        help = "Merge past only a missing required review, after verifying GitHub admin bypass permission"
+    )]
+    admin: bool,
+
+    #[arg(
+        long,
         help = "Exit 4 when no selected PR is eligible, including a merge dry run with no merge steps"
     )]
     strict: bool,
@@ -920,6 +926,7 @@ fn run_merge(args: MergeArgs) -> Result<i32> {
     apply_color(args.color);
     let progress = pipetrain::progress::detect(args.no_progress, args.json, false);
     merge::run(MergeOptions {
+        admin: args.admin,
         plan: PlanOptions {
             prs: args.prs,
             all: args.all,

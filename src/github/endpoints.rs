@@ -15,6 +15,15 @@ const BRANCH_PAGES: u32 = 5;
 const SEARCH_PAGE: u32 = 20;
 const SEARCH_RETRIES: u32 = 2;
 
+#[derive(Debug, Clone, Default)]
+pub struct BranchRequirements {
+    pub required_checks: Vec<String>,
+    pub strict: bool,
+    pub linear_history: bool,
+    pub allowed_merge_methods: Vec<Vec<String>>,
+    pub unverifiable: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BranchWrite {
     Created,
@@ -173,6 +182,161 @@ impl Client {
             .and_then(|v| v.as_str())
             .map(str::to_lowercase)
             .ok_or_else(|| anyhow!("GitHub did not return the login of the token"))
+    }
+
+    pub fn repo_admin_permission(&mut self, slug: &str) -> Result<bool> {
+        let response = self.rest(&format!("/repos/{slug}"))?;
+        Ok(response
+            .pointer("/permissions/admin")
+            .and_then(Value::as_bool)
+            == Some(true))
+    }
+
+    pub fn viewer_can_merge_as_admin(&mut self, key: &PrKey) -> Result<bool> {
+        let response = self.graphql(
+            &format!("read admin merge permission for {key}"),
+            "query($o: String!, $r: String!, $n: Int!) { repository(owner: $o, name: $r) { pullRequest(number: $n) { viewerCanMergeAsAdmin } } }",
+            json!({"o": key.org, "r": key.repo, "n": key.number}),
+        )?;
+        response
+            .pointer("/data/repository/pullRequest/viewerCanMergeAsAdmin")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| anyhow!("GitHub did not return admin merge permission for {key}"))
+    }
+
+    pub fn branch_requirements(&mut self, slug: &str, branch: &str) -> Result<BranchRequirements> {
+        let branch = encode_path(branch).replace('/', "%2F");
+        let path = format!("/repos/{slug}/branches/{branch}/protection");
+        let reply = self.get(&path)?;
+        let mut requirements = BranchRequirements::default();
+        if reply.status != 404 {
+            let body = reply.into_body(&path).map_err(|error| self.redact(error))?;
+            if !body.is_object() {
+                return Err(anyhow!(
+                    "GitHub did not return branch protection for {slug}@{branch}"
+                ));
+            }
+            if let Some(checks) = body.get("required_status_checks").filter(|v| !v.is_null()) {
+                if !checks.is_object()
+                    || !(checks.get("contexts").is_some() || checks.get("checks").is_some())
+                {
+                    return Err(anyhow!(
+                        "GitHub did not return required_status_checks contexts for {slug}@{branch}"
+                    ));
+                }
+                for (field, nested) in [("contexts", false), ("checks", true)] {
+                    if let Some(values) = checks.get(field) {
+                        let values = values.as_array().ok_or_else(|| {
+                            anyhow!("GitHub returned invalid required_status_checks.{field}")
+                        })?;
+                        for value in values {
+                            let name = if nested {
+                                value.get("context")
+                            } else {
+                                Some(value)
+                            }
+                            .and_then(Value::as_str)
+                            .filter(|name| !name.is_empty())
+                            .ok_or_else(|| {
+                                anyhow!("GitHub returned a required status check without a context")
+                            })?;
+                            requirements.required_checks.push(name.to_string());
+                        }
+                    }
+                }
+                requirements.strict = checks.get("strict").and_then(Value::as_bool) == Some(true);
+            }
+            requirements.linear_history = body
+                .pointer("/required_linear_history/enabled")
+                .and_then(Value::as_bool)
+                == Some(true);
+            for name in [
+                "required_signatures",
+                "required_conversation_resolution",
+                "lock_branch",
+            ] {
+                if body
+                    .pointer(&format!("/{name}/enabled"))
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                {
+                    requirements.unverifiable.push(name.to_string());
+                }
+            }
+        }
+        let rules = self.rest(&format!("/repos/{slug}/rules/branches/{branch}"))?;
+        let rules = rules
+            .as_array()
+            .ok_or_else(|| anyhow!("GitHub did not return branch rules for {slug}@{branch}"))?;
+        for rule in rules {
+            let name = rule.get("type").and_then(Value::as_str).ok_or_else(|| {
+                anyhow!("GitHub returned a branch rule without a type for {slug}@{branch}")
+            })?;
+            match name {
+                "required_status_checks" => {
+                    let checks = rule.pointer("/parameters/required_status_checks").and_then(Value::as_array)
+                        .ok_or_else(|| anyhow!("GitHub did not return required_status_checks contexts for {slug}@{branch}"))?;
+                    for check in checks {
+                        let name = check
+                            .get("context")
+                            .and_then(Value::as_str)
+                            .filter(|name| !name.is_empty())
+                            .ok_or_else(|| {
+                                anyhow!("GitHub returned a required status check without a context")
+                            })?;
+                        requirements.required_checks.push(name.to_string());
+                    }
+                    requirements.strict |= rule
+                        .pointer("/parameters/strict_required_status_checks_policy")
+                        .and_then(Value::as_bool)
+                        == Some(true);
+                }
+                "pull_request" => {
+                    if rule
+                        .pointer("/parameters/required_review_thread_resolution")
+                        .and_then(Value::as_bool)
+                        == Some(true)
+                    {
+                        requirements
+                            .unverifiable
+                            .push("required_review_thread_resolution".to_string());
+                    }
+                    if let Some(methods) = rule.pointer("/parameters/allowed_merge_methods") {
+                        let methods = methods.as_array().ok_or_else(|| {
+                            anyhow!("GitHub returned invalid allowed_merge_methods")
+                        })?;
+                        requirements.allowed_merge_methods.push(
+                            methods
+                                .iter()
+                                .map(|method| {
+                                    method.as_str().map(str::to_string).ok_or_else(|| {
+                                        anyhow!("GitHub returned an invalid allowed merge method")
+                                    })
+                                })
+                                .collect::<Result<Vec<_>>>()?,
+                        );
+                    }
+                }
+                "required_linear_history" => requirements.linear_history = true,
+                "deletion" | "non_fast_forward" | "creation" | "update" => {}
+                other => requirements.unverifiable.push(other.to_string()),
+            }
+        }
+        requirements.unverifiable.sort();
+        requirements.unverifiable.dedup();
+        requirements.required_checks.sort();
+        requirements.required_checks.dedup();
+        Ok(requirements)
+    }
+
+    pub fn behind_by(&mut self, slug: &str, base: &str, head_sha: &str) -> Result<u64> {
+        let base = encode_path(base).replace('/', "%2F");
+        let head = encode_path(head_sha).replace('/', "%2F");
+        let response = self.rest(&format!("/repos/{slug}/compare/{base}...{head}"))?;
+        response
+            .get("behind_by")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| anyhow!("GitHub did not return behind_by for {slug}@{base}...{head}"))
     }
 
     pub fn pr(&mut self, key: &PrKey) -> Result<Option<Pr>> {

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, anyhow, bail};
 
 use super::apply::{Gate, deploy_pr_body, gate, tint};
-use super::build_plan_with_config;
+use super::build_plan_with_prepare;
 use super::order::requests_line;
 use crate::bundle::{base_suffix, is_stacked, is_train_branch};
 use crate::command::PlanOptions;
@@ -15,9 +15,9 @@ use crate::config::Config;
 use crate::emit;
 use crate::github::{Client, LivePr, PrWrite};
 use crate::merge::{
-    DependencyFailure, DeployOutcome, Kind, NotMerging, Pending, REPORT_SCHEMA, Report, STOPPED,
-    State, Status, Step, StepReport, Store, Summary, Verdict, judge, judge_expected,
-    resolve_state_path, steps,
+    AdminOverride, DependencyFailure, DeployOutcome, Kind, NotMerging, Pending, REPORT_SCHEMA,
+    Report, STOPPED, State, Status, Step, StepReport, Store, Summary, Verdict, judge,
+    judge_expected, resolve_state_path, steps,
 };
 use crate::model::{PrKey, PrState};
 use crate::plan::Plan;
@@ -25,6 +25,7 @@ use crate::planner::Item;
 use crate::style::{bold, dim, green, red, yellow};
 use crate::workflows::{self, PushRuns};
 
+mod admin;
 pub mod bump;
 mod failure;
 mod package;
@@ -39,6 +40,7 @@ const TRAIN_NOTICE: &str =
 const METHODS: [&str; 3] = ["merge", "squash", "rebase"];
 
 pub struct MergeOptions {
+    pub admin: bool,
     pub plan: PlanOptions,
     pub apply: bool,
     pub yes: bool,
@@ -228,6 +230,7 @@ fn resume_steps(state: &State) -> Vec<StepReport> {
                 "merged by an earlier run, waiting for its deploy",
             );
             step.deploy_prediction = pending.deploy_prediction.clone();
+            step.admin_override = pending.admin_override.clone();
             step
         })
         .collect()
@@ -245,11 +248,17 @@ fn not_merging(plan: &Plan) -> Vec<NotMerging> {
 }
 
 fn fail(report: &mut StepReport, detail: impl Into<String>) {
+    if report.merge_sha.is_none() {
+        report.admin_override = None;
+    }
     report.status = Status::Failed;
     report.detail = detail.into();
 }
 
 fn stop(report: &mut StepReport, detail: impl Into<String>) {
+    if report.merge_sha.is_none() {
+        report.admin_override = None;
+    }
     report.status = Status::Stopped;
     report.detail = detail.into();
 }
@@ -613,7 +622,7 @@ fn merge_one(
         let mut settled = pr.clone();
         settled.mergeable_unknown = false;
         if !(pr.mergeable_unknown || pr.merge_state_status.eq_ignore_ascii_case("UNKNOWN"))
-            || !env.cfg.blockers(&settled).is_empty()
+            || (report.admin_override.is_none() && !env.cfg.blockers(&settled).is_empty())
         {
             break pr;
         }
@@ -627,10 +636,16 @@ fn merge_one(
     if pr.state == PrState::Merged {
         report.status = Status::Skipped;
         report.detail = "already merged".to_string();
+        report.admin_override = None;
         return;
     }
+    let override_eligible = report.admin_override.is_some()
+        && pr.admin_override_reason(
+            env.cfg.allows_missing_checks(&slug),
+            env.cfg.require_approval,
+        ) == Some("REVIEW_REQUIRED");
     let reasons = env.cfg.blockers(&pr);
-    if !reasons.is_empty() {
+    if !reasons.is_empty() && !override_eligible {
         let readiness = pr.readiness(reasons);
         if env.stacked.has_child(item) {
             return stop(
@@ -660,11 +675,52 @@ fn merge_one(
     if live.merged {
         report.status = Status::Skipped;
         report.detail = "already merged".to_string();
+        report.admin_override = None;
         return;
     }
     if !live.open {
         return fail(report, "it is closed");
     }
+    let pr = if report.admin_override.is_some() {
+        match client.pr(&key) {
+            Ok(Some(fresh)) => {
+                if fresh.head_sha != live.head_sha {
+                    return fail(
+                        report,
+                        "the branch moved between REST and GraphQL: run the plan again",
+                    );
+                }
+                if fresh.base_ref != live.base {
+                    return fail(
+                        report,
+                        "the base changed between REST and GraphQL: run the plan again",
+                    );
+                }
+                fresh
+            }
+            Ok(None) => return fail(report, "not found on GitHub"),
+            Err(error) => return fail(report, format!("{error:#}")),
+        }
+    } else {
+        pr
+    };
+    let override_eligible = if let Some(admin) = &report.admin_override {
+        if pr.review == crate::model::Review::Approved
+            && !pr.mergeable_unknown
+            && env.cfg.blockers(&pr).is_empty()
+            && pr.merge_state_status.eq_ignore_ascii_case("CLEAN")
+        {
+            false
+        } else {
+            let login = admin.requested_by.clone();
+            if let Err(error) = admin::verify(client, env.cfg, &pr, env.method, &login) {
+                return fail(report, format!("{error:#}"));
+            }
+            true
+        }
+    } else {
+        false
+    };
     if live.head_sha != item.sha || pr.head_sha != item.sha {
         let accepted = pr.head_sha == live.head_sha
             && match env.stacked.accepts(item, client, &live.head_sha) {
@@ -693,11 +749,23 @@ fn merge_one(
             ),
         );
     }
-    if let Some(why) = not_clean(&live.mergeable_state) {
+    if let Some(why) = not_clean(&live.mergeable_state)
+        && !(override_eligible && live.mergeable_state == "blocked")
+    {
         if matches!(live.mergeable_state.as_str(), "unknown" | "") {
             return stop(report, why);
         }
         return fail(report, why);
+    }
+    if override_eligible {
+        if live.mergeable_state != "blocked" {
+            return fail(
+                report,
+                "the review-blocked PR no longer has REST mergeable_state blocked: run the plan again",
+            );
+        }
+    } else {
+        report.admin_override = None;
     }
     let pending = Pending {
         recorded_at: Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)),
@@ -705,6 +773,7 @@ fn merge_one(
         repo: slug.clone(),
         base: item.base.clone(),
         sha: None,
+        admin_override: report.admin_override.clone(),
         continuation: Some(failure::continuation(env.plan, item)),
         deploy_prediction: None,
     };
@@ -730,7 +799,14 @@ fn merge_one(
     };
     report.merge_sha = Some(merge_sha.clone());
     (hooks.progress)(&format!("merged {} at SHA {merge_sha}", item.id));
-    if let Err(error) = store.set_sha(&item.id, &merge_sha) {
+    let saved = store.set_sha(&item.id, &merge_sha);
+    report.admin_override = store
+        .state
+        .pending
+        .iter()
+        .find(|pending| pending.id == item.id)
+        .and_then(|pending| pending.admin_override.clone());
+    if let Err(error) = saved {
         return stop(
             report,
             format!(
@@ -840,6 +916,7 @@ fn resume_one(
     hooks: &mut Hooks,
     report: &mut StepReport,
 ) {
+    report.admin_override = pending.admin_override.clone();
     let sha = match &pending.sha {
         Some(sha) => sha.clone(),
         None => {
@@ -852,7 +929,18 @@ fn resume_one(
             };
             match confirm_merge(client, &pending.repo, number) {
                 Ok(Some(sha)) => {
-                    let _ = store.set_sha(&pending.id, &sha);
+                    let saved = store.set_sha(&pending.id, &sha);
+                    if pending.admin_override.is_some()
+                        && let Err(error) = saved
+                    {
+                        return stop(report, format!("cannot save the merge state: {error:#}"));
+                    }
+                    report.admin_override = store
+                        .state
+                        .pending
+                        .iter()
+                        .find(|saved| saved.id == pending.id)
+                        .and_then(|saved| saved.admin_override.clone());
                     sha
                 }
                 Ok(None) => {
@@ -1127,6 +1215,18 @@ pub fn merge_plan(
     store: &mut Store,
     hooks: &mut Hooks,
 ) -> Result<Outcome> {
+    merge_plan_prepared(plan, cfg, client, settings, store, hooks, &BTreeMap::new())
+}
+
+fn merge_plan_prepared(
+    plan: &Plan,
+    cfg: &Config,
+    client: &mut Client,
+    settings: &Settings,
+    store: &mut Store,
+    hooks: &mut Hooks,
+    overrides: &BTreeMap<String, AdminOverride>,
+) -> Result<Outcome> {
     let method = method_of(settings, cfg)?;
     if settings.apply {
         store.lock()?;
@@ -1174,6 +1274,11 @@ pub fn merge_plan(
         not_merging: not_merging(plan),
         questions: emit::question_lines(plan),
     };
+    for step in &mut report.steps {
+        if step.kind == Kind::Merge {
+            step.admin_override = overrides.get(&step.target).cloned();
+        }
+    }
     if !settings.apply {
         for step in &mut report.steps {
             if step.kind != Kind::Merge {
@@ -1331,6 +1436,9 @@ pub fn merge_plan(
             } else if matches!(step.status, Status::Failed | Status::Stopped) {
                 halted = Some(step.target.clone());
             }
+        }
+        if step.merge_sha.is_none() {
+            step.admin_override = None;
         }
         progress_state.finish(index, &step);
         (hooks.observe)(&step);
@@ -1512,8 +1620,31 @@ fn render_with_steps(report: &Report, color: bool, include_steps: bool) -> Strin
         out.push_str(&format!("{}\n", tint(color, dim, "nothing to merge")));
     }
     if include_steps {
+        if report.requested && !report.applied {
+            out.push_str(&admin::notice(&report.steps));
+        }
+        let overridden: Vec<_> = report
+            .steps
+            .iter()
+            .filter(|step| step.kind == Kind::Merge && step.admin_override.is_some())
+            .collect();
+        if !report.requested && !overridden.is_empty() {
+            out.push_str(&format!(
+                "--admin: {} PR(s) would be merged past a missing review:\n",
+                overridden.len()
+            ));
+            for step in overridden {
+                out.push_str(&format!("  {}\n", step.target));
+            }
+        }
         for step in &report.steps {
             out.push_str(&format!("{}\n", step_text(step, color)));
+            if let Some(admin) = &step.admin_override {
+                out.push_str(&format!(
+                    "  admin override: merges past {} as {}\n",
+                    admin.reason, admin.requested_by
+                ));
+            }
         }
     }
     if report
@@ -1550,6 +1681,17 @@ fn render_with_steps(report: &Report, color: bool, include_steps: bool) -> Strin
         out.push_str(&format!("\n{}\n", tint(color, yellow, reason)));
     }
     if report.applied {
+        for step in &report.steps {
+            if step.merge_sha.is_some()
+                && let Some(admin) = &step.admin_override
+                && admin.at.is_some()
+            {
+                out.push_str(&format!(
+                    "merged by admin override: {} ({})\n",
+                    step.target, admin.reason
+                ));
+            }
+        }
         let summary = &report.summary;
         out.push_str(&format!(
             "\n{} PRs merged, {} earlier merges checked\n",
@@ -1592,7 +1734,22 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
     }
     let started = Instant::now();
     let json = opts.plan.json;
-    let (built, mut client, cfg) = build_plan_with_config(&opts.plan)?;
+    let mut overrides = BTreeMap::new();
+    let (built, mut client, cfg) =
+        build_plan_with_prepare(&opts.plan, |client, cfg, discovered, train| {
+            if opts.admin {
+                let method = opts
+                    .method
+                    .as_deref()
+                    .unwrap_or(&cfg.merge.method)
+                    .to_lowercase();
+                overrides = admin::prepare(client, cfg, discovered, &method)?;
+                if !overrides.is_empty() && opts.plan.prs.is_empty() && !opts.plan.all {
+                    crate::discovery::refresh_questions(discovered, train);
+                }
+            }
+            Ok(())
+        })?;
     let state_path = resolve_state_path(
         opts.state.as_deref(),
         cfg.merge.state_file.as_deref(),
@@ -1617,10 +1774,20 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
         bump_options: opts.bump_options.clone(),
     };
     let (apply, yes) = (opts.apply, opts.yes);
+    let mut confirmation_steps = planned_steps(&built, &cfg);
+    for step in &mut confirmation_steps {
+        if step.kind == Kind::Merge {
+            step.admin_override = overrides.get(&step.target).cloned();
+        }
+    }
+    let admin_notice = admin::notice(&confirmation_steps);
     let live = crate::progress::detect(!opts.plan.progress, json, false);
     let display = RefCell::new(None);
     let execution_started = RefCell::new(None);
     let mut confirm = |text: &str| {
+        if yes && !json && !admin_notice.is_empty() {
+            eprint!("{admin_notice}");
+        }
         let answer = if yes {
             None
         } else {
@@ -1675,7 +1842,15 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
         observe: &mut observe,
         progress: &mut progress,
     };
-    let mut outcome = merge_plan(&built, &cfg, &mut client, &settings, &mut store, &mut hooks)?;
+    let mut outcome = merge_plan_prepared(
+        &built,
+        &cfg,
+        &mut client,
+        &settings,
+        &mut store,
+        &mut hooks,
+        &overrides,
+    )?;
     if opts.plan.strict
         && outcome.code == 0
         && (!built.has_eligible()

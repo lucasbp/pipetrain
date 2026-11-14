@@ -1,6 +1,6 @@
 # Opt-in GitHub sandbox tests
 
-`tests/e2e_sandbox.rs` runs the real compiled CLI against three existing public
+`tests/e2e_sandbox.rs` runs the real compiled CLI against four existing public
 repositories. It checks exit codes, merge JSON, local state JSON and text, and
 Actions evidence. It is ignored in the normal suite, never runs in CI, and has
 no scheduled job. A human must run it with an authenticated `gh` installation.
@@ -10,6 +10,7 @@ no scheduled job. A human must run it with an authenticated `gh` installation.
 | `lucasbp/pipetrain-sandbox-api` | A change outside `deploy/**` dispenses the wait without the 120 second grace; a change to `deploy/version.txt` confirms the expected workflow. |
 | `lucasbp/pipetrain-sandbox-web` | A failed deploy is resolved by a later successful descendant deploy, reproducing the later-deploy recovery incident. Also participates in the parallel case. |
 | `lucasbp/pipetrain-sandbox-static` | Deployment outside Actions is dispensed through `merge.no_deploy_repos`, alone and alongside web. |
+| `lucasbp/pipetrain-sandbox-guarded` | Required review refuses a normal merge; `--admin` merges with identity, timestamp and local audit evidence; a failing PR check still refuses `--admin`. |
 
 From the repository root in PowerShell 7:
 
@@ -25,8 +26,10 @@ reset shared sandbox branches and must not run concurrently.
 
 Every write helper and scenario checks the single repository guard, which
 requires `lucasbp/pipetrain-sandbox-`. Startup parses the versioned
-`tests/e2e/sandbox.toml`, checks every repository-bearing configuration field,
-and rejects profiles, org aliases and a configured state file. The layer glob
+`tests/e2e/sandbox.toml` or, for guarded scenarios, `tests/e2e/guarded.toml`,
+checks every repository-bearing configuration field, and rejects profiles, org
+aliases, a configured state file and authors. Guarded uses the owner's real
+`require_approval = true` setting and one merge at a time. The layer glob
 only assigns ordering; it is not a discovery allowlist. Every merge therefore
 requires explicit, guarded `lucasbp/pipetrain-sandbox-<name>#<number>` references.
 There is no broad discovery selection or empty selection.
@@ -41,13 +44,16 @@ checks, and null stdin. State commands accept neither `--no-cache` nor
 
 Each scenario resets `main` to the runtime-resolved annotated `baseline` tag
 before preparation. It creates unique `e2e/<scenario>-<phase>-<unix-millis>`
-branches and waits up to 60 seconds for clean PR mergeability. Cleanup on normal
+branches and waits up to 60 seconds for clean PR mergeability, or settled
+`mergeable_state == "blocked"` with `mergeable == true` in guarded. Cleanup on normal
 return or panic closes its remaining open PRs, deletes its branches, resets
 `main`, and removes temporary files. Failures are printed without panicking.
 Abrupt process termination cannot run cleanup; the next run still resets `main`
 but leftover PRs or branches from a killed process may need manual removal.
 API subprocesses have a 20 second limit, merge subprocesses a four minute limit,
 and the manual Actions waiter a three minute limit with three second polling.
+The guarded check-run waiter has the same three minute limit and polling interval;
+it waits for checks to appear and for all of them to complete.
 
 Recovery selects the already merged fix PR B explicitly. Discovery reports it
 under `not_merging` as already merged, while pending A is resumed from the same
@@ -60,10 +66,21 @@ renderer to assert both PR references and the exact deploy summary. This covers
 the renderer without a second apply or extra Actions run; it does not exercise
 the text-mode merge subprocess wiring. `state show` itself has no deploy summary.
 
-A healthy full execution should take less than about six minutes, subject to
-GitHub scheduling and API latency. It needs four short deploy jobs: one API,
-two recovery web jobs, and one parallel web job. Expect roughly four billed
-runner-minutes with per-job one-minute rounding; standard runners in these
+The guarded refusal cases assert no merge steps, the selected PR's `not_merging`
+reason, its live open and unmerged state, and an unchanged baseline tip. Nothing
+merged returns exit code `0` without `--strict`; `applied` remains `false`. The
+override case checks the login from `gh api user --jq .login`, the RFC 3339 audit
+timestamp, GitHub's `merged_by`, the merge SHA in `state show --json`, text audit
+output, and no remaining pending records. The two cases without workflows assert
+no check runs on their head SHA. Only the failing-check case adds a workflow,
+before opening its PR, and expects exactly one completed check with `failure`.
+
+Budget about eight minutes for a healthy full execution, subject to GitHub
+scheduling and API latency; this is an estimate, not a measured duration. It
+needs five Actions runs: four short deploy jobs (one API, two recovery web jobs,
+and one parallel web job), plus one deliberately failing guarded PR check.
+Expect roughly five billed runner-minutes with per-job one-minute rounding;
+standard runners in these
 public repos are free. Forced baseline resets are skipped by the job condition;
 the baseline commit also carries `[skip ci]`. No workflows are rerun by the test.
 
@@ -130,3 +147,28 @@ resolves it with `gh api repos/lucasbp/<repo>/commits/baseline --jq .sha`; no
 commit SHA is hardcoded. GitHub authentication must allow Contents, Pull
 requests and Actions reads, plus Contents and Pull requests writes, including
 force-resetting these unprotected sandbox `main` branches.
+
+## Guarded repository setup
+
+Create `lucasbp/pipetrain-sandbox-guarded` as another public repository with
+default branch `main`, containing only `README.md` at baseline and no workflows.
+Create and push the annotated `baseline` tag on that setup commit as above.
+Keep rulesets disabled and required status checks unset. As the repository
+administrator, apply this classic branch protection after pushing the baseline:
+
+```powershell
+'{"required_status_checks":null,"enforce_admins":false,"required_pull_request_reviews":{"required_approving_review_count":1,"dismiss_stale_reviews":false,"require_code_owner_reviews":false},"restrictions":null,"allow_force_pushes":true,"allow_deletions":false}' | gh api -X PUT repos/lucasbp/pipetrain-sandbox-guarded/branches/main/protection --input -
+```
+
+One account suffices: the authenticated repository administrator also authors
+the PRs, and GitHub refuses self-approval. Each PR therefore stays review-blocked
+without needing a second user. `enforce_admins = false` permits the administrator
+to merge past that missing review. `allow_force_pushes = true` lets the harness
+reset `main` to baseline during preparation and cleanup.
+
+`guarded.toml` dispenses deployment through `merge.no_deploy_repos`. The failing
+check scenario adds `.github/workflows/fail.yml` only on its branch, with
+`on: pull_request`, one `ubuntu-latest` job and `run: exit 1`. It costs one extra
+Actions run, is never merged, and is removed with its branch. The other guarded
+scenarios add only `e2e.txt` and start no Actions runs. Authentication must also
+permit creating the workflow file for that single failing-check scenario.
