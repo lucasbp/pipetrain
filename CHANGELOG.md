@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.1
+
+- Add opt-in `merge --admin`: a repository administrator can merge a PR whose only blocker is a missing required review. Failing, pending or missing required checks, conflicts, out-of-date branches under a strict rule, drafts, requested changes, package gates and every other blocker keep refusing.
+- `--admin` requires `permissions.admin` on the repository and GitHub's `viewerCanMergeAsAdmin`, refuses base branches with requirements pipetrain cannot verify (signatures, conversation resolution, locked branch, unknown ruleset rules, linear history with merge commits, merge methods a ruleset disallows), and repeats every check on a fresh GraphQL and REST reading right before the merge.
+- Dry runs and the confirmation list the PRs that would be merged past a missing review. The `--json` report adds `admin_override` (`reason`, `requested_by`, `at`) on merged steps; local state adds `admin_override` on pending records and an `admin_overrides` history, kept across resumption. Report schema 1 and state schema 2 are unchanged.
+- Document how the admin override works on GitHub in `docs/merge-admin.md`, verified against a protected sandbox, and add three opt-in sandbox scenarios against `lucasbp/pipetrain-sandbox-guarded`.
+
 ## 0.9.0
 
 - Merge deploy waits and both mergeability checks use injectable monotonic wall-clock deadlines, include HTTP, pacing and retry time, and cap every wait sleep by the remaining time, including no-run grace.
