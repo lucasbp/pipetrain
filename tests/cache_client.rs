@@ -16,13 +16,8 @@ const BASE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const OTHER: &str = "cccccccccccccccccccccccccccccccccccccccc";
 const SLUG: &str = "acme/api";
 
-fn temp(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "pipetrain-client-test-{}-{name}",
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&dir);
-    dir
+fn temp(name: &str) -> common::TempDir {
+    common::TempDir::new(&format!("client-test-{name}"))
 }
 
 fn client(base: &str, dir: &Path, mode: CacheMode) -> Client {
@@ -106,7 +101,8 @@ fn assert_clean(dir: &Path) {
 
 #[test]
 fn files_are_served_from_the_cache_without_a_request() {
-    let dir = temp("files-hit");
+    let scratch = temp("files-hit");
+    let dir = scratch.join("cache");
     let (base, server) = serve(vec![files_reply(&["src/a.rs", "docs/b.md"])]);
     let mut first = client(&base, &dir, CacheMode::Use);
     let (files, complete) = first.files(&key(), HEAD, BASE).unwrap();
@@ -122,12 +118,12 @@ fn files_are_served_from_the_cache_without_a_request() {
     assert_eq!(again.len(), 2);
     assert!(again.iter().all(|f| f.patch.is_none()));
     assert_clean(&dir);
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn a_different_head_or_base_sha_is_a_miss() {
-    let dir = temp("files-miss");
+    let scratch = temp("files-miss");
+    let dir = scratch.join("cache");
     let (base, server) = serve(vec![
         files_reply(&["a.rs"]),
         files_reply(&["a.rs"]),
@@ -141,12 +137,12 @@ fn a_different_head_or_base_sha_is_a_miss() {
     assert_eq!(api.cache_hits(), 0);
     assert_eq!(api.cache_misses(), 3);
     assert_eq!(server.join().unwrap().len(), 3);
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn an_empty_sha_is_never_cached() {
-    let dir = temp("files-empty");
+    let scratch = temp("files-empty");
+    let dir = scratch.join("cache");
     let (base, server) = serve(vec![
         files_reply(&["a.rs"]),
         files_reply(&["a.rs"]),
@@ -164,7 +160,8 @@ fn an_empty_sha_is_never_cached() {
 
 #[test]
 fn a_pr_that_needs_its_patch_is_not_cached() {
-    let dir = temp("files-patch");
+    let scratch = temp("files-patch");
+    let dir = scratch.join("cache");
     let (base, server) = serve(vec![
         files_reply(&["package.json", "src/a.rs"]),
         files_reply(&["package.json", "src/a.rs"]),
@@ -182,7 +179,8 @@ fn a_pr_that_needs_its_patch_is_not_cached() {
 
 #[test]
 fn refresh_requests_and_rewrites_while_off_leaves_nothing() {
-    let dir = temp("files-modes");
+    let scratch = temp("files-modes");
+    let dir = scratch.join("cache");
     let (base, server) = serve(vec![files_reply(&["a.rs"]), files_reply(&["a.rs", "b.rs"])]);
     client(&base, &dir, CacheMode::Use)
         .files(&key(), HEAD, BASE)
@@ -197,9 +195,9 @@ fn refresh_requests_and_rewrites_while_off_leaves_nothing() {
     let (rewritten, _) = after.files(&key(), HEAD, BASE).unwrap();
     assert_eq!(after.requests(), 0);
     assert_eq!(rewritten.len(), 2);
-    let _ = fs::remove_dir_all(&dir);
 
-    let off_dir = temp("files-off");
+    let off_scratch = temp("files-off");
+    let off_dir = off_scratch.join("cache");
     let (off_base, off_server) = serve(vec![files_reply(&["a.rs"])]);
     let mut off = client(&off_base, &off_dir, CacheMode::Off);
     off.files(&key(), HEAD, BASE).unwrap();
@@ -210,7 +208,8 @@ fn refresh_requests_and_rewrites_while_off_leaves_nothing() {
 
 #[test]
 fn a_tree_round_trips_including_truncation() {
-    let dir = temp("tree");
+    let scratch = temp("tree");
+    let dir = scratch.join("cache");
     let body = json!({
         "tree": [
             { "type": "blob", "path": "a/package.json" },
@@ -233,12 +232,12 @@ fn a_tree_round_trips_including_truncation() {
     assert_eq!(fetched, cached);
     assert_eq!(cached.0, strings(&["a/package.json", "b/Cargo.toml"]));
     assert!(cached.1);
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn blobs_fetch_only_the_missing_paths_and_remember_absent_ones() {
-    let dir = temp("blobs");
+    let scratch = temp("blobs");
+    let dir = scratch.join("cache");
     let (base, server) = serve(vec![
         blobs_reply(&[Some("one"), Some("two")]),
         blobs_reply(&[Some("three")]),
@@ -281,12 +280,12 @@ fn blobs_fetch_only_the_missing_paths_and_remember_absent_ones() {
     assert_eq!(again, pairs(&[("a/package.json", "one")]));
     assert_eq!(offline.requests(), 0);
     assert_eq!(offline.cache_hits(), 2);
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn the_cache_directory_holds_no_token_header_or_patch() {
-    let dir = temp("clean");
+    let scratch = temp("clean");
+    let dir = scratch.join("cache");
     let tree =
         json!({ "tree": [{ "type": "blob", "path": "a/package.json" }], "truncated": false });
     let (base, server) = serve(vec![
@@ -301,5 +300,4 @@ fn the_cache_directory_holds_no_token_header_or_patch() {
         .unwrap();
     assert_eq!(server.join().unwrap().len(), 3);
     assert_clean(&dir);
-    let _ = fs::remove_dir_all(&dir);
 }

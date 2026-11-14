@@ -2509,14 +2509,8 @@ fn parallel_http_merges_overlap_and_pending_state_is_durable_before_put() {
     let signal = finished.clone();
     let overlap = Arc::new((Mutex::new(0usize), Condvar::new()));
     let server_overlap = overlap.clone();
-    let path = std::env::temp_dir().join(format!(
-        "pipetrain-parallel-{}-{}.json",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let directory = common::TempDir::new("parallel");
+    let path = directory.join("state.json");
     let state_path = path.clone();
     let server = std::thread::spawn(move || {
         let script = Arc::new(Mutex::new(Script::new()));
@@ -2604,7 +2598,6 @@ fn parallel_http_merges_overlap_and_pending_state_is_durable_before_put() {
     assert_eq!(*overlap.0.lock().unwrap(), 2);
     assert!(store.state.pending.is_empty());
     assert!(store.state.active_jobs.is_empty());
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -2880,11 +2873,11 @@ fn bump_all_skipped_publisher_does_not_skip_its_consumer_or_create_review_work()
     assert!(rig.store.state.pending.is_empty());
 }
 struct FilterState {
-    directory: std::path::PathBuf,
+    directory: common::TempDir,
 }
 
 fn inherited_state(state: &FilterState) -> Vec<u8> {
-    std::fs::create_dir_all(&state.directory).unwrap();
+    std::fs::create_dir_all(state.directory.path()).unwrap();
     let recorded_at = (chrono::Utc::now() - chrono::Duration::hours(26))
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let bytes = serde_json::to_vec_pretty(&json!({
@@ -3089,28 +3082,13 @@ fn apply_records_utc_pending_timestamp_and_keeps_stale_resume_behavior() {
 
 impl FilterState {
     fn attach(rig: &mut Rig) -> Self {
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let directory = std::env::temp_dir().join(format!(
-            "pipetrain-deploy-filters-{}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
+        let directory = common::TempDir::new("deploy-filters");
         rig.store = Store::open(Some(directory.join("state.json"))).unwrap();
         Self { directory }
     }
 
     fn reopen(&self) -> Store {
         Store::open(Some(self.directory.join("state.json"))).unwrap()
-    }
-}
-
-impl Drop for FilterState {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.directory);
     }
 }
 
@@ -3404,7 +3382,7 @@ fn pending_prediction_is_saved_and_resumed_without_reading_workflows() {
 fn legacy_pending_without_prediction_keeps_polling_on_resume() {
     let mut rig = Rig::new("");
     let state = FilterState::attach(&mut rig);
-    std::fs::create_dir_all(&state.directory).unwrap();
+    std::fs::create_dir_all(state.directory.path()).unwrap();
     std::fs::write(state.directory.join("state.json"), serde_json::to_vec(&json!({"schema": 1, "pending": [{"id": "acme/api#1", "repo": "acme/api", "base": "main", "sha": merge_sha(1)}]})).unwrap()).unwrap();
     rig.store = state.reopen();
     rig.script().workflows.clear();
@@ -3525,7 +3503,7 @@ fn legacy_train_pending_keeps_branch_only_workflow_behavior() {
     ] {
         let mut rig = Rig::new("");
         let state = FilterState::attach(&mut rig);
-        std::fs::create_dir_all(&state.directory).unwrap();
+        std::fs::create_dir_all(state.directory.path()).unwrap();
         std::fs::write(state.directory.join("state.json"), serde_json::to_vec(&json!({"schema": 1, "pending": [{"id": "acme/api#1", "repo": "acme/api", "base": BUNDLE, "sha": merge_sha(1)}]})).unwrap()).unwrap();
         rig.store = state.reopen();
         rig.script().workflows = vec![("deploy.yml".into(), workflow.into())];
@@ -3854,7 +3832,7 @@ fn incomplete_run_response_never_confirms_even_with_expected_green() {
 fn legacy_pending_json_keeps_neutral_and_missing_path_compatibility() {
     let mut rig = Rig::new("");
     let state = FilterState::attach(&mut rig);
-    std::fs::create_dir_all(&state.directory).unwrap();
+    std::fs::create_dir_all(state.directory.path()).unwrap();
     std::fs::write(state.directory.join("state.json"), serde_json::to_vec(&json!({"schema": 1, "pending": [{"id": "acme/api#1", "repo": "acme/api", "base": "main", "sha": merge_sha(1)}]})).unwrap()).unwrap();
     rig.store = state.reopen();
     let mut auxiliary = workflow_run("lint.yml", "Lint", "completed", Some("neutral"));
@@ -4407,7 +4385,7 @@ fn untrackable_chain_uses_timeout_even_without_runs() {
 fn saved_push_prediction_without_chain_fields_still_tracks_expected_paths() {
     let mut rig = Rig::new("");
     let state = FilterState::attach(&mut rig);
-    std::fs::create_dir_all(&state.directory).unwrap();
+    std::fs::create_dir_all(state.directory.path()).unwrap();
     std::fs::write(state.directory.join("state.json"), serde_json::to_vec(&json!({"schema": 1, "pending": [{"id": "acme/api#1", "repo": "acme/api", "base": "main", "sha": merge_sha(1), "deploy_prediction": {"status": "expected", "workflows": [".github/workflows/deploy.yml"]}}]})).unwrap()).unwrap();
     rig.store = state.reopen();
     rig.script().runs = vec![workflow_run(

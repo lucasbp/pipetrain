@@ -1,10 +1,9 @@
-use std::path::PathBuf;
 use std::process::{Command, Output};
 
-fn empty_dir() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("pipetrain-progress-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+mod common;
+
+fn empty_dir() -> common::TempDir {
+    common::TempDir::new("progress")
 }
 
 fn run(args: &[&str]) -> Output {
@@ -12,8 +11,8 @@ fn run(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_pipetrain"))
         .args(args)
         .env_clear()
-        .env("PATH", &dir)
-        .current_dir(&dir)
+        .env("PATH", dir.path())
+        .current_dir(dir.path())
         .output()
         .unwrap()
 }

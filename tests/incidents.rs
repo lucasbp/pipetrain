@@ -3,13 +3,11 @@ mod common;
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use common::{Server, pr, serve_requests};
+use common::{Server, TempDir, pr, serve_requests};
 use pipetrain::command::merge::{Hooks, Outcome, Settings, merge_plan, render};
 use pipetrain::config::{ApiConfig, Config, Rules};
 use pipetrain::github::Client;
@@ -165,21 +163,14 @@ impl Script {
 }
 
 struct Fixture {
-    directory: PathBuf,
+    directory: TempDir,
     script: Arc<Mutex<Script>>,
     server: Server,
     cfg: Config,
 }
 
-fn unique_directory() -> PathBuf {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let directory = std::env::temp_dir().join(format!(
-        "pipetrain-incidents-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir(&directory).unwrap();
-    directory
+fn unique_directory() -> TempDir {
+    TempDir::new("incidents")
 }
 
 impl Fixture {
@@ -279,7 +270,7 @@ impl Fixture {
         Command::new(env!("CARGO_BIN_EXE_pipetrain"))
             .args(args)
             .args(["--config", "config.toml", "--no-cache", "--no-progress"])
-            .current_dir(&self.directory)
+            .current_dir(self.directory.path())
             .env("GH_TOKEN", "ghp_FAKE0123456789")
             .env_remove("GITHUB_TOKEN")
             .env("PIPETRAIN_API_URL", &self.server.base)
@@ -291,29 +282,22 @@ impl Fixture {
     }
 }
 
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.directory);
-    }
-}
-
 #[test]
 fn fixture_directories_never_collide_across_threads() {
     let handles: Vec<_> = (0..8)
         .map(|_| std::thread::spawn(|| (0..32).map(|_| unique_directory()).collect::<Vec<_>>()))
         .collect();
     let mut all = BTreeSet::new();
+    let mut directories = Vec::new();
     let mut total = 0;
     for handle in handles {
         for directory in handle.join().unwrap() {
             total += 1;
-            all.insert(directory);
+            all.insert(directory.path().to_path_buf());
+            directories.push(directory);
         }
     }
     assert_eq!(all.len(), total);
-    for directory in all {
-        fs::remove_dir_all(directory).unwrap();
-    }
 }
 
 #[test]

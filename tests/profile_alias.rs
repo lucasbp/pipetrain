@@ -334,7 +334,7 @@ fn the_table_is_unchanged_when_no_profile_has_aliases() {
 #[test]
 fn the_profiles_command_shows_the_aliases_and_picks_the_alias_default() {
     let config = config_file(ALIASED);
-    let out = run(&["profiles"], &config, "http://127.0.0.1:1");
+    let out = run(&["profiles"], &config, &common::closed_base());
     let text = stdout(&out);
     assert!(out.status.success(), "{text}");
     assert!(text.contains("ALIASES"), "{text}");
@@ -345,7 +345,7 @@ fn the_profiles_command_shows_the_aliases_and_picks_the_alias_default() {
 #[test]
 fn the_profiles_command_without_aliases_has_no_aliases_column() {
     let config = config_file(PLAIN);
-    let out = run(&["profiles"], &config, "http://127.0.0.1:1");
+    let out = run(&["profiles"], &config, &common::closed_base());
     let text = stdout(&out);
     assert!(out.status.success(), "{text}");
     assert!(!text.contains("ALIASES"), "{text}");

@@ -4,6 +4,8 @@ use std::process::{Command, Output};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+mod common;
+
 struct Server {
     base: String,
     seen: Arc<Mutex<Vec<String>>>,
@@ -121,7 +123,8 @@ fn a_package_missing_from_the_feed_exits_1() {
 #[test]
 fn without_repos_or_profile_names_it_stops_before_the_feed() {
     let server = serve(500, "{}");
-    let path = std::env::temp_dir().join(format!("pipetrain-bump-{}.toml", std::process::id()));
+    let scratch = common::TempDir::new("bump");
+    let path = scratch.join("pipetrain.toml");
     std::fs::write(&path, "orgs = [\"acme\"]\n").unwrap();
     let output = bump(&[
         "@acme/ui",
@@ -134,7 +137,6 @@ fn without_repos_or_profile_names_it_stops_before_the_feed() {
         "--config",
         path.to_str().unwrap(),
     ]);
-    let _ = std::fs::remove_file(&path);
     assert_eq!(output.status.code(), Some(1));
     assert!(
         stderr(&output).contains("no repos given"),

@@ -98,13 +98,8 @@ fn an_unreachable_server_is_none() {
     );
 }
 
-fn cache_dir(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "pipetrain-notice-cli-{}-{name}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    dir
+fn cache_dir(name: &str) -> common::TempDir {
+    common::TempDir::new(&format!("notice-cli-{name}"))
 }
 
 fn run(args: &[&str], dir: &std::path::Path, server: &Server, off: bool) -> std::process::Output {
@@ -123,7 +118,8 @@ fn run(args: &[&str], dir: &std::path::Path, server: &Server, off: bool) -> std:
 
 #[test]
 fn a_redirected_run_never_looks_or_prints() {
-    let dir = cache_dir("redirected");
+    let scratch = cache_dir("redirected");
+    let dir = scratch.join("cache");
     let server = serve(200, RELEASE, Duration::ZERO);
     let out = run(
         &["profiles", "--config", "missing.toml"],
@@ -143,7 +139,8 @@ fn a_redirected_run_never_looks_or_prints() {
 
 #[test]
 fn the_env_var_and_the_flag_are_accepted_everywhere() {
-    let dir = cache_dir("off");
+    let scratch = cache_dir("off");
+    let dir = scratch.join("cache");
     let server = serve(200, RELEASE, Duration::ZERO);
     let off = run(
         &["profiles", "--config", "missing.toml"],

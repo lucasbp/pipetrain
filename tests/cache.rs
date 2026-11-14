@@ -2,20 +2,18 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+mod common;
+
 use pipetrain::cache::{Cache, CacheMode, prune, resolve_dir};
 use serde_json::{Value, json};
 
 struct Scratch {
-    base: PathBuf,
+    base: common::TempDir,
 }
 
 impl Scratch {
     fn new(name: &str) -> Self {
-        let base = std::env::temp_dir().join(format!(
-            "pipetrain-cache-test-{}-{name}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&base);
+        let base = common::TempDir::new(&format!("cache-test-{name}"));
         Self { base }
     }
 
@@ -25,12 +23,6 @@ impl Scratch {
 
     fn entry(&self, file: &str) -> PathBuf {
         self.dir().join("acme").join("api").join(file)
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.base);
     }
 }
 
