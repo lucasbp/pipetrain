@@ -2483,6 +2483,7 @@ fn parallel_resume_reconciles_saved_sha_without_repeating_merge() {
             repo: "acme/api".to_string(),
             base: "main".to_string(),
             sha: Some(merge_sha(1)),
+            admin_override: None,
             continuation: None,
             deploy_prediction: None,
         })
@@ -2694,6 +2695,7 @@ fn parallel_legacy_failed_resume_stops_before_dispatching_new_independent_work()
             repo: "acme/sdk".to_string(),
             base: "main".to_string(),
             sha: Some(merge_sha(1)),
+            admin_override: None,
             continuation: None,
             deploy_prediction: None,
         })

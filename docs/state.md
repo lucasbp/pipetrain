@@ -50,6 +50,7 @@ Optional fields can be added without changing existing meanings.
 | `deploy_prs` | DeployPr[] | Saved deploy PR preparation records. |
 | `active_jobs` | string[] | Saved scheduler IDs, always present, including when empty. |
 | `audit` | AuditEntry[] | Discard and later-deploy resolution history, always present, including when empty. |
+| `admin_overrides` | AdminOverrideRecord[], optional | Durable successful admin override history; omitted when empty. |
 | `bump` | object, optional | Existing publication/consumer bump journal, unchanged. |
 
 Each `PendingInspection` has `id`, `repo`, `base` (strings), `sha` (full saved SHA
@@ -58,6 +59,31 @@ or null), `age` (same format as file age), and `stale` (true only when known age
 exceeds the threshold). Invalid or missing recording timestamps have unknown
 age and are not stale. Optional `continuation` and `deploy_prediction` keep the
 state shapes documented in [merge.md](merge.md), without recomputation.
+
+Pending records also accept optional `admin_override`:
+`{reason: "REVIEW_REQUIRED", requested_by: string, at?: string}`. It is saved
+before the merge request to retain the override intent if the reply is lost.
+The UTC RFC3339 `at` is added in the same save that records the merge SHA, or
+when resume first confirms that SHA. Resume copies this record into the step
+report, even without `--admin`, preserving a known timestamp.
+
+Each `AdminOverrideRecord` has string fields `id`, `repo`, `base`, `sha`,
+`reason`, `requested_by` and `at`. `sha` is the full merge SHA, `reason` is
+`REVIEW_REQUIRED`, `requested_by` is the token's viewer login, and `at` is the
+UTC RFC3339 recording time. The record is appended atomically with the pending
+SHA and timestamp, once per PR/repository/base/SHA. It survives successful waits,
+discard, later-deploy resolution and new queues in the same file, just like
+`audit`. Neither history has a retention limit.
+
+These fields are additive: state schema remains `2` and report schema remains
+`1`. Missing `admin_override` defaults to none and missing `admin_overrides`
+defaults to an empty list; neither key is serialized when empty. An older
+pipetrain can read the file but rewrites it without these unknown fields, losing
+the override history and pending marker. No new `AuditAction` variant is used.
+
+Text inspection lists every history record as
+`admin override: <id> merged past REVIEW_REQUIRED by <login> at <time> (<sha short>)`,
+using seven characters for the SHA.
 
 Each `DeployPr` is `{slug: string, branch: string, ids: string[]}`. These records
 describe preparation intent, not confirmed deployment.

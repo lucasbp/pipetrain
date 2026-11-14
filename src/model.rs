@@ -288,6 +288,32 @@ impl Pr {
         self.blockers_with(allow_missing_checks, true)
     }
 
+    pub fn admin_override_reason(
+        &self,
+        allow_missing_checks: bool,
+        require_approval: bool,
+    ) -> Option<&'static str> {
+        if self.state != PrState::Open
+            || self.is_draft
+            || self.review != Review::ReviewRequired
+            || !matches!(self.checks, Checks::Success)
+                && !(self.checks == Checks::Missing && allow_missing_checks)
+            || self.conflicting
+            || self.mergeable_unknown
+            || self.behind
+            || !self.merge_state_status.eq_ignore_ascii_case("BLOCKED")
+        {
+            return None;
+        }
+        let (blocked, _) = merge_state_blocker("BLOCKED")?;
+        self.blockers_with(allow_missing_checks, require_approval)
+            .iter()
+            .all(|reason| {
+                matches!(reason.as_str(), "review required" | "not approved") || reason == blocked
+            })
+            .then_some("REVIEW_REQUIRED")
+    }
+
     pub fn blockers_with(&self, allow_missing_checks: bool, require_approval: bool) -> Vec<String> {
         let mut reasons = Vec::new();
         match self.state {
@@ -356,6 +382,105 @@ impl Question {
             message,
             hint: hint.to_string(),
             hidden: false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn review_only() -> Pr {
+        Pr {
+            key: PrKey::new("acme", "api", 1),
+            state: PrState::Open,
+            title: String::new(),
+            url: String::new(),
+            author: String::new(),
+            body: String::new(),
+            head_ref: "feature".to_string(),
+            base_ref: "main".to_string(),
+            default_branch: "main".to_string(),
+            merge_state_status: "BLOCKED".to_string(),
+            check_details: Vec::new(),
+            head_sha: "a".repeat(40),
+            base_sha: "b".repeat(40),
+            is_draft: false,
+            review: Review::ReviewRequired,
+            checks: Checks::Success,
+            failed_checks: Vec::new(),
+            conflicting: false,
+            mergeable_unknown: false,
+            behind: false,
+            files: Vec::new(),
+            files_complete: true,
+            labels: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn admin_override_requires_only_review_required_and_blocked() {
+        let mut pr = review_only();
+        for require_approval in [false, true] {
+            assert_eq!(
+                pr.admin_override_reason(false, require_approval),
+                Some("REVIEW_REQUIRED")
+            );
+        }
+        pr.merge_state_status = "bLoCkEd".to_string();
+        assert_eq!(
+            pr.admin_override_reason(false, true),
+            Some("REVIEW_REQUIRED")
+        );
+        for state in [
+            "CLEAN",
+            "UNKNOWN",
+            "BEHIND",
+            "DIRTY",
+            "DRAFT",
+            "UNSTABLE",
+            "HAS_HOOKS",
+            "",
+        ] {
+            pr.merge_state_status = state.to_string();
+            assert_eq!(pr.admin_override_reason(true, true), None, "{state}");
+        }
+    }
+
+    #[test]
+    fn admin_override_missing_checks_needs_existing_allowance() {
+        let mut pr = review_only();
+        pr.checks = Checks::Missing;
+        assert_eq!(pr.admin_override_reason(false, true), None);
+        assert_eq!(
+            pr.admin_override_reason(true, true),
+            Some("REVIEW_REQUIRED")
+        );
+        for checks in [Checks::Failure, Checks::Pending] {
+            pr.checks = checks;
+            assert_eq!(pr.admin_override_reason(true, true), None);
+        }
+    }
+
+    #[test]
+    fn admin_override_refuses_closed_draft_conflicting_behind_and_other_reviews() {
+        for state in [PrState::Merged, PrState::Closed] {
+            let mut pr = review_only();
+            pr.state = state;
+            assert_eq!(pr.admin_override_reason(true, true), None);
+        }
+        for review in [Review::Approved, Review::ChangesRequested, Review::None] {
+            let mut pr = review_only();
+            pr.review = review;
+            assert_eq!(pr.admin_override_reason(true, false), None);
+        }
+        for field in ["draft", "conflict", "behind", "unknown"] {
+            let mut pr = review_only();
+            pr.is_draft = field == "draft";
+            pr.conflicting = field == "conflict";
+            pr.mergeable_unknown = field == "unknown";
+            pr.behind = field == "behind";
+            assert_eq!(pr.admin_override_reason(true, true), None);
         }
     }
 }

@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -13,6 +13,7 @@ use serde_json::Value;
 const API: &str = "lucasbp/pipetrain-sandbox-api";
 const WEB: &str = "lucasbp/pipetrain-sandbox-web";
 const STATIC: &str = "lucasbp/pipetrain-sandbox-static";
+const GUARDED: &str = "lucasbp/pipetrain-sandbox-guarded";
 const WORKFLOW: &str = ".github/workflows/deploy.yml";
 const POLL: Duration = Duration::from_secs(3);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
@@ -38,12 +39,16 @@ fn guard(repo: &str) {
     );
 }
 
-fn config_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/e2e/sandbox.toml")
+fn config_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/e2e")
+        .join(name)
 }
 
-fn validate_config() {
-    let text = fs::read_to_string(config_path()).unwrap();
+fn validate_config(path: &Path) {
+    let guarded = path == config_path("guarded.toml");
+    assert!(guarded || path == config_path("sandbox.toml"));
+    let text = fs::read_to_string(path).unwrap();
     let raw: toml::Value = toml::from_str(&text).unwrap();
     assert!(raw.get("profile").is_none());
     assert!(raw.get("org_alias").is_none());
@@ -65,14 +70,25 @@ fn validate_config() {
     {
         guard(repo);
     }
-    assert_eq!(cfg.max_parallel, 2);
-    assert!(!cfg.require_approval);
+    if guarded {
+        assert_eq!(cfg.max_parallel, 1);
+        assert!(cfg.require_approval);
+        assert_eq!(cfg.layer.len(), 1);
+        assert_eq!(cfg.layer[0].repos, [GUARDED]);
+        assert_eq!(cfg.merge.no_deploy_repos, [GUARDED]);
+        assert_eq!(cfg.api.max_requests, 1000);
+        assert_eq!(cfg.api.max_per_minute, 1000);
+        assert_eq!(cfg.api.min_remaining, 200);
+    } else {
+        assert_eq!(cfg.max_parallel, 2);
+        assert!(!cfg.require_approval);
+        assert_eq!(cfg.merge.no_deploy_repos, [STATIC]);
+    }
     assert!(cfg.allow_missing_checks);
     assert_eq!(cfg.merge.poll_seconds, 3);
     assert_eq!(cfg.merge.timeout_minutes, 3);
     assert_eq!(cfg.merge.no_run_grace_seconds, 120);
     assert_eq!(cfg.merge.method, "merge");
-    assert_eq!(cfg.merge.no_deploy_repos, [STATIC]);
 }
 
 fn millis() -> u128 {
@@ -149,11 +165,16 @@ fn gh(
     let mut command = Command::new("gh");
     command
         .args(["api", "--hostname", "github.com", "-X", method])
-        .arg(format!("repos/{repo}/{resource}"))
         .env_remove("GH_TOKEN")
         .env_remove("GITHUB_TOKEN")
         .env_remove("GH_DEBUG")
         .env("GH_PROMPT_DISABLED", "1");
+    if resource == "user" {
+        ensure!(method == "GET" && fields.is_empty(), "user is read-only");
+        command.args(["user", "--jq", ".login"]);
+    } else {
+        command.arg(format!("repos/{repo}/{resource}"));
+    }
     for (key, value) in fields {
         command.args([
             if *key == "force" { "-F" } else { "-f" },
@@ -166,7 +187,11 @@ fn gh(
         "gh {method} {repo}/{resource}: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    if output.stdout.is_empty() {
+    if resource == "user" {
+        let login = String::from_utf8(output.stdout)?.trim().to_owned();
+        ensure!(!login.is_empty(), "gh returned an empty login");
+        Ok(Value::String(login))
+    } else if output.stdout.is_empty() {
         Ok(Value::Null)
     } else {
         serde_json::from_slice(&output.stdout).context("invalid gh API JSON")
@@ -391,6 +416,76 @@ fn wait_clean(pr: &Pull) {
     }
 }
 
+fn wait_blocked(pr: &Pull) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "{} did not become settled and blocked within 60s",
+            pr.reference()
+        );
+        let reading = gh(
+            &pr.repo,
+            "GET",
+            &format!("pulls/{}", pr.number),
+            &[],
+            remaining,
+        )
+        .unwrap();
+        if Instant::now() < deadline
+            && reading["mergeable_state"] == "blocked"
+            && reading["mergeable"] == true
+        {
+            return;
+        }
+        std::thread::sleep(POLL.min(deadline.saturating_duration_since(Instant::now())));
+    }
+}
+
+fn check_runs(repo: &str, sha: &str, timeout: Duration) -> Vec<Value> {
+    assert_sha(sha);
+    let reading = gh(
+        repo,
+        "GET",
+        &format!("commits/{sha}/check-runs?per_page=100&filter=all"),
+        &[],
+        timeout,
+    )
+    .unwrap();
+    let checks = reading["check_runs"].as_array().unwrap().clone();
+    assert_eq!(
+        reading["total_count"].as_u64().unwrap(),
+        checks.len() as u64
+    );
+    for check in &checks {
+        assert_eq!(check["head_sha"], sha);
+    }
+    checks
+}
+
+fn wait_checks(repo: &str, sha: &str) -> Vec<String> {
+    let deadline = Instant::now() + Duration::from_secs(180);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "no completed checks within 3 minutes for {repo}@{sha}"
+        );
+        let checks = check_runs(repo, sha, remaining);
+        if Instant::now() < deadline
+            && !checks.is_empty()
+            && checks.iter().all(|check| check["status"] == "completed")
+        {
+            return checks
+                .iter()
+                .map(|check| check["conclusion"].as_str().unwrap().to_owned())
+                .collect();
+        }
+        std::thread::sleep(POLL.min(deadline.saturating_duration_since(Instant::now())));
+    }
+}
+
 fn runs(repo: &str, sha: &str, timeout: Duration) -> Vec<Value> {
     assert_sha(sha);
     let reading = gh(
@@ -437,14 +532,15 @@ struct Sandbox {
     name: String,
     started: Instant,
     directory: PathBuf,
+    config: PathBuf,
     baselines: Vec<(String, String)>,
     branches: Vec<(String, String)>,
     prs: Vec<Pull>,
 }
 
 impl Sandbox {
-    fn new(name: &str, repos: &[&str]) -> Self {
-        validate_config();
+    fn new(name: &str, repos: &[&str], config: PathBuf) -> Self {
+        validate_config(&config);
         for repo in repos {
             guard(repo);
         }
@@ -452,6 +548,7 @@ impl Sandbox {
             name: name.to_owned(),
             started: Instant::now(),
             directory: unique_directory(),
+            config,
             baselines: Vec::new(),
             branches: Vec::new(),
             prs: Vec::new(),
@@ -482,12 +579,20 @@ impl Sandbox {
         pr
     }
 
+    fn open_blocked(&mut self, repo: &str, branch: &str) -> Pull {
+        guard(repo);
+        let pr = open_pr(repo, branch);
+        self.prs.push(pr.clone());
+        wait_blocked(&pr);
+        pr
+    }
+
     fn cli(&self, args: &[&str], merge: bool) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_pipetrain"));
         command
             .args(args)
             .arg("--config")
-            .arg(config_path())
+            .arg(&self.config)
             .arg("--state")
             .arg(self.directory.join("state.json"))
             .current_dir(&self.directory)
@@ -507,6 +612,12 @@ impl Sandbox {
     }
 
     fn merge(&self, prs: &[&Pull], code: i32) -> (Value, Duration) {
+        let (report, elapsed) = self.merge_with_admin(prs, code, false);
+        assert_eq!(report["applied"], true, "{report}");
+        (report, elapsed)
+    }
+
+    fn merge_with_admin(&self, prs: &[&Pull], code: i32, admin: bool) -> (Value, Duration) {
         assert!(!prs.is_empty(), "merge requires explicit sandbox PRs");
         let references: Vec<_> = prs
             .iter()
@@ -521,6 +632,9 @@ impl Sandbox {
             })
             .collect();
         let mut args = vec!["merge", "--apply", "--yes", "--json"];
+        if admin {
+            args.push("--admin");
+        }
         args.extend(references.iter().map(String::as_str));
         let started = Instant::now();
         let output = self.cli(&args, true);
@@ -528,7 +642,21 @@ impl Sandbox {
         assert_exit(&output, code);
         let report: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(report["schema"], 1);
-        assert_eq!(report["applied"], true, "{report}");
+        if report["steps"].as_array().unwrap().is_empty() {
+            assert_eq!(report["applied"], false, "{report}");
+            for pr in prs {
+                assert!(
+                    report["not_merging"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|item| item["id"] == pr.reference()),
+                    "{report}"
+                );
+            }
+        } else {
+            assert_eq!(report["applied"], true, "{report}");
+        }
         for step in report["steps"].as_array().unwrap() {
             if step["kind"] == "merge" {
                 let pr = prs
@@ -716,7 +844,7 @@ fn e2e_api_outside_deploy_paths() {
         return;
     }
     guard(API);
-    let mut sandbox = Sandbox::new("api-paths", &[API]);
+    let mut sandbox = Sandbox::new("api-paths", &[API], config_path("sandbox.toml"));
     let branch = sandbox.branch(API, "change");
     let path = format!("notes/{}.md", millis());
     put_file(API, &branch, &path, "outside deploy paths\n", None);
@@ -756,7 +884,7 @@ fn e2e_api_expected_deploy() {
         return;
     }
     guard(API);
-    let mut sandbox = Sandbox::new("api-deploy", &[API]);
+    let mut sandbox = Sandbox::new("api-deploy", &[API], config_path("sandbox.toml"));
     let branch = sandbox.branch(API, "change");
     let file = read(API, &format!("contents/deploy/version.txt?ref={branch}"));
     put_file(
@@ -785,7 +913,7 @@ fn e2e_web_later_deploy_recovery() {
         return;
     }
     guard(WEB);
-    let mut sandbox = Sandbox::new("web-recovery", &[WEB]);
+    let mut sandbox = Sandbox::new("web-recovery", &[WEB], config_path("sandbox.toml"));
     let branch_a = sandbox.branch(WEB, "failure");
     put_file(WEB, &branch_a, "FAIL_DEPLOY", "fail this deploy\n", None);
     let a = sandbox.open(WEB, &branch_a);
@@ -855,7 +983,7 @@ fn e2e_static_no_deploy() {
         return;
     }
     guard(STATIC);
-    let mut sandbox = Sandbox::new("static", &[STATIC]);
+    let mut sandbox = Sandbox::new("static", &[STATIC], config_path("sandbox.toml"));
     let branch = sandbox.branch(STATIC, "change");
     put_file(STATIC, &branch, "e2e.txt", "no Actions deploy\n", None);
     let pr = sandbox.open(STATIC, &branch);
@@ -885,7 +1013,7 @@ fn e2e_parallel_web_and_static() {
     }
     guard(WEB);
     guard(STATIC);
-    let mut sandbox = Sandbox::new("parallel", &[WEB, STATIC]);
+    let mut sandbox = Sandbox::new("parallel", &[WEB, STATIC], config_path("sandbox.toml"));
     let web_branch = sandbox.branch(WEB, "change");
     put_file(WEB, &web_branch, "e2e.txt", "successful deploy\n", None);
     let web = sandbox.open(WEB, &web_branch);
@@ -912,4 +1040,128 @@ fn e2e_parallel_web_and_static() {
     assert!(text.contains(&web.reference()), "{text}");
     assert!(text.contains(&static_pr.reference()), "{text}");
     assert!(text.contains("deploys: 1 confirmed, 1 dispensed, 0 indeterminate, 0 resolved by later deploy, 0 skipped, 0 failed"), "{text}");
+}
+
+fn refused(report: &Value, sandbox: &Sandbox, pr: &Pull) -> Vec<String> {
+    assert!(report["steps"].as_array().unwrap().is_empty(), "{report}");
+    assert_eq!(report["summary"]["merged"], 0);
+    let excluded: Vec<_> = report["not_merging"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["id"] == pr.reference())
+        .collect();
+    assert_eq!(excluded.len(), 1, "{report}");
+    let live = read(&pr.repo, &format!("pulls/{}", pr.number));
+    assert_eq!(live["state"], "open", "{live}");
+    assert_eq!(live["merged"], false, "{live}");
+    let (_, baseline) = sandbox
+        .baselines
+        .iter()
+        .find(|(repo, _)| repo == &pr.repo)
+        .unwrap();
+    assert_eq!(main_tip(&pr.repo), *baseline);
+    excluded[0]["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|reason| reason.as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+#[ignore]
+fn e2e_guarded_refused_without_admin() {
+    if !enabled() {
+        return;
+    }
+    guard(GUARDED);
+    let mut sandbox = Sandbox::new("guarded-refused", &[GUARDED], config_path("guarded.toml"));
+    let branch = sandbox.branch(GUARDED, "change");
+    put_file(GUARDED, &branch, "e2e.txt", "review required\n", None);
+    let pr = sandbox.open_blocked(GUARDED, &branch);
+    let live = read(GUARDED, &format!("pulls/{}", pr.number));
+    let sha = live["head"]["sha"].as_str().unwrap();
+    assert!(check_runs(GUARDED, sha, REQUEST_TIMEOUT).is_empty());
+    let (report, _) = sandbox.merge_with_admin(&[&pr], 0, false);
+    let reasons = refused(&report, &sandbox, &pr);
+    assert!(
+        reasons
+            .iter()
+            .any(|reason| reason.to_ascii_lowercase().contains("review")
+                || reason.contains("BLOCKED")),
+        "{reasons:?}"
+    );
+    assert!(check_runs(GUARDED, sha, REQUEST_TIMEOUT).is_empty());
+}
+
+#[test]
+#[ignore]
+fn e2e_guarded_admin_override() {
+    if !enabled() {
+        return;
+    }
+    guard(GUARDED);
+    let mut sandbox = Sandbox::new("guarded-override", &[GUARDED], config_path("guarded.toml"));
+    let branch = sandbox.branch(GUARDED, "change");
+    put_file(GUARDED, &branch, "e2e.txt", "admin review override\n", None);
+    let pr = sandbox.open_blocked(GUARDED, &branch);
+    let live = read(GUARDED, &format!("pulls/{}", pr.number));
+    let sha = live["head"]["sha"].as_str().unwrap();
+    assert!(check_runs(GUARDED, sha, REQUEST_TIMEOUT).is_empty());
+    let login = gh(GUARDED, "GET", "user", &[], REQUEST_TIMEOUT).unwrap();
+    let (report, _) = sandbox.merge_with_admin(&[&pr], 0, true);
+    let step = step(&report, "merge", &pr, "done");
+    let admin = &step["admin_override"];
+    assert_eq!(admin["reason"], "REVIEW_REQUIRED");
+    assert_eq!(admin["requested_by"], login);
+    chrono::DateTime::parse_from_rfc3339(admin["at"].as_str().unwrap()).unwrap();
+    let merged = read(GUARDED, &format!("pulls/{}", pr.number));
+    assert_eq!(merged["merged"], true, "{merged}");
+    assert_eq!(merged["merged_by"]["login"], login);
+    assert_eq!(step["deploy_outcome"], "dispensed");
+    let state = sandbox.state();
+    let overrides = state["admin_overrides"].as_array().unwrap();
+    assert_eq!(overrides.len(), 1, "{state}");
+    assert_eq!(overrides[0]["id"], pr.reference());
+    assert_eq!(overrides[0]["sha"], step["merge_sha"]);
+    assert_eq!(overrides[0]["reason"], admin["reason"]);
+    assert_eq!(overrides[0]["requested_by"], admin["requested_by"]);
+    assert_eq!(overrides[0]["at"], admin["at"]);
+    assert!(sandbox.text().contains("admin override"));
+    assert!(check_runs(GUARDED, sha, REQUEST_TIMEOUT).is_empty());
+    sandbox.settled();
+}
+
+#[test]
+#[ignore]
+fn e2e_guarded_admin_refuses_failing_check() {
+    if !enabled() {
+        return;
+    }
+    guard(GUARDED);
+    let mut sandbox = Sandbox::new("guarded-failure", &[GUARDED], config_path("guarded.toml"));
+    let branch = sandbox.branch(GUARDED, "change");
+    put_file(
+        GUARDED,
+        &branch,
+        ".github/workflows/fail.yml",
+        "name: fail\non: pull_request\njobs:\n  fail:\n    runs-on: ubuntu-latest\n    steps:\n      - run: exit 1\n",
+        None,
+    );
+    put_file(GUARDED, &branch, "e2e.txt", "failing check\n", None);
+    let pr = sandbox.open_blocked(GUARDED, &branch);
+    let live = read(GUARDED, &format!("pulls/{}", pr.number));
+    let sha = live["head"]["sha"].as_str().unwrap();
+    let conclusions = wait_checks(GUARDED, sha);
+    assert_eq!(conclusions.len(), 1, "{conclusions:?}");
+    assert_eq!(conclusions, ["failure"]);
+    let (report, _) = sandbox.merge_with_admin(&[&pr], 0, true);
+    let reasons = refused(&report, &sandbox, &pr);
+    assert!(
+        reasons
+            .iter()
+            .any(|reason| reason.contains("checks failing")),
+        "{reasons:?}"
+    );
 }

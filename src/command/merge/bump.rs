@@ -132,7 +132,7 @@ pub fn track(plan: &Plan, store: &mut Store, options: &Options, operation: &Stor
                 }
             }
         }
-        StoreOperation::SetSha { id, sha } => {
+        StoreOperation::SetSha { id, sha, .. } => {
             if let Some(publisher) = journal.publishers.get_mut(id) {
                 publisher.merge_sha = Some(sha.clone());
             }

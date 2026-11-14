@@ -346,6 +346,13 @@ pub(crate) fn build_plan(opts: &PlanOptions) -> Result<(Plan, Client)> {
 }
 
 pub(crate) fn build_plan_with_config(opts: &PlanOptions) -> Result<(Plan, Client, Config)> {
+    build_plan_with_prepare(opts, |_, _, _, _| Ok(()))
+}
+
+fn build_plan_with_prepare(
+    opts: &PlanOptions,
+    prepare: impl FnOnce(&mut Client, &Config, &mut Discovered, &str) -> Result<()>,
+) -> Result<(Plan, Client, Config)> {
     let started = Instant::now();
     let resolve::Resolved {
         cfg,
@@ -371,11 +378,13 @@ pub(crate) fn build_plan_with_config(opts: &PlanOptions) -> Result<(Plan, Client
     }
     let explicit = names::resolve(&mut client, explicit, &cfg.orgs)?;
     progress::phase("discovering pull requests");
+    let mut discovered = discover(&mut client, &cfg, &explicit, &deploy_branch, opts.all)?;
+    prepare(&mut client, &cfg, &mut discovered, &deploy_branch)?;
     let Discovered {
         ready,
         mut skipped,
         mut questions,
-    } = discover(&mut client, &cfg, &explicit, &deploy_branch, opts.all)?;
+    } = discovered;
 
     progress::phase(&format!("reading {} pull requests", ready.len()));
     let (mut ready, merged) = contained::filter(&mut client, ready, &deploy_branch)?;

@@ -1,0 +1,20 @@
+orgs = ["lucasbp"]
+max_parallel = 1
+require_approval = true
+allow_missing_checks = true
+
+[[layer]]
+name = "guarded"
+repos = ["lucasbp/pipetrain-sandbox-guarded"]
+
+[api]
+max_requests = 1000
+max_per_minute = 1000
+min_remaining = 200
+
+[merge]
+poll_seconds = 3
+timeout_minutes = 3
+no_run_grace_seconds = 120
+no_deploy_repos = ["lucasbp/pipetrain-sandbox-guarded"]
+method = "merge"

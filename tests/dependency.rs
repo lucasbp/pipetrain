@@ -157,6 +157,7 @@ fn assert_package_survives_winning_rule(cfg: &Config, prs: Vec<Pr>, rule: &str) 
             repo: "acme/util".into(),
             base: "master".into(),
             sha: None,
+            admin_override: None,
             continuation: None,
             deploy_prediction: None,
         }),
