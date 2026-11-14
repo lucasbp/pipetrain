@@ -4,6 +4,8 @@ pipetrain is a command-line tool that plans the order in which pull requests sho
 
 It is read-only by default. Planning uses read-only GitHub requests. Local files include the cache, merge resume state and audit history, and, only if you turn it on, a [local usage log](#local-usage-log). Only two commands write to GitHub, both only with `--apply`: `pipetrain bundle --apply` creates a deploy branch, changes the base of the PRs bundled into it and, with `--open-pr`, opens the deploy PR, and `pipetrain merge --apply` merges independent PRs in parallel, waiting for each deploy before dependent work. Its optional `--bump` preparation can also push isolated dependency branches and open draft PRs after proving a new package publication.
 
+Start with [Common flows](docs/flows.md) for queue building, merge execution and recovery. Contributors can use the [architecture map](docs/architecture.md).
+
 ## Requirements
 
 - **Git is optional for planning and ordinary merges.** These use the GitHub API over HTTPS. `merge --bump --apply` requires local Git, Git authentication and commit identity, plus the .NET SDK for its NuGet restore checks; it fetches into isolated workspaces and can commit and push a bump branch. See [publication-backed preparation](docs/publication-bump.md).
@@ -89,7 +91,7 @@ An executable that came from a package manager (`.deb`, `.rpm`, `cargo install`)
 
 pipetrain asks the GitHub CLI for a token (`gh auth token`) and uses it if the command succeeds. Otherwise it falls back to the `GH_TOKEN` environment variable. With neither, it stops with an error that says how to get one for your system.
 
-You do not need `gh`. Without it, create a fine-grained token with read-only access (Pull requests: read, Contents: read, Metadata: read; [`pipetrain bundle --apply`](#applying-the-bundle-suggestion) needs write on Contents and Pull requests) at <https://github.com/settings/personal-access-tokens/new> and set it for the session:
+You do not need `gh`. Without it, create a fine-grained token with read-only access for planning (Pull requests: read, Contents: read, Metadata: read) at <https://github.com/settings/personal-access-tokens/new> and set it for the session. Apply operations need write permissions; see [bundle](#applying-the-bundle-suggestion), [merge](docs/merge.md) and [publication-backed preparation](docs/publication-bump.md).
 
 ```powershell
 $env:GH_TOKEN = "<your-token>"
@@ -225,8 +227,8 @@ pipetrain plan [OPTIONS] [PRS]...
 | `--check-feeds` | Only on `plan`. Asks the package feeds whether the version each `# wait` line names is already published, and says so on the line: `(published)`, `(not yet)` or `(feed check failed: ...)`. Off by default, so without it there are no extra requests and the output is unchanged. Informational only: order, gates, pauses and the exit code never change. Needs a token that can read packages (`read:packages`) for GitHub Packages feeds. See [Checking a package feed](#checking-a-package-feed). |
 | `--no-progress` | Do not draw the progress indicator. It is drawn on stderr only when stderr is a terminal and never with `--json`, `--emit queue` redirected, or `CI=true`. |
 | `--emit queue` | Replaces the plan with a queue for a runner: one `merge:org/repo#N` line per ready PR on stdout, questions on stderr, exit 3 when questions are open. See [Feeding a queue runner](#feeding-a-queue-runner). Not combinable with `--json`. |
-| `--apply` | Only on `bundle`. Writes to GitHub: creates the deploy branches and retargets the PRs. Without it `bundle` is a dry run. |
-| `--yes` | Only on `bundle`, and only together with `--apply`. Skips the confirmation prompt. Required when stdin is not a terminal. |
+| `--apply` | On `bundle` and `merge`. Enables their GitHub writes; without it both are dry runs. See [Common flows](docs/flows.md). |
+| `--yes` | On `bundle` and `merge`, together with `--apply`. Skips initial confirmation and is required when stdin is not a terminal. Merge gates have separate confirmation; see [merge.md](docs/merge.md#confirmation-and-gates). |
 | `--open-pr` | On `bundle` (together with `--apply`): after the last retarget of each bundle, opens the PR `deploy/<date>-<base>` into the base, without merging it. On `merge`: opens that PR only after the last PR of the bundle is merged and its wait is over, which is the one to use for the whole flow, since opening it before the merges starts a round of CI per merge. A deploy PR that already exists is not duplicated. Needs Pull requests: write. |
 | `--color auto\|always\|never` | On `plan` and `bundle`. Colors in the text output. `auto` (the default) colors only on a terminal and honors `NO_COLOR`. `always` colors even when piped, `never` never does. `--json` is never colored. |
 
@@ -419,7 +421,7 @@ How to read it:
 - **LANE**: a chain of PRs. Lanes are independent of each other, so they can run side by side. Inside a lane, merge top to bottom.
 - **s1, s2, s3**: the stage. PRs with the same stage have nothing between them and can merge at the same time.
 - **after**: the PR that must merge first, the rule that says so, and the reason.
-- **?**: the PR has an open question, listed at the end with a suggested fix. A question never changes the exit code, except with `--emit queue` (see [Feeding a queue runner](#feeding-a-queue-runner)).
+- **?**: the PR has an open question, listed at the end with a suggested fix. Normal text/JSON plans still exit 0. Queue and `--strict` exit rules are in [Common flows](docs/flows.md#use-by-agents).
 - **[api]**, **[lib]**: the layer of the repo, from your config.
 - **deploys**: how many deploys the ready PRs cause today (every PR that does not target a train branch is one), and how many remain if every bundle is applied.
 - **BUNDLES**: a suggestion to merge several PRs of one repo through one train branch. Shown only when there is something to bundle. Nothing was created or retargeted.
@@ -650,7 +652,7 @@ Without `--version` it prints the latest version and the last 5, newest first. V
 
 `--json` prints `{"schema": 1, "package", "ecosystem", "feed", "version", "published", "latest", "versions"}`. `version` and `published` are `null` when no `--version` was given, and `versions` holds the last 5. A package the feed does not know prints nothing on stdout, so `--json` stays empty in that case; read the exit code.
 
-Token: GitHub Packages needs one, even for public packages. pipetrain uses the same lookup as every other command (`GH_TOKEN`, then `gh auth token`) and sends it only to hosts that end in `pkg.github.com`: as a bearer token for npm and as the password of a basic-auth login for NuGet. It is never printed. The token needs the `read:packages` scope; if the feed answers 401 or 403, check that the token has it. `registry.npmjs.org`, `nuget.org` and any other host get no token.
+Token: GitHub Packages needs one, even for public packages. pipetrain uses the same lookup as every other command (`gh auth token`, falling back to `GH_TOKEN`) and sends it only to hosts that end in `pkg.github.com`: as a bearer token for npm and as the password of a basic-auth login for NuGet. It is never printed. The token needs the `read:packages` scope; if the feed answers 401 or 403, check that the token has it. `registry.npmjs.org`, `nuget.org` and any other host get no token.
 
 | Code | Meaning |
 |---|---|
@@ -720,7 +722,7 @@ pipetrain bump <PACKAGE> [--to <VERSION>] [--ecosystem nuget|npm] [--org <ORG>] 
 
 What it reads:
 
-- The target version: `--to`, or the latest version in the feed, looked up exactly like `pipetrain feed` (same ecosystem rules, same `--org` and `--registry`, same token handling).
+- The target version: `--to` is used directly without a feed check; otherwise the latest version is looked up like `pipetrain feed` (same ecosystem rules, same `--org` and `--registry`, same token handling).
 - The repos to scan: every `--repo`, or, when none is given, the exact repo names in the active profile (`[[layer]]` and `[[order]]`).
 - In each repo, the manifests of the default branch for the ecosystem (`.csproj`, `.fsproj` and `.props` for NuGet, `package.json` for npm), through the same cache-aware GitHub client as `plan`. Only `GET` requests and read-only GraphQL queries.
 
@@ -758,16 +760,17 @@ Repos that do not reference the package are not listed. A scanned repo name that
 | Code | Meaning |
 |---|---|
 | 0 | The scan ran, whether or not anything would change (and, with `--check`, nothing would). |
-| 1 | With `--check`: at least one manifest would change (`--check: N would change` on stderr). Also: the package is referenced nowhere (`PACKAGE is not referenced in any scanned manifest`), the feed does not know the package or the version, no repo was given or could be read, or another error (`error: ...` on stderr). Code 1 also means "not referenced", so with `--check` tell the cases apart by the message on stderr. |
+| 1 | With `--check`: at least one manifest would change (`--check: N would change` on stderr). Also: the package is referenced nowhere (`PACKAGE is not referenced in any scanned manifest`), the feed cannot provide a latest version when `--to` is absent, no repo was given or could be read, or another error (`error: ...` on stderr). Code 1 also means "not referenced", so with `--check` tell the cases apart by the message on stderr. |
 | 2 | The feed answered 401 or 403: the token is missing or lacks `read:packages` (the message and code of `feed`). |
 
 ## Exit code
 
 | Code | Meaning |
 |---|---|
-| 0 | A plan was generated. Skipped PRs and `?` questions do not change this. |
+| 0 | A plan was generated. Skipped PRs and `?` questions do not change this for a normal text/JSON plan without `--strict`. |
 | 1 | An error: no token, bad config, bad `--date`, a PR not found, budget reached, GitHub failure. The message goes to stderr as `error: ...`. For `bundle` it also means the prompt was declined or a write failed. |
-| 3 | Only with `--emit queue`: the queue was printed, but at least one question is open. Without `--emit queue` this code is never used. |
+| 3 | Queue output has open questions; also used when questions block `merge --apply` and by `order suggest` for a dependency cycle. |
+| 4 | With `--strict`, no visible selected PR is eligible; merge dry runs can also use it when no merge step exists. Precedence and exceptions are in [Common flows](docs/flows.md#use-by-agents). |
 | 5 | Only `merge --apply`: stopped and resumable (deploy timeout or no run, gate not confirmed). Run the same command again. See [docs/merge.md](docs/merge.md). |
 
 `pipetrain update --check` also uses 10: a newer release exists.
@@ -784,7 +787,7 @@ A line holds the time, the version, the subcommand name, the exit code, the erro
 
 ## Merging the queue
 
-`pipetrain merge --apply` runs the order of `plan --emit queue`: it merges independent PRs in parallel up to `max_parallel` (one active PR per repository), waits for each expected deploy, and releases dependent work only after its prerequisites finish. Before each merge it reads the PR again and refuses one that is not approved, green and `clean`, or whose head moved after the plan, so a PR the plan marked as not ready is never merged. DDL and infra gates and unpublished package waits ask for confirmation (`--gates-confirmed` answers them; without a terminal the run stops there). A stop, a timeout or a failed deploy leaves a state file, and running the same command again resumes from there. Without `--apply` it only prints the steps. A leaf deploy failure keeps its failed status and pending record while proven independent PRs continue. Dependency publisher failures stop by default; `--dependency-failure skip` blocks their consumers and continues independent PRs. Legacy pending records without independence metadata stop safely on failure. A cancelled workflow run that a newer run of the same workflow replaced is ignored. On any base branch, including `main`, workflow branch and path filters can dispense the deploy wait with evidence; unreadable or indeterminate inputs retain polling. With `--open-pr`, the deploy PR of a bundle is opened after the last PR of the bundle is merged, never before.
+`pipetrain merge --apply` executes the planned queue with live readiness checks, independent PRs in parallel up to `max_parallel` (one active PR per repository), deploy waits and durable recovery. Without `--apply` it previews the steps. Start with [merge and recovery flows](docs/flows.md#merging-with-deploy-waits); the exact checks, gates, workflow predictions, failure policies and optional deploy PR opening are specified in [docs/merge.md](docs/merge.md).
 
 ```toml
 [merge]
@@ -847,12 +850,7 @@ pipetrain does not approve, comment, label or re-run checks, and it does not exe
 
 ## Development
 
-CI runs `cargo clippy --all-targets -- -D warnings` and `cargo test --locked` on Linux, macOS and Windows for every push to `main` and every pull request. To run the same checks locally:
-
-```
-cargo clippy --all-targets -- -D warnings
-cargo test --locked
-```
+CI runs clippy and tests on Linux, macOS and Windows for every push to `main` and every pull request; it does not run fmt. See [AGENTS.md](AGENTS.md#validation) for the local validation commands and stable-toolchain update requirement.
 
 ## License
 
