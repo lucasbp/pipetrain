@@ -179,7 +179,10 @@ struct UpdateArgs {
     #[arg(long, hide = true)]
     api_url: Option<String>,
 
-    #[arg(long, help = "Log every API request to stderr")]
+    #[arg(
+        long,
+        help = "Log every API request to stderr and print the full sha256 of the download"
+    )]
     verbose: bool,
 }
 
@@ -1145,7 +1148,7 @@ fn dispatch(result: &Result<i32>) -> ExitCode {
         Ok(0) => ExitCode::SUCCESS,
         Ok(code) => ExitCode::from(u8::try_from(*code).unwrap_or(1)),
         Err(err) => {
-            eprintln!("error: {err:#}");
+            anstream::eprintln!("{}: {err:#}", pipetrain::style::error_label());
             ExitCode::FAILURE
         }
     }

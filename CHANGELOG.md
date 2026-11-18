@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `pipetrain update` prints a short aligned report: a bold `pipetrain <old> -> <new>` line, then `asset`, `sha256` (first 12 characters, the full hash with `--verbose`), `location` and a final `ok`. `location` no longer shows the Windows `\\?\` prefix (`\\?\UNC\srv\share` shows as `\\srv\share`), and the same goes for the path in `--dry-run`. Colors and bold follow the usual rules (terminal only, `NO_COLOR`); `--check` and `--json` are unchanged. The `error` prefix on failures is red on a terminal.
 - A repo with no PR workflow can merge approved PRs: `allow_missing_checks` (also per profile) and `checks_optional_repos` already accept a PR with no reported check, and the exception is now visible in the compact dry run, in `--verbose` and in the additive `exceptions` field of `preflight` in `--json`. Strict stays the default, and pending or failing checks and a branch rule that requires a check still block.
 
 ## 0.10.0
