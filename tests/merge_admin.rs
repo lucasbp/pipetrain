@@ -195,7 +195,7 @@ fn without_admin_review_required_keeps_legacy_report_and_text() {
         json!([{"id": "acme/api#1", "reasons": ["review required", "branch protection blocks merge (BLOCKED)"]}])
     );
     assert!(!report.to_string().contains("admin_override"));
-    let output = fixture.run(&[1], &[]);
+    let output = fixture.run(&[1], &["--verbose"]);
     assert!(output.status.success());
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.contains("nothing to merge\n\nnot merging, the plan marks these as not ready:\n  acme/api#1: review required, branch protection blocks merge (BLOCKED)\n"), "{text}");
@@ -215,7 +215,7 @@ fn admin_review_only_dry_run_marks_json_and_text_without_timestamp_or_writes() {
     );
     assert_eq!(report["steps"][0]["status"], "planned");
     assert_eq!(report["not_merging"], json!([]));
-    let output = fixture.run(&[1], &["--admin"]);
+    let output = fixture.run(&[1], &["--admin", "--verbose"]);
     assert!(output.status.success());
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(

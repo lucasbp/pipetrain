@@ -11,6 +11,60 @@ pipetrain merge --apply [--yes] [--gates-confirmed] [--allow-questions] [OPTIONS
 
 The PR selection flags (`PRS`, `--all`, `--mine`, `--author`, `--org`, `--date`, `--config`, `--profile`) are the ones of `plan` and `bundle`. The plan is built with `--check-feeds`, so a `# wait` line already says whether the package is published.
 
+## What the text output shows
+
+The text report is compact by default and `--verbose` prints the full detail. `--json` and `--emit queue` do not change.
+
+**Dry run and confirmation.** One line per PR with its step, `repo#n`, state and, for a PR the plan left out, the single cause in plain language. A short footer counts the PRs that enter the queue and the blocked ones, names the gates (DDL, infra) and the open questions, warns about the API budget only when the estimate is over it, and says in one line when the state holds pending records from earlier runs. Per-check lines, check URLs and the repeated dependency list are not printed.
+
+```
+dry run, nothing was merged; pass --apply to do it
+
+ 1  lib#1  ready    after api#2
+ 2  api#2  ready
+ 3  web#3  ready    after api#2
+ -  ui#9   blocked  needs human approval
+
+3 enter the queue · 1 blocked · gates: 1 DDL
+--verbose shows checks, URLs and the full detail
+```
+
+The causes come from the preflight and merge causes that already exist, worded for a person:
+
+| Cause in the report | Compact wording |
+|---|---|
+| `review required`, `not approved` | `needs human approval` |
+| `changes requested` | `changes requested, address them first` |
+| `draft` | `draft, mark it ready for review` |
+| `checks pending` | `checks still running` |
+| `checks failing: build` | `check build failing` |
+| `no checks reported` | `no checks configured in the repo` |
+| `merge conflict` | `conflict with base` |
+| `branch behind its base, update it` | the same words |
+| `branch protection blocks merge (BLOCKED)` | `blocked by branch protection (usually a missing approval or check)` |
+| a PR that waits for another | `depends on repo#n first` |
+
+A cause that has no wording keeps its original text. Only the first cause is shown on the line; `(+N more, see --verbose)` says there are others.
+
+**During `--apply`.** On a terminal there is one live line per active PR, as before. Each PR that finishes becomes one final line: green `merged + deploy ok`, red `merged, deploy failed` or yellow `stopped`. Off a terminal (CI, a redirect, `--no-progress`) there is no spinner and each event is one line.
+
+**Final report.** The first line is bold and counts the run, for example `4 merged · 3 deploys ok · 2 failed · 1 stopped`. The PRs that went well are one line with their names. Each failed PR gets a block:
+
+```
+api#2  merged, deploy failed
+  what:    the merge went in at 9f8e7d6; workflow Deploy ended as failure (job migrate, step Run migrations)
+  run:     https://github.com/acme/api/actions/runs/101
+  unknown: whether production changed; open the run before deciding
+  next:    pipetrain merge --apply --state q.json
+           or drop it for good: pipetrain state discard acme/api#2 --reason "<why>" --state q.json
+```
+
+The job and step come from one extra request per failed deploy (`/actions/runs/<id>/jobs`); when that request fails the block simply omits them. A PR that failed before merging says what failed and to fix it and run the same command again. The next command is the one you ran, with the `--state` that was used. A PR that was stopped because another failed is listed by name with the reason. One tip line replaces the long resume paragraph.
+
+**`--verbose`** also logs every API request to stderr and prints the full output of earlier versions: the state block, one preflight line per PR with every check and its URL, every step, and the long summary and resume paragraph.
+
+Colors follow `NO_COLOR`, a redirected output, `--no-progress` and `CI=true`: green is ok, red is a failure, yellow is attention or stopped, cyan marks `repo#n`, bold marks counts and the main cause.
+
 ## What it merges
 
 The steps come from the same lines that `plan --emit queue` prints (see [queue-output.md](queue-output.md)). The report keeps that order; independent steps can finish in another order:

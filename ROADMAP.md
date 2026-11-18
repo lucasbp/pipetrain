@@ -54,6 +54,8 @@ pipetrain plans the merge order of pull requests across repos. This file says wh
 
 - `pipetrain mcp`: a read-only MCP server over stdio with five tools (`plan`, `feed`, `bump` as a dry run, `doctor`, `order_suggest`) that return the same `--json` schema 1 as the commands. No port, no daemon, no write tool. See `docs/mcp.md`.
 
+- Compact `merge` output by default: a dry run and a confirmation with one line per PR (step, `repo#n`, state and the single cause that blocks it) and a short footer, one final line per finished PR during `--apply`, and a short final report with a block per failure. Per-check detail and the full text move to `--verbose`. See `docs/merge.md`.
+
 ## Next
 
 Small, well understood, in this order:
@@ -63,7 +65,7 @@ Small, well understood, in this order:
 3. A deeper conflict report that simulates the merge, beyond files changed by more than one PR.
 4. `feed`, `bump` and `plan --check-feeds` for Cargo (crates.io), `pyproject.toml` (PyPI) and Go modules: today they only know NuGet and npm.
 5. `cargo audit` (and `cargo deny` if it fits) in the CI workflow, so advisories fail a PR instead of being checked by hand.
-6. Compact `merge` and `plan` output by default: one line per PR (step, repo#n, state and the single cause that blocks it) and a short footer with gates and open questions. Today a run prints every check of every PR with its URL and repeats the same cmutil dependency list on each line, so 18 PRs become hundreds of lines and the open question at the end is easy to miss. Per-check detail and full causes move to `--verbose`.
+6. Compact `plan` text output by default, the way `merge` already is: per-check detail and full causes move to `--verbose`.
 
 ## Later
 

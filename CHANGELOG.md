@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- `merge` text output is compact by default. The dry run and the confirmation print one line per PR (step, `repo#n`, state and the single cause that blocks it, in plain words such as `needs human approval`) and a short footer with the PRs that enter, the blocked ones, gates, open questions, the API budget warning only when it is over, and inherited state. Per-check lines, check URLs and the repeated dependency list move to `--verbose`.
+- During `merge --apply` each finished PR is one line (green `merged + deploy ok`, red `merged, deploy failed`, yellow `stopped`), with no spinner and one line per event off a terminal. The final report starts with a bold count line, lists the PRs that went well by name and gives each failure a block: what happened, the run URL, the failed job and step, what is not known and the exact next command (resume with the same `--state`, or `state discard --reason`). The long resume paragraph is one tip line.
+- `merge --verbose` keeps the full output of earlier versions. `--json`, `--emit queue` and the state file are unchanged.
+
 ## 0.9.2
 
 - A pending record inherited from an earlier run whose deploy failed no longer stops every PR of a new queue. When its target is not a target or dependency of any PR in the queue, merge and its dry run say up front that it stays in the state and the queue goes on without it, and the summary lists it as `kept, failed deploy from an earlier run`. On the same target, only that lane is blocked; other repositories and bases proceed. A deploy still running keeps waiting.

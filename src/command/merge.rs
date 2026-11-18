@@ -27,6 +27,7 @@ use crate::workflows::{self, PushRuns};
 
 mod admin;
 pub mod bump;
+pub mod compact;
 mod failure;
 mod package;
 mod parallel;
@@ -1296,9 +1297,19 @@ pub fn merge_plan(
     store: &mut Store,
     hooks: &mut Hooks,
 ) -> Result<Outcome> {
-    merge_plan_prepared(plan, cfg, client, settings, store, hooks, &BTreeMap::new())
+    merge_plan_prepared(
+        plan,
+        cfg,
+        client,
+        settings,
+        store,
+        hooks,
+        &BTreeMap::new(),
+        false,
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn merge_plan_prepared(
     plan: &Plan,
     cfg: &Config,
@@ -1307,6 +1318,7 @@ fn merge_plan_prepared(
     store: &mut Store,
     hooks: &mut Hooks,
     overrides: &BTreeMap<String, AdminOverride>,
+    compact: bool,
 ) -> Result<Outcome> {
     let method = method_of(settings, cfg)?;
     if settings.apply {
@@ -1399,7 +1411,12 @@ fn merge_plan_prepared(
             code: 0,
         });
     }
-    if !(hooks.confirm)(&render(&report, false)) {
+    let confirmation = if compact {
+        compact::preview(&report, plan, true)
+    } else {
+        render(&report, false)
+    };
+    if !(hooks.confirm)(&confirmation) {
         return Ok(Outcome {
             report,
             aborted: true,
@@ -1812,7 +1829,7 @@ fn render_with_steps(report: &Report, color: bool, include_steps: bool) -> Strin
 }
 
 fn ask(question: &str, prompt: &str) -> String {
-    eprintln!("{question}");
+    anstream::eprintln!("{question}");
     eprint!("{prompt}");
     let _ = std::io::stderr().flush();
     let mut line = String::new();
@@ -1921,9 +1938,15 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
         proceed
     };
     let mut pause = |wait: Duration| std::thread::sleep(wait);
+    let full = opts.plan.verbose;
     let mut observe = |step: &StepReport| {
-        if !json {
+        if json {
+            return;
+        }
+        if full {
             crate::progress::line(&step_text(step, true));
+        } else {
+            crate::progress::line(&compact::finished_line(step, true));
         }
     };
     let mut progress = |text: &str| crate::progress::phase(text);
@@ -1943,6 +1966,7 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
         &mut store,
         &mut hooks,
         &overrides,
+        !full,
     )?;
     if opts.plan.strict
         && outcome.code == 0
@@ -1963,8 +1987,20 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
     }
     if json {
         println!("{}", serde_json::to_string_pretty(&outcome.report)?);
-    } else {
+    } else if full {
         anstream::print!("{}", render_final(&outcome.report, true));
+    } else if outcome.report.applied {
+        let context = compact::Context {
+            command: compact::command_line(
+                &std::env::args().skip(1).collect::<Vec<_>>(),
+                Some(&state_path.display().to_string()),
+            ),
+            state: Some(state_path.display().to_string()),
+            details: compact::enrich(&mut client, &outcome.report),
+        };
+        anstream::print!("{}", compact::final_report(&outcome.report, true, &context));
+    } else {
+        anstream::print!("{}", compact::preview(&outcome.report, &built, true));
     }
     if opts.apply {
         eprintln!(
