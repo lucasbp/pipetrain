@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `pipetrain update` prints a short aligned report: a bold `pipetrain <old> -> <new>` line, then `asset`, `sha256` (first 12 characters, the full hash with `--verbose`), `location` and a final `ok`. `location` no longer shows the Windows `\\?\` prefix (`\\?\UNC\srv\share` shows as `\\srv\share`), and the same goes for the path in `--dry-run`. Colors and bold follow the usual rules (terminal only, `NO_COLOR`); `--check` and `--json` are unchanged. The `error` prefix on failures is red on a terminal.
+
 ## 0.10.0
 
 - `merge` text output is compact by default. The dry run and the confirmation print one line per PR (step, `repo#n`, state and the single cause that blocks it, in plain words such as `needs human approval`) and a short footer with the PRs that enter, the blocked ones, gates, open questions, the API budget warning only when it is over, and inherited state. Per-check lines, check URLs and the repeated dependency list move to `--verbose`.
