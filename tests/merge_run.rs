@@ -2278,14 +2278,15 @@ fn resumed_leaf_failure_uses_saved_graph_even_when_merged_pr_is_absent() {
     assert_eq!(run.step(0).kind, Kind::Resume);
     assert_eq!(
         run.statuses(),
-        vec![Status::Failed, Status::Done, Status::Done, Status::Done]
+        vec![Status::Skipped, Status::Done, Status::Done, Status::Done]
     );
+    assert!(run.step(0).detail.starts_with(KEPT));
     assert_eq!(rig.puts().len(), 3);
     assert_eq!(rig.store.state.pending.len(), 1);
 }
 
 #[test]
-fn legacy_resume_without_independence_metadata_stops_safely() {
+fn legacy_resume_without_independence_metadata_is_kept_when_unrelated() {
     let mut first = Rig::new("");
     fail_deploy(&first, 2);
     first.go(&deployment_plan());
@@ -2296,9 +2297,10 @@ fn legacy_resume_without_independence_metadata_stops_safely() {
     fail_deploy(&rig, 2);
     let plan = plan_of(vec![pr("acme/sync", 4, "feat/4", "main")], Vec::new());
     let run = rig.go(&plan);
-    assert_eq!(run.statuses(), vec![Status::Failed, Status::Skipped]);
-    assert!(run.step(0).detail.contains("no independence proof"));
-    assert!(rig.puts().is_empty());
+    assert_eq!(run.statuses(), vec![Status::Skipped, Status::Done]);
+    assert!(run.step(0).detail.starts_with(KEPT));
+    assert_eq!(rig.puts().len(), 1);
+    assert_eq!(rig.store.state.pending.len(), 1);
 }
 
 #[test]
@@ -2333,7 +2335,7 @@ fn auxiliary_skip_does_not_mask_success_or_failure() {
 }
 
 #[test]
-fn resumed_failure_rejects_new_heads_without_independence_proof() {
+fn resumed_failure_keeps_inherited_pending_and_runs_new_heads() {
     let mut first = Rig::new("");
     fail_deploy(&first, 2);
     let mut plan = deployment_plan();
@@ -2345,23 +2347,19 @@ fn resumed_failure_rejects_new_heads_without_independence_proof() {
         .push(first.store.state.pending[0].clone());
     plan.items
         .retain(|item| item.number == 3 || item.number == 4);
-    plan.items
-        .iter_mut()
-        .find(|item| item.number == 3)
-        .unwrap()
-        .sha = "f".repeat(40);
-    fail_deploy(&rig, 2);
+    let pending_sha = "e".repeat(40);
+    rig.store.state.pending[0].sha = Some(pending_sha.clone());
+    rig.script().runs_by_sha.insert(pending_sha, failed_runs());
     let run = rig.go(&plan);
     assert_eq!(
         run.statuses(),
-        vec![Status::Failed, Status::Skipped, Status::Done]
+        vec![Status::Skipped, Status::Done, Status::Done]
     );
-    assert!(run.step(1).detail.contains("no saved independence proof"));
-    assert_eq!(rig.puts().len(), 1);
+    assert!(run.step(0).detail.starts_with(KEPT));
+    assert_eq!(rig.puts().len(), 2);
     let color = render(&run.outcome.report, true);
-    assert!(color.contains("\x1b[33mskipped:"));
+    assert!(color.contains(KEPT));
     assert!(color.contains("\x1b[32mdone:"));
-    assert!(color.contains("failed:"));
     assert!(!render(&run.outcome.report, false).contains('\x1b'));
 }
 
@@ -2685,7 +2683,7 @@ fn parallel_failed_publication_blocks_wait_and_consumers_without_cancelling_runn
 }
 
 #[test]
-fn parallel_legacy_failed_resume_stops_before_dispatching_new_independent_work() {
+fn parallel_legacy_failed_resume_in_an_unrelated_repo_is_kept_and_new_work_goes_on() {
     let mut rig = Rig::new("no_deploy_repos = [\"acme/sync\"]");
     rig.cfg.max_parallel = 2;
     rig.store
@@ -2703,19 +2701,12 @@ fn parallel_legacy_failed_resume_stops_before_dispatching_new_independent_work()
     fail_deploy(&rig, 1);
     let plan = plan_of(vec![pr("acme/sync", 4, "feat/4", "main")], Vec::new());
     let run = rig.go(&plan);
-    assert_eq!(run.outcome.code, 1);
-    assert!(rig.puts().is_empty());
+    assert_eq!(run.outcome.code, 0);
+    assert_eq!(rig.puts().len(), 1);
     assert_eq!(rig.store.state.pending.len(), 1);
-    assert!(
-        run.outcome
-            .report
-            .steps
-            .iter()
-            .find(|step| step.target == "acme/sync#4")
-            .unwrap()
-            .blocked_by
-            .is_some()
-    );
+    assert_eq!(step_of(&run, "acme/sdk#1").status, Status::Skipped);
+    assert!(step_of(&run, "acme/sdk#1").detail.starts_with(KEPT));
+    assert_eq!(step_of(&run, "acme/sync#4").status, Status::Done);
 }
 
 #[test]
@@ -5153,4 +5144,151 @@ fn api_budget_saturates_large_waits_and_recomputes_dispensed_polls() {
     assert_eq!(estimate.deploy_polls, 0);
     assert_eq!(estimate.total, estimate.discovery + estimate.checks);
     assert!(state.reopen().state.pending.is_empty());
+}
+
+const KEPT: &str = "kept, failed deploy from an earlier run";
+
+fn inherited_pending(rig: &mut Rig, id: &str, repo: &str, base: &str, runs: Vec<Value>) -> String {
+    let sha = "e".repeat(40);
+    rig.script().runs_by_sha.insert(sha.clone(), runs);
+    rig.store
+        .add(pipetrain::merge::Pending {
+            recorded_at: None,
+            id: id.to_string(),
+            repo: repo.to_string(),
+            base: base.to_string(),
+            sha: Some(sha.clone()),
+            admin_override: None,
+            continuation: None,
+            deploy_prediction: None,
+        })
+        .unwrap();
+    sha
+}
+
+fn failed_runs() -> Vec<Value> {
+    vec![run_json("deploy", "completed", Some("failure"))]
+}
+
+fn step_of<'a>(run: &'a Run, target: &str) -> &'a StepReport {
+    run.outcome
+        .report
+        .steps
+        .iter()
+        .find(|step| step.target == target)
+        .unwrap_or_else(|| panic!("no step for {target}"))
+}
+
+#[test]
+fn an_inherited_failed_deploy_in_an_unrelated_repo_does_not_block_the_queue() {
+    for parallelism in [1, 2] {
+        let mut rig = Rig::new("");
+        rig.cfg.max_parallel = parallelism;
+        inherited_pending(&mut rig, "acme/old#34", "acme/old", "master", failed_runs());
+        let plan = plan_on(&[1, 2]);
+
+        let run = rig.go(&plan);
+
+        assert_eq!(
+            run.outcome.code,
+            0,
+            "{}",
+            render(&run.outcome.report, false)
+        );
+        let kept = step_of(&run, "acme/old#34");
+        assert_eq!(kept.kind, Kind::Resume);
+        assert_eq!(kept.status, Status::Skipped);
+        assert!(kept.detail.starts_with(KEPT), "{}", kept.detail);
+        assert_eq!(rig.puts().len(), 2);
+        for number in merge_numbers(&plan) {
+            assert_eq!(
+                step_of(&run, &format!("acme/api#{number}")).status,
+                Status::Done
+            );
+        }
+        assert_eq!(rig.store.state.pending.len(), 1);
+        assert_eq!(rig.store.state.pending[0].id, "acme/old#34");
+        let up_front = &run.confirmation_text[0];
+        assert!(
+            up_front.contains(
+                "inherited pending acme/old#34 into master at eeeeeee has a failed deploy"
+            ),
+            "{up_front}"
+        );
+        assert!(up_front.contains("it stays in the state and the queue goes on without it"));
+        let text = render_final(&run.outcome.report, false);
+        assert!(text.contains(&format!("{KEPT}: acme/old#34")), "{text}");
+        assert!(text.contains("2 PRs merged"), "{text}");
+        assert!(!text.contains("same --state to resume"), "{text}");
+    }
+}
+
+#[test]
+fn a_dry_run_announces_the_inherited_failed_deploy_it_would_keep() {
+    let mut rig = Rig::new("");
+    inherited_pending(&mut rig, "acme/old#34", "acme/old", "master", failed_runs());
+
+    let run = rig.run(&plan_on(&[1]), dry(), true, true).unwrap();
+
+    let text = render(&run.outcome.report, false);
+    assert!(
+        text.contains("inherited pending acme/old#34 into master at eeeeeee has a failed deploy"),
+        "{text}"
+    );
+    assert!(text.contains("it stays in the state and the queue goes on without it"));
+    assert_eq!(step_of(&run, "acme/old#34").status, Status::Planned);
+    assert!(rig.puts().is_empty());
+    assert_eq!(rig.store.state.pending.len(), 1);
+}
+
+#[test]
+fn an_inherited_deploy_still_running_in_an_unrelated_repo_keeps_waiting() {
+    let mut rig = Rig::new("");
+    inherited_pending(
+        &mut rig,
+        "acme/old#34",
+        "acme/old",
+        "master",
+        vec![run_json("deploy", "in_progress", None)],
+    );
+
+    let run = rig.go(&plan_on(&[1]));
+
+    assert_eq!(step_of(&run, "acme/old#34").status, Status::Stopped);
+    assert_eq!(step_of(&run, "acme/api#1").status, Status::Skipped);
+    assert!(rig.puts().is_empty());
+    assert!(
+        !render(&run.outcome.report, false).contains("has a failed deploy"),
+        "{}",
+        render(&run.outcome.report, false)
+    );
+}
+
+#[test]
+fn an_inherited_failed_deploy_on_the_same_target_blocks_only_that_lane() {
+    for parallelism in [1, 2] {
+        let mut rig = Rig::new("");
+        rig.cfg.max_parallel = parallelism;
+        inherited_pending(&mut rig, "acme/api#34", "acme/api", "main", failed_runs());
+        let plan = plan_of(
+            vec![
+                pr("acme/api", 1, "feat/1", "main"),
+                pr("acme/web", 3, "feat/3", "main"),
+            ],
+            Vec::new(),
+        );
+
+        let run = rig.go(&plan);
+
+        let kept = step_of(&run, "acme/api#34");
+        assert_eq!(kept.status, Status::Failed);
+        assert!(!kept.detail.starts_with(KEPT), "{}", kept.detail);
+        let blocked = step_of(&run, "acme/api#1");
+        assert_eq!(blocked.status, Status::Skipped);
+        assert!(blocked.blocked_by.is_some());
+        assert_eq!(step_of(&run, "acme/web#3").status, Status::Done);
+        assert_eq!(rig.puts().len(), 1);
+        assert_eq!(run.outcome.code, 1);
+        assert_eq!(rig.store.state.pending.len(), 1);
+    }
 }

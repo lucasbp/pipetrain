@@ -584,6 +584,8 @@ pub struct StepReport {
     pub resolution: Option<Resolution>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deploy_outcome: Option<DeployOutcome>,
+    #[serde(skip)]
+    pub inherited: bool,
 }
 
 impl StepReport {
@@ -602,6 +604,7 @@ impl StepReport {
             expected_runs: Vec::new(),
             resolution: None,
             deploy_outcome: None,
+            inherited: false,
         }
     }
 }
@@ -693,6 +696,8 @@ pub struct Report {
     pub steps: Vec<StepReport>,
     pub not_merging: Vec<NotMerging>,
     pub questions: Vec<String>,
+    #[serde(skip)]
+    pub notices: Vec<String>,
 }
 
 impl Report {
