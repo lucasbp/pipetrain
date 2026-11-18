@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Add opt-in `bump --apply` (with `--yes`): after proving the target version in the package feed, it opens one draft PR per repo from an isolated `pipetrain/bump/<package>-<version>` branch, with one commit that moves the manifests the dry run lists as `change`. It reuses the git, restore and push code of `merge --bump`, never forces a push, skips a repo whose bump branch already exists and stops at the first failure. NuGet repos need one solution and `packages.lock.json` files; npm repos with a lock file are skipped. Without `--apply` the behavior and `--json` are unchanged, `--apply` cannot be combined with `--check`, and the MCP `bump` tool stays a dry run.
+- Document what `merge --bump` covers and does not cover, including the consumer that falls behind a package the queue publishes without having a package edge to it.
+
 ## 0.10.0
 
 - `merge` text output is compact by default. The dry run and the confirmation print one line per PR (step, `repo#n`, state and the single cause that blocks it, in plain words such as `needs human approval`) and a short footer with the PRs that enter, the blocked ones, gates, open questions, the API budget warning only when it is over, and inherited state. Per-check lines, check URLs and the repeated dependency list move to `--verbose`.

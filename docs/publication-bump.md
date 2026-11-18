@@ -17,6 +17,68 @@ Consumers of multiple packages published by the same repository require manual
 preparation to cover every package; automatic preparation is not a complete
 multi-package update for that topology.
 
+## What `merge --bump` covers
+
+Covered, per consumer PR in the plan:
+
+- The consumer has a package edge from a publisher in the same queue (the planner
+  saw its manifest diff bump the package the publisher releases), the publisher's
+  execution is recorded in the journal as published in this execution, and the push
+  step and exact feed version are proven.
+- NuGet only: literal `Version` attributes of `PackageReference` and
+  `PackageVersion` in `.csproj` and `.props`, exactly one `.sln` or `.slnx`, and
+  `packages.lock.json` files, restored with `--use-lock-file` and `--locked-mode`.
+- The draft PR targets the consumer PR's head branch. Nothing is merged.
+
+Prerequisites on the machine that runs `merge --bump --apply`: `git` on the path
+with credentials that can fetch and push to the consumer repository, a git commit
+identity (`user.name` and `user.email`), the .NET SDK, and a token with Contents and
+Pull requests write.
+
+Not covered:
+
+- npm and every ecosystem other than NuGet: the publisher proof reads the NuGet push
+  log, and consumer preparation validates NuGet project paths and lock files.
+- Several packages from one publisher to one consumer (one contract per pair).
+- A consumer PR that is not in the merge plan, or has no package edge to the
+  publisher.
+- A consumer that falls behind a package the queue itself publishes, with no package
+  edge to it. When the consumer repo checks a `max-behind` version distance, each
+  queue publication moves the package further from the version the consumer
+  references and its version check fails. The plan flags it as
+  `package-release-behind`, but that is a question and a `waiting` state only: it
+  adds no ordering edge and does not feed `applicable` or the journal, so
+  `merge --bump` prepares nothing for it.
+
+For that last case use `pipetrain bump <package> --to <version> --repo <org/repo>
+--apply` after the version shows in the feed (`pipetrain feed <package> --version
+<version>` or the proof `bump --apply` does itself). It reuses the same git,
+restore and push code and proves the version in the feed, but it opens its PR into
+the default branch, outside the merge journal, and is a separate command that you run
+after the publisher merged. Doing this inside the merge run, as a step that waits for
+the publication and then prepares a bump branch for a consumer without an edge,
+needs an ordering decision (where the step sits in the schedule, and whether the
+consumer waits for its PR) and is not implemented.
+
+## Standalone `bump --apply`
+
+`pipetrain bump --apply` shares the preparation code with `merge --bump`: the
+common part is `consumer_bump::pin_commit_push` (head check, new worktree, pin,
+restore pair, changed-file allowlist, lock verification, commit and push of a new
+branch), taken verbatim out of `prepare_many`, and the `BumpGateway` with
+`LocalBackend`. Its own code is small: the feed proof (`feed::proof`), the choice of
+repos from the dry run's `change` rows, the draft PR into the default branch, and an
+npm path that edits `package.json` without a restore.
+
+It requires `--yes` or a terminal, proves the exact version in the feed before the
+first write, and never forces a push. A bump branch that exists is skipped. The
+first failure stops the rest, the report says what was opened, skipped and failed,
+and a failed workspace is kept for inspection. NuGet needs exactly one solution and
+a lock file beside each project manifest. npm repos with a lock file are skipped
+because the lock would go stale. Tests use a local mock of the GitHub API and feed
+and temporary git remotes for npm, and a fake gateway for NuGet; the real `dotnet`
+restore and real GitHub are not exercised by them.
+
 ## Publication evidence
 
 `publication::verify` accepts the publisher execution, its workflow run, the

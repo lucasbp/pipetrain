@@ -2,13 +2,13 @@
 
 pipetrain is a command-line tool that plans the order in which pull requests should merge across several repositories. It reads GitHub, builds a dependency graph from what it finds, and prints the order: what can merge at the same time, what has to wait for what, and why.
 
-It is read-only by default. Planning uses read-only GitHub requests. Local files include the cache, merge resume state and audit history, and, only if you turn it on, a [local usage log](#local-usage-log). Only two commands write to GitHub, both only with `--apply`: `pipetrain bundle --apply` creates a deploy branch, changes the base of the PRs bundled into it and, with `--open-pr`, opens the deploy PR, and `pipetrain merge --apply` merges independent PRs in parallel, waiting for each deploy before dependent work. Its optional `--bump` preparation can also push isolated dependency branches and open draft PRs after proving a new package publication.
+It is read-only by default. Planning uses read-only GitHub requests. Local files include the cache, merge resume state and audit history, and, only if you turn it on, a [local usage log](#local-usage-log). Only three commands write to GitHub, all only with `--apply`: `pipetrain bump --apply` opens one draft PR per repo for a package version already in the feed, `pipetrain bundle --apply` creates a deploy branch, changes the base of the PRs bundled into it and, with `--open-pr`, opens the deploy PR, and `pipetrain merge --apply` merges independent PRs in parallel, waiting for each deploy before dependent work. Its optional `--bump` preparation can also push isolated dependency branches and open draft PRs after proving a new package publication.
 
 Start with [Common flows](docs/flows.md) for queue building, merge execution and recovery. Contributors can use the [architecture map](docs/architecture.md).
 
 ## Requirements
 
-- **Git is optional for planning and ordinary merges.** These use the GitHub API over HTTPS. `merge --bump --apply` requires local Git, Git authentication and commit identity, plus the .NET SDK for its NuGet restore checks; it fetches into isolated workspaces and can commit and push a bump branch. See [publication-backed preparation](docs/publication-bump.md).
+- **Git is optional for planning and ordinary merges.** These use the GitHub API over HTTPS. `merge --bump --apply` and `bump --apply` require local Git, Git authentication and commit identity, plus the .NET SDK for NuGet restore checks; it fetches into isolated workspaces and can commit and push a bump branch. See [publication-backed preparation](docs/publication-bump.md).
 - **A GitHub token**, from one of two places: the GitHub CLI (`gh`, optional) once you ran `gh auth login`, or the `GH_TOKEN` environment variable. You need only one of them.
 - **Rust only to build from source.** A prebuilt binary needs nothing else. Building needs a recent stable Rust toolchain (the crate uses edition 2024).
 
@@ -206,7 +206,7 @@ pipetrain plan [OPTIONS] [PRS]...
 | `pipetrain state show --json` | Inspects local merge state, pending ages, deploy PRs, active jobs and audit history. Uses the same `--state`, `--profile` and `--config` selection as merge. See [State inspection and recovery](docs/state.md). |
 | `pipetrain state discard <id> --reason <text>` | Discards one pending record locally with an audit entry, without confirming a deploy. Requires typing `yes`, or `--yes` without a terminal. Never writes to GitHub. |
 | `pipetrain feed <PACKAGE> [--version <V>]` | Read-only: tells whether a package version is published in its NuGet or npm feed; `--wait` blocks until it is. See [Checking a package feed](#checking-a-package-feed). |
-| `pipetrain bump <PACKAGE> [--to <V>]` | Dry run only: shows which manifests of the scanned repos would move to a version of a package. Writes nothing and has no `--apply`. See [Bumping a package](#bumping-a-package-dry-run). |
+| `pipetrain bump <PACKAGE> [--to <V>]` | Shows which manifests of the scanned repos would move to a version of a package. A dry run that writes nothing; with `--apply` it opens one draft PR per repo once the version is in the feed. See [Bumping a package](#bumping-a-package). |
 | `pipetrain profiles` | Read-only: lists the profiles, their orgs and folders, and which one applies from the current folder. |
 | `pipetrain orgs` | Read-only: lists the GitHub orgs your token can see and which profile lists each one. |
 | `pipetrain log --summary` | Read-only: summarizes the opt-in [local usage log](#local-usage-log): runs per command, error rate by type, median duration. |
@@ -227,8 +227,8 @@ pipetrain plan [OPTIONS] [PRS]...
 | `--check-feeds` | Only on `plan`. Asks the package feeds whether the version each `# wait` line names is already published, and says so on the line: `(published)`, `(not yet)` or `(feed check failed: ...)`. Off by default, so without it there are no extra requests and the output is unchanged. Informational only: order, gates, pauses and the exit code never change. Needs a token that can read packages (`read:packages`) for GitHub Packages feeds. See [Checking a package feed](#checking-a-package-feed). |
 | `--no-progress` | Do not draw the progress indicator. It is drawn on stderr only when stderr is a terminal and never with `--json`, `--emit queue` redirected, or `CI=true`. |
 | `--emit queue` | Replaces the plan with a queue for a runner: one `merge:org/repo#N` line per ready PR on stdout, questions on stderr, exit 3 when questions are open. See [Feeding a queue runner](#feeding-a-queue-runner). Not combinable with `--json`. |
-| `--apply` | On `bundle` and `merge`. Enables their GitHub writes; without it both are dry runs. See [Common flows](docs/flows.md). |
-| `--yes` | On `bundle` and `merge`, together with `--apply`. Skips initial confirmation and is required when stdin is not a terminal. Merge gates have separate confirmation; see [merge.md](docs/merge.md#confirmation-and-gates). |
+| `--apply` | On `bundle`, `merge` and `bump`. Enables their GitHub writes; without it all three are dry runs. See [Common flows](docs/flows.md). |
+| `--yes` | On `bundle`, `merge` and `bump`, together with `--apply`. Skips initial confirmation and is required when stdin is not a terminal. Merge gates have separate confirmation; see [merge.md](docs/merge.md#confirmation-and-gates). |
 | `--open-pr` | On `bundle` (together with `--apply`): after the last retarget of each bundle, opens the PR `deploy/<date>-<base>` into the base, without merging it. On `merge`: opens that PR only after the last PR of the bundle is merged and its wait is over, which is the one to use for the whole flow, since opening it before the merges starts a round of CI per merge. A deploy PR that already exists is not duplicated. Needs Pull requests: write. |
 | `--color auto\|always\|never` | On `plan` and `bundle`. Colors in the text output. `auto` (the default) colors only on a terminal and honors `NO_COLOR`. `always` colors even when piped, `never` never does. `--json` is never colored. |
 
@@ -712,13 +712,13 @@ pipetrain plan --emit queue --check-feeds
 
 With `--check-feeds`, `plan` runs this same lookup once for each distinct package and version named by a `# wait` line and appends the answer to the line. The ecosystem and feed follow the table above: the org is the first publisher PR's org for NuGet, and for a scoped npm package GitHub Packages is used when a publisher PR's org matches the scope, otherwise npmjs. A failed lookup never aborts the plan or changes its exit code. See [Wait comments](docs/queue-output.md#wait-comments) and the [JSON contract](docs/plan-json.md).
 
-## Bumping a package (dry run)
+## Bumping a package
 
 ```
-pipetrain bump <PACKAGE> [--to <VERSION>] [--ecosystem nuget|npm] [--org <ORG>] [--registry <URL>] [--repo <ORG/REPO>]... [--profile <NAME>] [--only major|minor|patch]... [--changes-only] [--check] [--json]
+pipetrain bump <PACKAGE> [--to <VERSION>] [--ecosystem nuget|npm] [--org <ORG>] [--registry <URL>] [--repo <ORG/REPO>]... [--profile <NAME>] [--only major|minor|patch]... [--changes-only] [--check] [--apply [--yes]] [--json]
 ```
 
-`bump` shows which manifests would move to a version of a package. It is a dry run and only a dry run: there is no `--apply`, and clap rejects it as an unknown option.
+`bump` shows which manifests would move to a version of a package. Without `--apply` it is a dry run and writes nothing. With `--apply` it opens one draft pull request per repo; see [Opening the draft PRs](#opening-the-draft-prs-bump---apply).
 
 What it reads:
 
@@ -726,7 +726,7 @@ What it reads:
 - The repos to scan: every `--repo`, or, when none is given, the exact repo names in the active profile (`[[layer]]` and `[[order]]`).
 - In each repo, the manifests of the default branch for the ecosystem (`.csproj`, `.fsproj` and `.props` for NuGet, `package.json` for npm), through the same cache-aware GitHub client as `plan`. Only `GET` requests and read-only GraphQL queries.
 
-What it never does: write a file, create a branch, commit, push, open a pull request or touch a repo. It prints what it found and stops.
+What the dry run never does: write a file, create a branch, commit, push, open a pull request or touch a repo. It prints what it found and stops.
 
 Output:
 
@@ -756,6 +756,21 @@ Three options narrow what is reported. None of them is needed, and without them 
 Repos that do not reference the package are not listed. A scanned repo name that GitHub does not know is skipped with a warning on stderr, and the scan fails only when no repo could be read. The colors follow `bundle` (`--color auto|always|never`, not allowed with `--json`), and a spinner on stderr covers the scan like it does for `plan` (`--no-progress`, `--no-cache` and `--refresh` work as there).
 
 `--json` prints `{"schema": 1, "package", "ecosystem", "target", "repos": [{"repo", "files": [{"path", "current", "status"}]}], "dry_run": true}` with `status` one of `change`, `up_to_date`, `ahead`, `range` or `other_level`. With `--only`, the object also has `"only": [...]` with the levels chosen (the key is absent otherwise). With `--changes-only`, `files` and `repos` hold only the changes.
+
+### Opening the draft PRs (`bump --apply`)
+
+`--apply` is opt-in. It takes the manifests the dry run lists as `change` and, for each repo, pushes a new branch `pipetrain/bump/<package>-<version>` from the tip of the default branch with one commit (`bump <package> to <version>`) and opens one draft PR into the default branch. The PR title is `Bump <package> to <version>`; its English body names the package, the files with the version they move from and to, and says pipetrain opened it and does not merge it. Without `--apply`, the behavior and `--json` are exactly the dry run's.
+
+Safeguards:
+
+- **Feed proof first.** The target version must be in the package feed (the `feed` lookup, with the same `--ecosystem`, `--org` and `--registry`) before anything is written. Not there: nothing is written and the exit code is the feed's `1`.
+- **Confirmation.** It prints the plan and asks for `yes`, unless `--yes` is given; without a terminal `--yes` is required, and without it the command refuses before any request. `--apply` cannot be combined with `--check`, and `--yes` needs `--apply`.
+- **Isolated and never forced.** Each repo gets a new private clone and worktree under the pipetrain cache (`bump-workspaces`), a new branch and a normal push. A bump branch that already exists is never touched: the repo is skipped. The workspace is removed after a success or a skip and kept after a failure, with its path in the message.
+- **Stops at the first failure.** The repos after it are reported as skipped (`stopped after an earlier failure`) and the exit code is 1.
+- **Per ecosystem.** NuGet: exactly one `.sln` or `.slnx`, a `packages.lock.json` next to every project manifest, then `dotnet restore --use-lock-file` and a `--locked-mode` restore; the commit holds the manifests and the lock files, and only those. npm: the `package.json` is edited in place and there is no restore, so a repo with a lock file (`package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`, `bun.lock`, `bun.lockb`) is skipped, because the lock would go stale.
+- **Needs** local `git` with credentials that can push and a commit identity, a token with Contents and Pull requests write, and the .NET SDK for NuGet repos. The restore evaluates MSBuild from the repo's checkout, so use it only on repos you trust.
+
+The text report prints one line per repo (`opened`, `skipped` or `failed`, with the PR URL or the reason) and a summary such as `1 opened, 0 skipped, 0 failed`. With `--json` it prints `{"schema": 1, "applied", "package", "ecosystem", "target", "repos": [{"repo", "status", "detail", "branch", "commit", "pull_request_url", "files"}]}` and `applied` is `true` only when the writes ran. Run it after the version shows in the feed, for instance after `merge --apply` published the package. The MCP `bump` tool stays a dry run. What `merge --bump` covers and what it does not: [publication-backed preparation](docs/publication-bump.md#what-merge---bump-covers).
 
 | Code | Meaning |
 |---|---|

@@ -68,14 +68,17 @@ fn stdout(output: &Output) -> String {
 }
 
 #[test]
-fn apply_does_not_exist() {
-    let output = bump(&["Acme.Util", "--apply"]);
-    assert!(!output.status.success());
+fn apply_conflicts_with_check_and_yes_needs_apply() {
+    let both = bump(&["Acme.Util", "--apply", "--check"]);
+    assert!(!both.status.success());
     assert!(
-        stderr(&output).contains("unexpected argument '--apply'"),
+        stderr(&both).contains("cannot be used with"),
         "{}",
-        stderr(&output)
+        stderr(&both)
     );
+    let alone = bump(&["Acme.Util", "--yes"]);
+    assert!(!alone.status.success());
+    assert!(stderr(&alone).contains("--apply"), "{}", stderr(&alone));
 }
 
 #[test]
