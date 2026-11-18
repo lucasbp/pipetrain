@@ -1145,7 +1145,7 @@ fn a_pr_that_lost_its_approval_is_not_merged_and_the_rest_are_skipped() {
         "{}",
         run.said(0)
     );
-    assert_eq!(run.step(1).detail, STOPPED);
+    assert!(run.step(1).detail.starts_with("blocked by failed merge of"));
     assert_eq!(run.outcome.code, 1);
     assert!(rig.puts().is_empty());
     assert!(rig.store.state.pending.is_empty());
@@ -1226,7 +1226,7 @@ fn a_branch_that_github_no_longer_calls_clean_is_not_merged() {
             "{state}: {}",
             run.said(0)
         );
-        assert_eq!(run.step(1).detail, STOPPED);
+        assert!(run.step(1).detail.starts_with("blocked by failed merge of"));
         assert_eq!(run.outcome.code, 1);
         assert!(rig.puts().is_empty(), "{state}");
         assert!(rig.store.state.pending.is_empty(), "{state}");
@@ -1769,7 +1769,7 @@ fn open_pr_does_not_open_when_a_merge_before_it_did_not_finish() {
         run.statuses(),
         vec![Status::Failed, Status::Skipped, Status::Skipped]
     );
-    assert_eq!(run.step(2).detail, STOPPED);
+    assert!(run.step(2).detail.starts_with("blocked by failed merge of"));
     assert!(!rig.lines().iter().any(|line| line == PULLS));
 }
 
@@ -5291,4 +5291,156 @@ fn an_inherited_failed_deploy_on_the_same_target_blocks_only_that_lane() {
         assert_eq!(run.outcome.code, 1);
         assert_eq!(rig.store.state.pending.len(), 1);
     }
+}
+
+const UNMERGED_RIG: &str = "no_deploy_repos = [\"acme/sync\", \"acme/portal\", \"acme/auth\"]";
+
+fn unmerged_failure(plan: &Plan, parallelism: usize, settings: Settings) -> (Rig, Run) {
+    let mut rig = Rig::new(UNMERGED_RIG);
+    rig.cfg.max_parallel = parallelism;
+    rig.script()
+        .review
+        .insert(1, "CHANGES_REQUESTED".to_string());
+    let run = rig.run(plan, settings, true, true).unwrap();
+    (rig, run)
+}
+
+fn assert_blocked_by_sdk(run: &Run, target: &str) {
+    let step = step_of(run, target);
+    assert_eq!(step.status, Status::Skipped, "{target}");
+    assert!(step.blocked_by.is_some(), "{target}");
+    assert_ne!(step.detail, STOPPED, "{target}");
+}
+
+#[test]
+fn an_unmerged_failure_does_not_stop_an_independent_pr() {
+    for parallelism in [1, 2] {
+        let mut plan = plan_of(
+            vec![
+                pr("acme/sdk", 1, "feat/1", "main"),
+                pr("acme/sync", 4, "feat/4", "main"),
+            ],
+            Vec::new(),
+        );
+        for item in &mut plan.items {
+            item.stage = item.number as usize;
+        }
+        assert_eq!(merge_numbers(&plan), vec![1, 4]);
+        let (rig, run) = unmerged_failure(&plan, parallelism, applied());
+        assert_eq!(step_of(&run, "acme/sdk#1").status, Status::Failed);
+        assert_eq!(step_of(&run, "acme/sync#4").status, Status::Done);
+        assert_eq!(run.outcome.code, 1);
+        assert_eq!(rig.puts().len(), 1);
+        assert!(rig.store.state.pending.is_empty());
+    }
+}
+
+#[test]
+fn an_unmerged_failure_blocks_dependents_and_runs_the_rest_under_both_policies() {
+    for parallelism in [1, 2] {
+        for policy in [DependencyFailure::Stop, DependencyFailure::Skip] {
+            let settings = Settings {
+                dependency_failure: policy,
+                ..applied()
+            };
+            let (rig, run) = unmerged_failure(&deployment_plan(), parallelism, settings);
+            assert_eq!(step_of(&run, "acme/sdk#1").status, Status::Failed);
+            for dependent in ["acme/portal#2", "acme/auth#3", "acme/auth#5"] {
+                assert_blocked_by_sdk(&run, dependent);
+            }
+            assert_eq!(step_of(&run, "acme/sync#4").status, Status::Done);
+            assert_eq!(run.outcome.code, 1);
+            assert_eq!(rig.puts().len(), 1);
+        }
+    }
+}
+
+#[test]
+fn an_unmerged_failure_blocks_a_package_consumer_and_its_wait() {
+    for parallelism in [1, 2] {
+        let mut plan = deployment_plan();
+        let dependency = &mut plan
+            .items
+            .iter_mut()
+            .find(|item| item.number == 2)
+            .unwrap()
+            .after[0];
+        dependency.rule = pipetrain::planner::Rule::Package;
+        dependency.package = Some("Acme.Sdk".to_string());
+        dependency.version = Some("1.2.3".to_string());
+        let (rig, run) = unmerged_failure(&plan, parallelism, applied());
+        assert_blocked_by_sdk(&run, "acme/portal#2");
+        assert_eq!(step_of(&run, "acme/sync#4").status, Status::Done);
+        assert_eq!(run.gates, 0);
+        assert_eq!(rig.puts().len(), 1);
+    }
+}
+
+#[test]
+fn an_unmerged_failure_blocks_the_same_target_and_lets_other_targets_go_on() {
+    for parallelism in [1, 2] {
+        let plan = plan_of(
+            vec![
+                pr("acme/sdk", 1, "feat/1", "main"),
+                pr("acme/sdk", 6, "feat/6", "main"),
+                pr("acme/sync", 4, "feat/4", "main"),
+            ],
+            Vec::new(),
+        );
+        let (rig, run) = unmerged_failure(&plan, parallelism, applied());
+        assert_eq!(step_of(&run, "acme/sdk#1").status, Status::Failed);
+        assert_blocked_by_sdk(&run, "acme/sdk#6");
+        assert_eq!(step_of(&run, "acme/sync#4").status, Status::Done);
+        assert_eq!(rig.puts().len(), 1);
+    }
+}
+
+#[test]
+fn an_unmerged_failure_with_open_questions_still_stops_everything() {
+    let question = Question::new(
+        None,
+        "unclear-order",
+        "two PRs could go either way".to_string(),
+        "say which goes first",
+    );
+    let mut plan = plan_of(
+        vec![
+            pr("acme/sdk", 1, "feat/1", "main"),
+            pr("acme/sync", 4, "feat/4", "main"),
+        ],
+        vec![question],
+    );
+    for item in &mut plan.items {
+        item.stage = item.number as usize;
+    }
+    let settings = Settings {
+        allow_questions: true,
+        ..applied()
+    };
+    assert_eq!(merge_numbers(&plan), vec![1, 4]);
+    let (rig, run) = unmerged_failure(&plan, 1, settings);
+    assert_eq!(step_of(&run, "acme/sdk#1").status, Status::Failed);
+    let rest = step_of(&run, "acme/sync#4");
+    assert_eq!(rest.status, Status::Skipped);
+    assert_eq!(rest.detail, STOPPED);
+    assert_eq!(run.outcome.code, 1);
+    assert!(rig.puts().is_empty());
+}
+
+#[test]
+fn an_uncertain_outcome_still_stops_everything() {
+    let mut rig = Rig::new(UNMERGED_RIG);
+    rig.script().live_state.insert(1, "unknown".to_string());
+    let plan = plan_of(
+        vec![
+            pr("acme/sdk", 1, "feat/1", "main"),
+            pr("acme/sync", 4, "feat/4", "main"),
+        ],
+        Vec::new(),
+    );
+    let run = rig.go(&plan);
+    assert_eq!(step_of(&run, "acme/sdk#1").status, Status::Stopped);
+    assert_eq!(step_of(&run, "acme/sync#4").detail, STOPPED);
+    assert_eq!(run.outcome.code, EXIT_STOPPED);
+    assert!(rig.puts().is_empty());
 }

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- A PR that fails before it is merged (no longer ready, conflicts, a moved head or base, closed) no longer stops the whole queue. Only the PRs that depend on it through any plan edge (dependency, package, stacked, target) and the PRs on the same repository and base are blocked, with `blocked_by` naming it and the detail `blocked by failed merge of <id>`; independent PRs keep merging, serially and in parallel, and `--dependency-failure` does not change this. The report keeps both lists and the exit code stays 1. Uncertain outcomes, open plan questions and failures that are not a plain merge step still stop everything with `stopped after an earlier failure`. The JSON report only changes in step details; no field is added or removed.
+
 ## 0.9.2
 
 - A pending record inherited from an earlier run whose deploy failed no longer stops every PR of a new queue. When its target is not a target or dependency of any PR in the queue, merge and its dry run say up front that it stays in the state and the queue goes on without it, and the summary lists it as `kept, failed deploy from an earlier run`. On the same target, only that lane is blocked; other repositories and bases proceed. A deploy still running keeps waiting.

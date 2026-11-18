@@ -203,6 +203,13 @@ impl scheduler::Coordinator for Coordinator<'_, '_> {
         }
     }
 
+    fn isolated(&self, id: &str) -> bool {
+        step_index(id)
+            .ok()
+            .and_then(|index| self.steps.get(index))
+            .is_some_and(|step| failure::isolable(self.env.plan, step))
+    }
+
     fn checkpoint(&mut self, id: &str, data: &str) -> Result<(), String> {
         let index = step_index(id)?;
         let checkpoint: Checkpoint =
@@ -237,6 +244,16 @@ impl scheduler::Coordinator for Coordinator<'_, '_> {
             Checkpoint::Finished(step) => {
                 if step.target != *target || step.kind != self.steps[index].kind {
                     return Err("worker result does not belong to this step".to_string());
+                }
+                if failure::isolable(self.env.plan, &step)
+                    && let Some(item) = self
+                        .env
+                        .plan
+                        .items
+                        .iter()
+                        .find(|item| item.id == step.target)
+                {
+                    self.failures.record_unmerged(item, self.env.plan);
                 }
                 if step.status == Status::Failed
                     && step.merge_sha.is_some()
@@ -466,11 +483,12 @@ pub(super) fn execute(
             }
             let failed = matches!(step.status, Status::Failed | Status::Stopped);
             let fatal = step.status == Status::Stopped
-                || step.merge_sha.is_none()
-                || (step.kind != Kind::Resume
-                    && !local.state.pending.iter().any(|pending| {
-                        pending.id == step.target && pending.continuation.is_some()
-                    }));
+                || (!failure::isolable(plan, &step)
+                    && (step.merge_sha.is_none()
+                        || (step.kind != Kind::Resume
+                            && !local.state.pending.iter().any(|pending| {
+                                pending.id == step.target && pending.continuation.is_some()
+                            }))));
             let outcome = if failed {
                 Err(Failure {
                     message: step.detail.clone(),
