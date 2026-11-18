@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fix a DDL or infra gate that is the base branch of a stack: the stacked children now merge first and the gate becomes a late gate, with the pause right before it, instead of the `gate-has-predecessor` question that made `merge --apply` refuse the queue. Other gates still go first, and PRs that depend on the parent still come after it.
+
 ## 0.9.1
 
 - Add opt-in `merge --admin`: a repository administrator can merge a PR whose only blocker is a missing required review. Failing, pending or missing required checks, conflicts, out-of-date branches under a strict rule, drafts, requested changes, package gates and every other blocker keep refusing.

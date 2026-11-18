@@ -506,6 +506,66 @@ fn merges_without(lines: &[String], skip: &str) -> Vec<String> {
         .collect()
 }
 
+fn stacked_gate_parent() -> Pr {
+    let mut parent = late_pr("acme/auth", 40, "feat/totp-hardening");
+    parent.files = vec![ChangedFile {
+        path: "infra/main.tf".to_string(),
+        patch: None,
+    }];
+    parent
+}
+
+fn stacked_child(number: u64, head: &str) -> Pr {
+    let mut child = late_pr("acme/auth", number, head);
+    child.base_ref = "feat/totp-hardening".to_string();
+    child
+}
+
+fn stacked_gate_prs() -> Vec<Pr> {
+    vec![
+        stacked_gate_parent(),
+        stacked_child(41, "feat/totp-a"),
+        stacked_child(42, "feat/totp-b"),
+        late_pr("acme/auth", 48, "feat/after"),
+        late_pr("acme/other", 7, "feat/other"),
+    ]
+}
+
+#[test]
+fn a_gate_that_is_the_base_of_a_stack_plans_without_questions() {
+    let built = late_plan(stacked_gate_prs());
+    assert!(built.questions.is_empty(), "{:?}", built.questions);
+    let parent = built.items.iter().find(|i| i.id == "acme/auth#40").unwrap();
+    assert!(parent.gate_late);
+    assert!(parent.manual_pause);
+}
+
+#[test]
+fn stacked_children_go_first_then_the_pause_then_the_gate_parent_then_its_dependent() {
+    let built = late_plan(stacked_gate_prs());
+    let lines = emit::queue_lines(&built);
+    let at = |needle: &str| lines.iter().position(|l| l == needle).unwrap();
+    let gate = lines.iter().position(|l| l.starts_with("# gate:")).unwrap();
+    assert!(
+        lines[gate]
+            .starts_with("# gate: acme/auth#40 waits for acme/auth#41 acme/auth#42 (stacked:"),
+        "{}",
+        lines[gate]
+    );
+    assert_eq!(lines[gate + 1], PAUSE_LINE);
+    assert_eq!(lines.iter().filter(|l| *l == PAUSE_LINE).count(), 1);
+    assert!(at("merge:acme/auth#41") < gate);
+    assert!(at("merge:acme/auth#42") < gate);
+    assert!(at("merge:acme/other#7") < gate);
+    assert!(gate < at("merge:acme/auth#40"));
+    assert!(at("merge:acme/auth#40") < at("merge:acme/auth#48"));
+    assert!(
+        lines.iter().position(|l| l.starts_with("# step ")).unwrap() < gate,
+        "{lines:?}"
+    );
+    assert_ne!(lines[0], PAUSE_LINE);
+}
+
 #[test]
 fn a_late_gate_waits_for_its_package_predecessor_and_pauses_right_before_it() {
     let built = late_plan(vec![
