@@ -224,15 +224,15 @@ fn two_packages_for_one_consumer_come_out_in_a_stable_order() {
     assert_eq!(lines, queue(extra, prs(), &[]));
 }
 
-const CMUTIL_EXTRA: &str = "[packages]\n\"cmutil\" = \"acme/cmutil\"\n";
+const ACMEUTIL_EXTRA: &str = "[packages]\n\"acmeutil\" = \"acme/lib\"\n";
 
-fn cmutil_prs(version: &str) -> Vec<Pr> {
+fn acmeutil_prs(version: &str) -> Vec<Pr> {
     let patch = format!(
-        "-    <PackageReference Include=\"CmUtil\" Version=\"1.2610.3022.39\" />\n+    <PackageReference Include=\"CmUtil\" Version=\"{version}\" />"
+        "-    <PackageReference Include=\"AcmeUtil\" Version=\"1.2610.3022.39\" />\n+    <PackageReference Include=\"AcmeUtil\" Version=\"{version}\" />"
     );
     vec![
         bump_patch(pr("acme/api", 5, "feat/a"), "src/Api/Api.csproj", &patch),
-        pr("acme/cmutil", 6, "feat/b"),
+        pr("acme/lib", 6, "feat/b"),
     ]
 }
 
@@ -249,32 +249,32 @@ fn consumer_after(built: &plan::Plan) -> serde_json::Value {
 
 #[test]
 fn the_wait_names_the_version_the_consumer_bumps_to() {
-    let lines = queue(CMUTIL_EXTRA, cmutil_prs("1.2610.3022.40"), &[]);
+    let lines = queue(ACMEUTIL_EXTRA, acmeutil_prs("1.2610.3022.40"), &[]);
     let at = position(&lines, "acme/api#5");
     assert_eq!(
         lines[at - 1],
-        "# wait: package cmutil 1.2610.3022.40 from acme/cmutil#6 must be published before acme/api#5"
+        "# wait: package acmeutil 1.2610.3022.40 from acme/lib#6 must be published before acme/api#5"
     );
 }
 
 #[test]
 fn an_unreadable_version_keeps_the_old_wait_format() {
-    let lines = queue(CMUTIL_EXTRA, cmutil_prs("$(CmUtilVersion)"), &[]);
+    let lines = queue(ACMEUTIL_EXTRA, acmeutil_prs("$(AcmeUtilVersion)"), &[]);
     let at = position(&lines, "acme/api#5");
     assert_eq!(
         lines[at - 1],
-        "# wait: package cmutil from acme/cmutil#6 must be published before acme/api#5"
+        "# wait: package acmeutil from acme/lib#6 must be published before acme/api#5"
     );
 }
 
 #[test]
 fn json_after_carries_the_version_only_when_known() {
-    let known = planned(CMUTIL_EXTRA, cmutil_prs("1.2610.3022.40"), &[]);
+    let known = planned(ACMEUTIL_EXTRA, acmeutil_prs("1.2610.3022.40"), &[]);
     let entry = consumer_after(&known);
-    assert_eq!(entry["package"], "cmutil");
+    assert_eq!(entry["package"], "acmeutil");
     assert_eq!(entry["version"], "1.2610.3022.40");
-    let unknown = planned(CMUTIL_EXTRA, cmutil_prs("$(CmUtilVersion)"), &[]);
+    let unknown = planned(ACMEUTIL_EXTRA, acmeutil_prs("$(AcmeUtilVersion)"), &[]);
     let entry = consumer_after(&unknown);
-    assert_eq!(entry["package"], "cmutil");
+    assert_eq!(entry["package"], "acmeutil");
     assert!(entry.get("version").is_none());
 }
