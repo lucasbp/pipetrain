@@ -63,6 +63,7 @@ Small, well understood, in this order:
 3. A deeper conflict report that simulates the merge, beyond files changed by more than one PR.
 4. `feed`, `bump` and `plan --check-feeds` for Cargo (crates.io), `pyproject.toml` (PyPI) and Go modules: today they only know NuGet and npm.
 5. `cargo audit` (and `cargo deny` if it fits) in the CI workflow, so advisories fail a PR instead of being checked by hand.
+6. Compact `merge` and `plan` output by default: one line per PR (step, repo#n, state and the single cause that blocks it) and a short footer with gates and open questions. Today a run prints every check of every PR with its URL and repeats the same cmutil dependency list on each line, so 18 PRs become hundreds of lines and the open question at the end is easy to miss. Per-check detail and full causes move to `--verbose`.
 
 ## Later
 
