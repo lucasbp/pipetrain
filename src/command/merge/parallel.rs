@@ -247,7 +247,8 @@ impl scheduler::Coordinator for Coordinator<'_, '_> {
                         .iter()
                         .find(|pending| pending.id == step.target)
                 {
-                    self.failures.record(pending, self.env.plan);
+                    self.failures
+                        .record(pending, self.env.plan, step.kind == Kind::Resume);
                 }
                 self.steps[index] = step;
                 Ok(())
@@ -466,11 +467,10 @@ pub(super) fn execute(
             let failed = matches!(step.status, Status::Failed | Status::Stopped);
             let fatal = step.status == Status::Stopped
                 || step.merge_sha.is_none()
-                || !local
-                    .state
-                    .pending
-                    .iter()
-                    .any(|pending| pending.id == step.target && pending.continuation.is_some());
+                || (step.kind != Kind::Resume
+                    && !local.state.pending.iter().any(|pending| {
+                        pending.id == step.target && pending.continuation.is_some()
+                    }));
             let outcome = if failed {
                 Err(Failure {
                     message: step.detail.clone(),

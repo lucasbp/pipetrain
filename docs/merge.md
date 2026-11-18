@@ -265,6 +265,20 @@ stale_pending_hours = 24
 
 Neither stale markers nor a different current selection or profile filter, discard or change the order of inherited pending work. Apply still resumes all pending records first. The preview is a snapshot taken before confirmation and execution, including in the final JSON report.
 
+### A failed inherited deploy does not block an unrelated queue
+
+A pending record left by an earlier run whose deploy failed used to stop every step of the new run, including PRs of repositories with no relation to it. The reason is that the independence proof saved with the record describes the old queue, so nothing in the new queue could be shown independent of it.
+
+Before the confirmation, merge, dry runs included, reads the saved SHA's workflow runs once for each inherited record whose target (repository and base branch, or a deploy branch the run would open) is not the target of any PR in the queue and is not a dependency of one. If that deploy failed, the preview prints one line such as `inherited pending acme/api#34 into main at e350a23 has a failed deploy (...); it stays in the state and the queue goes on without it`. The resume step still runs, so a later deploy that contains the saved SHA can still resolve it. If it does not, the step ends `skipped` with a detail starting `kept, failed deploy from an earlier run`, the record stays in the state file untouched, the exit code is not affected by it, and the final summary lists it as `kept, failed deploy from an earlier run: <id>`.
+
+Cases that keep the previous behavior:
+
+- A queue with no PRs: the run exists only to resume, so the failure is reported as a failure.
+- A deploy that is still running or whose runs cannot be read: the resume step waits and stops resumably, and the rest of the run is skipped.
+- A failed inherited record on the same repository and base as a PR in the queue: that PR and the PRs that depend on it are blocked (`blocked by failed deploy of ...`), and the resume step is `failed`. Other repositories and bases proceed, with or without parallelism; no saved independence proof is required of them because the proof belongs to the earlier queue.
+
+The additive text lines are not part of the JSON report: JSON consumers read the resume step, whose `status` is `skipped` and whose `detail` starts with `kept, failed deploy from an earlier run`.
+
 ## Exit codes
 
 | Code | Meaning |

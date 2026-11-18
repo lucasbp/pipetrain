@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- A pending record inherited from an earlier run whose deploy failed no longer stops every PR of a new queue. When its target is not a target or dependency of any PR in the queue, merge and its dry run say up front that it stays in the state and the queue goes on without it, and the summary lists it as `kept, failed deploy from an earlier run`. On the same target, only that lane is blocked; other repositories and bases proceed. A deploy still running keeps waiting.
+
 ## 0.9.1
 
 - Add opt-in `merge --admin`: a repository administrator can merge a PR whose only blocker is a missing required review. Failing, pending or missing required checks, conflicts, out-of-date branches under a strict rule, drafts, requested changes, package gates and every other blocker keep refusing.

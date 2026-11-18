@@ -38,6 +38,7 @@ const MERGEABILITY_PAUSE: Duration = Duration::from_secs(5);
 const TRAIN_NOTICE: &str =
     "intermediate train branch; promotion to the release target is still required";
 const METHODS: [&str; 3] = ["merge", "squash", "rebase"];
+const KEPT: &str = "kept, failed deploy from an earlier run";
 
 pub struct MergeOptions {
     pub admin: bool,
@@ -972,6 +973,86 @@ fn resume_one(
         recovered.sha = Some(sha);
         recovery::resolve(env, &recovered, client, store, hooks, report);
     }
+    if report.inherited && report.status == Status::Failed && report.merge_sha.is_some() {
+        report.status = Status::Skipped;
+        report.detail = format!("{KEPT}: {}", report.detail);
+    }
+}
+
+fn is_kept(step: &StepReport) -> bool {
+    step.kind == Kind::Resume && step.detail.starts_with(KEPT)
+}
+
+fn related_to_queue(plan: &Plan, bundles: &BTreeMap<String, Bundled>, pending: &Pending) -> bool {
+    plan.items.iter().any(|item| {
+        item.id == pending.id
+            || item.after.iter().any(|after| after.id == pending.id)
+            || (format!("{}/{}", item.org, item.repo).eq_ignore_ascii_case(&pending.repo)
+                && item.base == pending.base)
+    }) || bundles.values().any(|bundle| {
+        bundle.slug.eq_ignore_ascii_case(&pending.repo) && bundle.branch == pending.base
+    })
+}
+
+fn deploy_failed(client: &mut Client, pending: &Pending) -> Option<String> {
+    let sha = pending.sha.as_deref()?;
+    let prediction = pending
+        .deploy_prediction
+        .as_ref()
+        .filter(|reading| matches!(reading, PushRuns::Expected { .. }));
+    let (runs, _) = client
+        .workflow_runs(&pending.repo, sha, prediction.is_none())
+        .ok()?;
+    let verdict = prediction.map_or_else(
+        || judge(&runs),
+        |prediction| judge_expected(&runs, prediction),
+    );
+    match verdict {
+        Verdict::Failed(text) => Some(text),
+        _ => None,
+    }
+}
+
+fn set_aside_inherited(
+    report: &mut Report,
+    plan: &Plan,
+    bundles: &BTreeMap<String, Bundled>,
+    store: &Store,
+    client: &mut Client,
+) {
+    if plan.items.is_empty() {
+        return;
+    }
+    for step in &mut report.steps {
+        if step.kind != Kind::Resume {
+            continue;
+        }
+        let Some(pending) = store
+            .state
+            .pending
+            .iter()
+            .find(|pending| pending.id == step.target)
+        else {
+            continue;
+        };
+        if related_to_queue(plan, bundles, pending) {
+            continue;
+        }
+        let Some(reason) = deploy_failed(client, pending) else {
+            continue;
+        };
+        step.inherited = true;
+        step.detail = format!("{KEPT}; the queue goes on without it");
+        report.notices.push(format!(
+            "inherited pending {} into {} at {} has a failed deploy ({reason}); it stays in the state and the queue goes on without it",
+            pending.id,
+            pending.base,
+            pending
+                .sha
+                .as_deref()
+                .map_or_else(|| "SHA unknown".to_string(), short),
+        ));
+    }
 }
 
 fn gate_step(env: &Env, hooks: &mut Hooks, report: &mut StepReport) {
@@ -1273,6 +1354,7 @@ fn merge_plan_prepared(
         steps: planned_steps(plan, cfg),
         not_merging: not_merging(plan),
         questions: emit::question_lines(plan),
+        notices: Vec::new(),
     };
     for step in &mut report.steps {
         if step.kind == Kind::Merge {
@@ -1290,7 +1372,8 @@ fn merge_plan_prepared(
                     Some(env.push_reading(client, &key, &item.base, &item.sha, &item.sha));
             }
         }
-        arrange(&mut report, plan, store, settings);
+        let bundles = arrange(&mut report, plan, store, settings);
+        set_aside_inherited(&mut report, plan, &bundles, store, client);
         report.api_estimate = estimate(plan, cfg, settings, store, requests, &report.steps);
         return Ok(Outcome {
             report,
@@ -1308,6 +1391,7 @@ fn merge_plan_prepared(
         });
     }
     let bundles = arrange(&mut report, plan, store, settings);
+    set_aside_inherited(&mut report, plan, &bundles, store, client);
     if report.steps.is_empty() {
         return Ok(Outcome {
             report,
@@ -1417,8 +1501,11 @@ fn merge_plan_prepared(
                     .iter()
                     .find(|pending| pending.id == step.target);
                 match pending {
-                    Some(pending) if pending.continuation.is_some() => {
-                        let has_consumers = failures.record(pending, plan);
+                    Some(pending)
+                        if pending.continuation.is_some() || step.kind == Kind::Resume =>
+                    {
+                        let has_consumers =
+                            failures.record(pending, plan, step.kind == Kind::Resume);
                         if has_consumers && settings.dependency_failure == DependencyFailure::Stop {
                             step.detail.push_str(
                                 "; dependent PRs require this deploy (--dependency-failure stop)",
@@ -1598,6 +1685,9 @@ fn render_with_steps(report: &Report, color: bool, include_steps: bool) -> Strin
             report.max_parallel
         ));
         out.push_str(&report.state.render());
+        for notice in &report.notices {
+            out.push_str(&format!("{}\n", tint(color, yellow, notice)));
+        }
         let estimate = &report.api_estimate;
         out.push_str(&format!("estimated API requests: {} (discovery {}, checks and merges {}, deploy polls {}); budget {}\n", estimate.total, estimate.discovery, estimate.checks, estimate.deploy_polls, estimate.budget));
         if estimate.exceeds_budget {
@@ -1691,6 +1781,9 @@ fn render_with_steps(report: &Report, color: bool, include_steps: bool) -> Strin
                     step.target, admin.reason
                 ));
             }
+        }
+        for step in report.steps.iter().filter(|step| is_kept(step)) {
+            out.push_str(&format!("{KEPT}: {}\n", step.target));
         }
         let summary = &report.summary;
         out.push_str(&format!(
