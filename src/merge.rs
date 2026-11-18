@@ -666,7 +666,7 @@ pub struct NotMerging {
     pub reasons: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 pub struct ApiEstimate {
     pub discovery: u64,
     pub checks: u64,
