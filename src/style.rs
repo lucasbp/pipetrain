@@ -21,3 +21,7 @@ pub(crate) fn green(text: &str) -> String {
 pub(crate) fn yellow(text: &str) -> String {
     paint("33", text)
 }
+
+pub(crate) fn cyan(text: &str) -> String {
+    paint("36", text)
+}

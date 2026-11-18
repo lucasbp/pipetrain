@@ -203,7 +203,7 @@ fn failed_checks_keep_names_states_and_both_kinds_of_urls_in_reports_and_text() 
             checks[1],
             json!({"name": "package-version", "state": "FAILURE", "url": "https://example.test/acme/api/check/1"})
         );
-        let output = fixture.run(command, &[1], &[]);
+        let output = fixture.run(command, &[1], &["--verbose"]);
         let text = String::from_utf8(output.stdout).unwrap();
         for value in [
             "ci/build",
@@ -214,6 +214,16 @@ fn failed_checks_keep_names_states_and_both_kinds_of_urls_in_reports_and_text() 
             "https://example.test/acme/api/status/2",
         ] {
             assert!(text.contains(value), "{text}");
+        }
+        if command == "merge" {
+            let compact = String::from_utf8(fixture.run(command, &[1], &[]).stdout).unwrap();
+            assert!(!compact.contains("https://"), "{compact}");
+            assert!(!compact.contains("ERROR"), "{compact}");
+            assert!(
+                compact.contains("checks ci/build, package-version failing"),
+                "{compact}"
+            );
+            assert!(compact.contains("blocked"), "{compact}");
         }
     }
 }

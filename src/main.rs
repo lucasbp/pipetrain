@@ -795,7 +795,10 @@ struct MergeArgs {
     )]
     date: Option<String>,
 
-    #[arg(long, help = "Log every API request to stderr")]
+    #[arg(
+        long,
+        help = "Log every API request to stderr and print the full merge detail (per-check lines, URLs, every step) instead of the compact summary"
+    )]
     verbose: bool,
 
     #[arg(

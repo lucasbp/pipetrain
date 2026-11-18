@@ -221,7 +221,7 @@ pipetrain plan [OPTIONS] [PRS]...
 | `--mine` | On `plan` and `bundle`. Show only PRs by the token's own login. See [Only your PRs](#only-your-prs). Cannot be combined with `--all-authors`. |
 | `--author <login>` | On `plan` and `bundle`. Show only PRs by this author; repeatable, `@me` is you. Cannot be combined with `--all-authors`. |
 | `--all-authors` | On `plan` and `bundle`. Ignore the authors set in the config and show every author. |
-| `--verbose` | Log every API request to stderr. |
+| `--verbose` | Log every API request to stderr. On `merge` it also prints the full detail (per-check lines, URLs, every step) instead of the compact output described in [docs/merge.md](docs/merge.md#what-the-text-output-shows). |
 | `--no-cache` | Neither read nor write the [local cache](#local-cache). Cannot be combined with `--refresh`. |
 | `--refresh` | Ignore what the cache has, fetch it again and rewrite it. Cannot be combined with `--no-cache`. |
 | `--check-feeds` | Only on `plan`. Asks the package feeds whether the version each `# wait` line names is already published, and says so on the line: `(published)`, `(not yet)` or `(feed check failed: ...)`. Off by default, so without it there are no extra requests and the output is unchanged. Informational only: order, gates, pauses and the exit code never change. Needs a token that can read packages (`read:packages`) for GitHub Packages feeds. See [Checking a package feed](#checking-a-package-feed). |

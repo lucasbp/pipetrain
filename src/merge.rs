@@ -9,7 +9,7 @@ use crate::github::Run;
 
 mod storage;
 
-pub use storage::{StatePreview, resolve_state_path};
+pub use storage::{PendingPreview, StatePreview, resolve_state_path};
 
 pub const SCHEMA: u32 = 2;
 pub const REPORT_SCHEMA: u32 = 1;
