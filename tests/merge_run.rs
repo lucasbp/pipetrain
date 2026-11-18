@@ -2221,7 +2221,7 @@ fn leaf_failure_continues_independent_prs_in_order_and_stays_failed_in_json() {
 }
 
 #[test]
-fn publisher_failure_stops_by_default_but_skip_blocks_transitive_consumers() {
+fn publisher_failure_stop_halts_the_queue_but_skip_blocks_transitive_consumers() {
     for policy in [DependencyFailure::Stop, DependencyFailure::Skip] {
         let mut rig = Rig::new("");
         let plan = deployment_plan();

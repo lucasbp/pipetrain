@@ -712,8 +712,8 @@ struct MergeArgs {
     #[arg(
         long,
         value_enum,
-        default_value = "stop",
-        help = "After a dependency publisher deploy fails: stop the queue, or skip blocked PRs and continue proven independent items"
+        default_value = "skip",
+        help = "After a dependency publisher deploy fails: skip blocked PRs and continue proven independent items (default), or stop the queue"
     )]
     dependency_failure: pipetrain::merge::DependencyFailure,
 

@@ -3,6 +3,7 @@
 ## Unreleased
 
 - A PR that fails before it is merged (no longer ready, conflicts, a moved head or base, closed) no longer stops the whole queue. Only the PRs that depend on it through any plan edge (dependency, package, stacked, target) and the PRs on the same repository and base are blocked, with `blocked_by` naming it and the detail `blocked by failed merge of <id>`; independent PRs keep merging, serially and in parallel, and `--dependency-failure` does not change this. The report keeps both lists and the exit code stays 1. Uncertain outcomes, open plan questions and failures that are not a plain merge step still stop everything with `stopped after an earlier failure`. The JSON report only changes in step details; no field is added or removed.
+- The default of `--dependency-failure` changes from `stop` to `skip`: when the deploy of a dependency publisher fails, only its consumers and same-target PRs are blocked and proven independent PRs keep going. Pass `--dependency-failure stop` to get the previous behavior, where that failure stops the whole remaining queue.
 
 ## 0.9.2
 
