@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::Bundled;
-use crate::merge::{Continuation, Kind, Pending, State, StepReport};
+use crate::merge::{Continuation, Kind, Pending, State, Status, StepReport};
 use crate::plan::Plan;
 use crate::planner::{Item, Rule};
 
@@ -54,9 +54,21 @@ fn has_consumers(plan: &Plan, id: &str, dependents: &BTreeSet<String>) -> bool {
 }
 
 struct FailedDeploy {
-    pending: Pending,
+    id: String,
+    repo: String,
+    base: String,
+    continuation: Option<Continuation>,
     dependents: BTreeSet<String>,
     inherited: bool,
+    unmerged: bool,
+}
+
+pub(super) fn isolable(plan: &Plan, step: &StepReport) -> bool {
+    step.kind == Kind::Merge
+        && step.status == Status::Failed
+        && step.merge_sha.is_none()
+        && plan.questions.is_empty()
+        && plan.items.iter().any(|item| item.id == step.target)
 }
 
 #[derive(Default)]
@@ -71,18 +83,19 @@ pub(super) struct Blocked {
 
 impl FailedDeploy {
     fn blocked(&self, reason: String) -> Blocked {
+        let what = if self.unmerged { "merge" } else { "deploy" };
         Blocked {
-            id: self.pending.id.clone(),
-            detail: format!("blocked by failed deploy of {}: {reason}", self.pending.id),
+            id: self.id.clone(),
+            detail: format!("blocked by failed {what} of {}: {reason}", self.id),
         }
     }
 
     fn same_target(&self, repo: &str, base: &str) -> bool {
-        self.pending.repo.eq_ignore_ascii_case(repo) && self.pending.base == base
+        self.repo.eq_ignore_ascii_case(repo) && self.base == base
     }
 
     fn item(&self, item: &Item) -> Option<Blocked> {
-        if self.dependents.contains(&item.id) || self.pending.id == item.id {
+        if self.dependents.contains(&item.id) || self.id == item.id {
             return Some(self.blocked(format!("{} depends on it", item.id)));
         }
         let repo = format!("{}/{}", item.org, item.repo);
@@ -90,8 +103,8 @@ impl FailedDeploy {
             return Some(self.blocked(format!("same target {repo}@{}", item.base)));
         }
         let proven = self.inherited
+            || self.unmerged
             || self
-                .pending
                 .continuation
                 .as_ref()
                 .and_then(|saved| saved.independent.get(&item.id))
@@ -117,11 +130,27 @@ impl DeployFailures {
                 .as_ref()
                 .is_some_and(|saved| saved.has_consumers);
         self.failures.push(FailedDeploy {
-            pending: pending.clone(),
+            id: pending.id.clone(),
+            repo: pending.repo.clone(),
+            base: pending.base.clone(),
+            continuation: pending.continuation.clone(),
             dependents,
             inherited,
+            unmerged: false,
         });
         has_consumers
+    }
+
+    pub fn record_unmerged(&mut self, item: &Item, plan: &Plan) {
+        self.failures.push(FailedDeploy {
+            id: item.id.clone(),
+            repo: format!("{}/{}", item.org, item.repo),
+            base: item.base.clone(),
+            continuation: None,
+            dependents: downstream(plan, &item.id),
+            inherited: false,
+            unmerged: true,
+        });
     }
 
     pub fn blocker(

@@ -458,6 +458,105 @@ fn chains(files: &[(String, String)], expected: &[String]) -> (Vec<String>, Vec<
     )
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MaxBehind {
+    Found { max: u32, source: String },
+    Unknown { reason: String },
+}
+
+impl MaxBehind {
+    fn unknown(reason: impl Into<String>) -> Self {
+        Self::Unknown {
+            reason: reason.into(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct LimitScan {
+    values: std::collections::BTreeSet<u32>,
+    unreadable: bool,
+}
+
+fn limit_value(value: &Yaml) -> Option<u32> {
+    match value {
+        Yaml::Integer(number) => u32::try_from(*number).ok(),
+        Yaml::String(text) => text.trim().parse().ok(),
+        _ => None,
+    }
+}
+
+fn limit_in_text(text: &str, scan: &mut LimitScan) {
+    static FLAG: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let flag = FLAG.get_or_init(|| {
+        Regex::new(r#"(?i)max[-_]behind[=:\s]+["']?(\d+)\b"#).expect("valid regex")
+    });
+    for caps in flag.captures_iter(text) {
+        match caps[1].parse() {
+            Ok(number) => {
+                scan.values.insert(number);
+            }
+            Err(_) => scan.unreadable = true,
+        }
+    }
+}
+
+fn limit_in_yaml(value: &Yaml, scan: &mut LimitScan) {
+    match value {
+        Yaml::Hash(map) => {
+            for (key, inner) in map {
+                let named = matches!(
+                    key,
+                    Yaml::String(name) if name.trim().to_ascii_lowercase().replace('-', "_") == "max_behind"
+                );
+                if named {
+                    match limit_value(inner) {
+                        Some(number) => {
+                            scan.values.insert(number);
+                        }
+                        None => scan.unreadable = true,
+                    }
+                }
+                limit_in_yaml(inner, scan);
+            }
+        }
+        Yaml::Array(items) => items.iter().for_each(|item| limit_in_yaml(item, scan)),
+        Yaml::String(text) => limit_in_text(text, scan),
+        _ => {}
+    }
+}
+
+pub fn max_behind(files: &[(String, String)]) -> MaxBehind {
+    let mut found: std::collections::BTreeMap<u32, Vec<&str>> = std::collections::BTreeMap::new();
+    for (path, text) in files {
+        let Ok(documents) = YamlLoader::load_from_str(text) else {
+            return MaxBehind::unknown(format!("{path} is not valid YAML"));
+        };
+        let mut scan = LimitScan::default();
+        for document in &documents {
+            limit_in_yaml(document, &mut scan);
+        }
+        if scan.unreadable {
+            return MaxBehind::unknown(format!("max-behind in {path} is not a literal number"));
+        }
+        for number in scan.values {
+            found.entry(number).or_default().push(path);
+        }
+    }
+    let mut entries = found.into_iter();
+    match (entries.next(), entries.next()) {
+        (None, _) => MaxBehind::unknown("no max-behind setting in the workflows"),
+        (Some((max, paths)), None) => MaxBehind::Found {
+            max,
+            source: paths[0].to_string(),
+        },
+        (Some((first, first_paths)), Some((second, second_paths))) => MaxBehind::unknown(format!(
+            "the workflows disagree: {first} in {}, {second} in {}",
+            first_paths[0], second_paths[0]
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

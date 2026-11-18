@@ -293,6 +293,20 @@ fn causes_are_plain_language() {
 }
 
 #[test]
+fn package_release_behind_reads_in_plain_words() {
+    let raw = "references acme-lib 1.0.0; the queue publishes 2 new versions of it (acme/lib#1, acme/lib#2), so this PR will be 2 behind and the repo check allows 1 (max-behind 1 in .github/workflows/ci.yml)";
+    assert_eq!(
+        plain_cause(raw),
+        "queue publishes 2 versions of acme-lib, repo accepts at most 1 behind"
+    );
+    let one = "references acme-lib 1.0.0; the queue publishes 1 new version of it (acme/lib#1), so this PR will be 1 behind and the repo check allows 0 (merge.package_max_behind = 0 from the config)";
+    assert_eq!(
+        plain_cause(one),
+        "queue publishes 1 version of acme-lib, repo accepts at most 0 behind"
+    );
+}
+
+#[test]
 fn short_ids_drop_the_org() {
     assert_eq!(short("acme/api#12"), "api#12");
     assert_eq!(short("gate"), "gate");

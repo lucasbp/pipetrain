@@ -123,6 +123,7 @@ timeout_minutes = 30
 poll_seconds = 15
 package_poll_seconds = 10
 package_wait_seconds = 600
+# package_max_behind = 1
 no_run_grace_seconds = 120
 no_deploy_repos = []
 

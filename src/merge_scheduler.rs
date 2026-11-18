@@ -65,6 +65,9 @@ pub trait Coordinator {
     }
     fn confirm(&mut self, job: &Job) -> Result<(), String>;
     fn progress(&mut self, id: &str, message: &str);
+    fn isolated(&self, _id: &str) -> bool {
+        false
+    }
     fn checkpoint(&mut self, _id: &str, _data: &str) -> Result<(), String> {
         Err("coordinator does not support worker checkpoints".to_string())
     }
@@ -361,7 +364,8 @@ where
                     if fatal
                         || (matches!(status, Status::Failed { .. })
                             && job.publisher
-                            && policy == FailurePolicy::StopOnPublisher)
+                            && policy == FailurePolicy::StopOnPublisher
+                            && !coordinator.isolated(&id))
                     {
                         report.stopped = true;
                     }

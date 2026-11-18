@@ -94,11 +94,31 @@ pub fn plain_cause(reason: &str) -> String {
     if let Some(rest) = reason.strip_prefix("waiting for package ") {
         return format!("waiting for package {}", shorten(rest));
     }
+    if let Some(text) = release_behind(reason) {
+        return text;
+    }
     if let Some((_, rest)) = reason.split_once(" depends on ") {
         let target = rest.split([',', ';']).next().unwrap_or(rest).trim();
         return format!("depends on {} first", shorten(target));
     }
     shorten(reason)
+}
+
+fn number_after(text: &str, marker: &str) -> Option<String> {
+    let rest = text.split_once(marker)?.1;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    (!digits.is_empty()).then_some(digits)
+}
+
+fn release_behind(reason: &str) -> Option<String> {
+    let rest = reason.strip_prefix("references ")?;
+    let package = rest.split_whitespace().next()?;
+    let count = number_after(reason, "the queue publishes ")?;
+    let limit = number_after(reason, "the repo check allows ")?;
+    let noun = if count == "1" { "version" } else { "versions" };
+    Some(format!(
+        "queue publishes {count} {noun} of {package}, repo accepts at most {limit} behind"
+    ))
 }
 
 fn wait_cause(text: &str) -> String {

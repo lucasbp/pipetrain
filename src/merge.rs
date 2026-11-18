@@ -209,8 +209,8 @@ pub struct Continuation {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum DependencyFailure {
-    #[default]
     Stop,
+    #[default]
     Skip,
 }
 

@@ -42,6 +42,7 @@ The causes come from the preflight and merge causes that already exist, worded f
 | `merge conflict` | `conflict with base` |
 | `branch behind its base, update it` | the same words |
 | `branch protection blocks merge (BLOCKED)` | `blocked by branch protection (usually a missing approval or check)` |
+| `package-release-behind` | `queue publishes 2 versions of acme-lib, repo accepts at most 1 behind` |
 | a PR that waits for another | `depends on repo#n first` |
 
 A cause that has no wording keeps its original text. Only the first cause is shown on the line; `(+N more, see --verbose)` says there are others.
@@ -240,6 +241,8 @@ Phases include readiness, merging, waiting for deploy (with expected workflow pa
 
 When the plan has open questions (`? ...` lines, the ones that make `plan --emit queue` exit with 3) `--apply` merges nothing and exits with 3. `--allow-questions` merges anyway. The order of the plan is a guess for what the questions are about, so read them first.
 
+Among those questions is `package-release-behind`: before the run, the plan and the dry run flag every PR whose repo version check (`max-behind`, read from its workflows) will fail because the queue itself publishes more new versions of a package than the check allows. The question gives the package, the referenced version, the number of versions the queue publishes and the limit. The PR shows as `waiting` in the preflight. If the limit cannot be read the PR only carries a `(not confirmed)` warning. See `docs/planner.md` for how releases are counted.
+
 ## Timeouts
 
 | Setting | Default | What |
@@ -249,6 +252,7 @@ When the plan has open questions (`? ...` lines, the ones that make `plan --emit
 | `merge.poll_seconds` | `15` | Time between two polls. |
 | `merge.package_poll_seconds` | `10` | Seconds between package feed checks; values below 1 use 1 second. |
 | `merge.package_wait_seconds` | `600` | Package wait timeout in seconds, independently of deploy timeouts. `0` checks once without sleeping. |
+| `merge.package_max_behind` | none | Version limit used by the `package-release-behind` preflight when the consumer repo workflows do not state one. Without it and without a readable workflow limit, the preflight only warns `(not confirmed)`. |
 | `merge.no_run_grace_seconds` | `120` | How long to wait for the first workflow run to appear. |
 | `merge.no_deploy_repos` | `[]` | Globs of repos that have no deploy workflow on push. |
 | `merge.method` | `"merge"` | `merge`, `squash` or `rebase`. |
@@ -372,7 +376,7 @@ The additive text lines are not part of the JSON report: JSON consumers read the
 
 Each `PendingPreview` is `{id: string, base: string, sha: string | null, recorded_at: string | null, age_seconds: integer | null, age: string, stale: boolean}`. `sha` is the first seven characters of the saved merge SHA. `pending` includes every inherited record, even outside the current plan. These are additive report fields; the existing report schema, fields and resume behavior retain their meanings.
 
-A step is `{kind, target, status, detail}` plus `merge_sha`, `deploy`, `blocked_by`, `deploy_prediction`, `admin_override` and `expected_runs` when they apply. `blocked_by` identifies the failed PR responsible for a blocked step. `kind` is `resume`, `merge`, `gate`, `wait` or `open-pr`. `status` is `planned`, `done`, `skipped`, `failed` or `stopped`; after a global stop the steps that did not run are `skipped` with the detail `stopped after an earlier failure`. Dependency and same-target skips include a specific reason.
+A step is `{kind, target, status, detail}` plus `merge_sha`, `deploy`, `blocked_by`, `deploy_prediction`, `admin_override` and `expected_runs` when they apply. `blocked_by` identifies the failed PR responsible for a blocked step. `kind` is `resume`, `merge`, `gate`, `wait` or `open-pr`. `status` is `planned`, `done`, `skipped`, `failed` or `stopped`; after a global stop the steps that did not run are `skipped` with the detail `stopped after an earlier failure`. Dependency and same-target skips include a specific reason, including `blocked by failed merge of <id>` for a PR that failed before it was merged (see [Failure before the merge](#failure-before-the-merge)).
 
 `deploy_prediction` is an additive optional object on merge and resume steps. It is present for each evaluated PR in a dry run and for merged PRs after evaluation. Gates and unevaluated steps omit it. The same object is stored on new pending records with `serde(default)` compatibility for older state files. Existing fields and schema `1` keep their meaning.
 
@@ -404,11 +408,29 @@ These were decided on the conservative side. Each can be loosened later with a n
 4. **Branches that are behind.** A `behind` PR fails the step and asks you to update it. Should `merge` offer `--update-branch`, knowing that it re-triggers the PR's checks and invalidates the plan?
 6. **A deploy that failed after the merge.** pipetrain keeps the record and never reverts. Continuation follows the dependency failure policy below. Resume can resolve a later successful descendant deployment with audit evidence, and deliberate local discard requires confirmation and a reason.
 
+## Failure before the merge
+
+A PR that fails before GitHub merged it (no longer ready, failing or missing checks, conflicts, a moved head or base, closed, not found) changed nothing on GitHub, so it does not stop the queue. pipetrain blocks only what cannot proceed without it and goes on with the rest:
+
+- PRs that depend on it through any edge of the plan graph (for example `depends-on`, `package`, `stacked`, `dependency` or `target`), directly or transitively.
+- PRs on the same repository and base, which merge in one lane.
+- Package waits and late gates of a blocked consumer.
+
+Blocked steps are `skipped` with `blocked_by` naming the failed PR and the detail `blocked by failed merge of <id>: ...`. Steps that kept going are reported with their own status, so the report carries both lists: what stopped, with its cause, and what went on. The invocation still exits with 1. `--dependency-failure` does not change this, even for a PR that publishes a package.
+
+The whole remaining queue still stops, with the detail `stopped after an earlier failure`, when the failure cannot be isolated:
+
+- The outcome is uncertain (`stopped` status: mergeability still unknown, a merge that could not be confirmed, a state write that failed).
+- The plan has open questions (`--allow-questions`), because an ordering the planner could not justify may hide an edge.
+- The failure is not a plain merge step: a failed resume, deploy PR or gate.
+
+With `max_parallel` above 1, PRs that were already running when the failure happened finish; no new PR starts if it cannot be isolated.
+
 ## Deployment failure policy
 
 A failed deploy remains `failed`, keeps its merge SHA and pending state, and makes the invocation exit with 1. A leaf failure continues only PRs whose independence is proved by the plan. PRs on the same repo and base, direct consumers and transitive dependents are blocked with their failed prerequisite named. Graph edges and ordering constraints remain in place.
 
-`--dependency-failure stop` is the default: a deploy failure with downstream dependency consumers stops the whole remaining queue. `--dependency-failure skip` blocks affected consumers and continues proven independent PRs. Neither policy changes the global stop for merge/readiness failures, unconfirmed gates, timeouts or uncertain deployment outcomes. Associated package waits and late gates are skipped when their consumer is blocked; unrelated gates still require confirmation.
+`--dependency-failure skip` is the default: a deploy failure with downstream dependency consumers blocks those consumers and continues proven independent PRs. `--dependency-failure stop` restores the strict behavior of versions up to 0.9.2: such a failure stops the whole remaining queue. Neither policy changes the global stop for unconfirmed gates, timeouts or uncertain deployment outcomes, and neither applies to a PR that failed before it was merged (see [Failure before the merge](#failure-before-the-merge)). Associated package waits and late gates are skipped when their consumer is blocked; unrelated gates still require confirmation.
 
 New pending records contain optional `continuation` metadata: `dependents` captures the transitive dependency closure, `has_consumers` records dependency contracts, and `independent` maps independent PR IDs to their planned head SHAs. Resuming uses this snapshot together with the rebuilt graph, because merged PRs can disappear from the plan. A changed or new head without saved proof is blocked. Older state files still load, but an unresolved failed deploy without this metadata stops safely. Use the audited state discard command for intentional removal rather than deleting or editing pending state.
 

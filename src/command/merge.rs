@@ -1537,6 +1537,10 @@ fn merge_plan_prepared(
                         halted = Some(step.target.clone());
                     }
                 }
+            } else if failure::isolable(plan, &step) {
+                if let Some(item) = plan.items.iter().find(|item| item.id == step.target) {
+                    failures.record_unmerged(item, plan);
+                }
             } else if matches!(step.status, Status::Failed | Status::Stopped) {
                 halted = Some(step.target.clone());
             }
