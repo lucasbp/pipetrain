@@ -56,6 +56,7 @@ fn has_consumers(plan: &Plan, id: &str, dependents: &BTreeSet<String>) -> bool {
 struct FailedDeploy {
     pending: Pending,
     dependents: BTreeSet<String>,
+    inherited: bool,
 }
 
 #[derive(Default)]
@@ -88,12 +89,13 @@ impl FailedDeploy {
         if self.same_target(&repo, &item.base) {
             return Some(self.blocked(format!("same target {repo}@{}", item.base)));
         }
-        let proven = self
-            .pending
-            .continuation
-            .as_ref()
-            .and_then(|saved| saved.independent.get(&item.id))
-            == Some(&item.sha);
+        let proven = self.inherited
+            || self
+                .pending
+                .continuation
+                .as_ref()
+                .and_then(|saved| saved.independent.get(&item.id))
+                == Some(&item.sha);
         (!proven).then(|| {
             self.blocked(format!(
                 "no saved independence proof for {} at its current head",
@@ -104,7 +106,7 @@ impl FailedDeploy {
 }
 
 impl DeployFailures {
-    pub fn record(&mut self, pending: &Pending, plan: &Plan) -> bool {
+    pub fn record(&mut self, pending: &Pending, plan: &Plan, inherited: bool) -> bool {
         let mut dependents = downstream(plan, &pending.id);
         if let Some(saved) = &pending.continuation {
             dependents.extend(saved.dependents.iter().cloned());
@@ -117,6 +119,7 @@ impl DeployFailures {
         self.failures.push(FailedDeploy {
             pending: pending.clone(),
             dependents,
+            inherited,
         });
         has_consumers
     }
