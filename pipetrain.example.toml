@@ -30,6 +30,8 @@ train_prefix = "deploy/"
 ignore_branch_prefixes = ["dependabot/", "renovate/"]
 
 # false: a PR with no checks reported is skipped as "no checks reported".
+# true: an approved PR of a repo with no checks is accepted, and the dry run shows the exception.
+# Pending or failing checks still block. It can be set per profile.
 allow_missing_checks = false
 
 # true (default): a PR needs an approval to be ready. false: no review decision is

@@ -217,6 +217,15 @@ pub fn preview(report: &Report, plan: &Plan, color: bool) -> String {
                     }
                     note.push_str("merges past a missing review (--admin)");
                 }
+                let no_checks = plan.preflight.iter().any(|readiness| {
+                    readiness.id == step.target && !readiness.exceptions.is_empty()
+                });
+                if no_checks {
+                    if !note.is_empty() {
+                        note.push_str("; ");
+                    }
+                    note.push_str("no checks reported (allowed by config)");
+                }
                 ("ready", green, note)
             }
             Kind::Resume => (

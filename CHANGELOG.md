@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- A repo with no PR workflow can merge approved PRs: `allow_missing_checks` (also per profile) and `checks_optional_repos` already accept a PR with no reported check, and the exception is now visible in the compact dry run, in `--verbose` and in the additive `exceptions` field of `preflight` in `--json`. Strict stays the default, and pending or failing checks and a branch rule that requires a check still block.
+
 ## 0.10.0
 
 - `merge` text output is compact by default. The dry run and the confirmation print one line per PR (step, `repo#n`, state and the single cause that blocks it, in plain words such as `needs human approval`) and a short footer with the PRs that enter, the blocked ones, gates, open questions, the API budget warning only when it is over, and inherited state. Per-check lines, check URLs and the repeated dependency list move to `--verbose`.
