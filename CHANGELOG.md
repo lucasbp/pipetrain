@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.10.0
 
 - `merge` text output is compact by default. The dry run and the confirmation print one line per PR (step, `repo#n`, state and the single cause that blocks it, in plain words such as `needs human approval`) and a short footer with the PRs that enter, the blocked ones, gates, open questions, the API budget warning only when it is over, and inherited state. Per-check lines, check URLs and the repeated dependency list move to `--verbose`.
 - During `merge --apply` each finished PR is one line (green `merged + deploy ok`, red `merged, deploy failed`, yellow `stopped`), with no spinner and one line per event off a terminal. The final report starts with a bold count line, lists the PRs that went well by name and gives each failure a block: what happened, the run URL, the failed job and step, what is not known and the exact next command (resume with the same `--state`, or `state discard --reason`). The long resume paragraph is one tip line.
