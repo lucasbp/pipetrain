@@ -90,7 +90,7 @@ fn nuget_server(versions: &'static [&'static str]) -> Server {
                     ]
                 }),
             ),
-            "GET /download/cmutil/index.json" => (200, json!({"versions": versions})),
+            "GET /download/acmeutil/index.json" => (200, json!({"versions": versions})),
             _ => (404, json!({})),
         }
     })
@@ -185,7 +185,7 @@ fn planned(extra: &str, prs: Vec<Pr>) -> Plan {
 }
 
 const NPM_EXTRA: &str = "[packages]\n\"@acme/kit\" = \"acme/kit\"\n";
-const NUGET_EXTRA: &str = "[packages]\n\"cmutil\" = \"acme/cmutil\"\n";
+const NUGET_EXTRA: &str = "[packages]\n\"acmeutil\" = \"acme/lib\"\n";
 
 fn npm_plan() -> Plan {
     planned(
@@ -199,13 +199,13 @@ fn npm_plan() -> Plan {
 
 fn nuget_plan(version: &str) -> Plan {
     let patch = format!(
-        "-    <PackageReference Include=\"CmUtil\" Version=\"1.2610.3022.39\" />\n+    <PackageReference Include=\"CmUtil\" Version=\"{version}\" />"
+        "-    <PackageReference Include=\"AcmeUtil\" Version=\"1.2610.3022.39\" />\n+    <PackageReference Include=\"AcmeUtil\" Version=\"{version}\" />"
     );
     planned(
         NUGET_EXTRA,
         vec![
             bump_patch(pr("acme/api", 5, "feat/a"), "src/Api/Api.csproj", &patch),
-            pr("acme/cmutil", 6, "feat/b"),
+            pr("acme/lib", 6, "feat/b"),
         ],
     )
 }
@@ -272,7 +272,7 @@ fn a_set_outcome_shows_on_the_versioned_wait_line() {
 
 #[test]
 fn a_versionless_wait_never_gets_a_suffix() {
-    let mut built = nuget_plan("$(CmUtilVersion)");
+    let mut built = nuget_plan("$(AcmeUtilVersion)");
     built.items.iter_mut().for_each(|item| {
         item.after
             .iter_mut()
@@ -280,7 +280,7 @@ fn a_versionless_wait_never_gets_a_suffix() {
     });
     assert_eq!(
         waits(&built),
-        vec!["# wait: package cmutil from acme/cmutil#6 must be published before acme/api#5"]
+        vec!["# wait: package acmeutil from acme/lib#6 must be published before acme/api#5"]
     );
 }
 
@@ -327,14 +327,14 @@ fn a_nuget_version_is_checked_through_the_service_index() {
     assert_eq!(
         waits(&built),
         vec![
-            "# wait: package cmutil 1.2610.3022.40 from acme/cmutil#6 must be published before acme/api#5 (published)"
+            "# wait: package acmeutil 1.2610.3022.40 from acme/lib#6 must be published before acme/api#5 (published)"
         ]
     );
     assert_eq!(
         server.lines(),
         vec![
             "GET /v3/index.json".to_string(),
-            "GET /download/cmutil/index.json".to_string()
+            "GET /download/acmeutil/index.json".to_string()
         ]
     );
 }
@@ -348,7 +348,7 @@ fn a_nuget_version_the_feed_lacks_is_marked_not_yet() {
     assert_eq!(
         waits(&built),
         vec![
-            "# wait: package cmutil 1.2610.3022.40 from acme/cmutil#6 must be published before acme/api#5 (not yet)"
+            "# wait: package acmeutil 1.2610.3022.40 from acme/lib#6 must be published before acme/api#5 (not yet)"
         ]
     );
 }
@@ -432,7 +432,7 @@ fn one_lookup_serves_every_consumer_of_the_same_version() {
 #[test]
 fn a_plan_without_versioned_waits_makes_no_request() {
     let server = npm_server(&["1.1.0"]);
-    let mut built = nuget_plan("$(CmUtilVersion)");
+    let mut built = nuget_plan("$(AcmeUtilVersion)");
     let mut checker = Checker::with_registry(Some(server.base.clone()));
     assert_eq!(annotate(&mut built, &mut checker), 0);
     assert!(server.lines().is_empty());
