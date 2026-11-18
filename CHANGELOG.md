@@ -1,8 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.9.2
 
 - A pending record inherited from an earlier run whose deploy failed no longer stops every PR of a new queue. When its target is not a target or dependency of any PR in the queue, merge and its dry run say up front that it stays in the state and the queue goes on without it, and the summary lists it as `kept, failed deploy from an earlier run`. On the same target, only that lane is blocked; other repositories and bases proceed. A deploy still running keeps waiting.
+- Fix a DDL or infra gate that is the base branch of a stack: the stacked children now merge first and the gate becomes a late gate, with the pause right before it, instead of the `gate-has-predecessor` question that made `merge --apply` refuse the queue. Other gates still go first, and PRs that depend on the parent still come after it.
 
 ## 0.9.1
 

@@ -80,7 +80,7 @@ fn gate_inside_a_target_group_goes_first_in_the_group() {
 }
 
 #[test]
-fn gate_that_must_wait_for_a_stacked_pr_is_a_question() {
+fn gate_that_is_the_base_of_a_stack_is_a_late_gate_without_a_question() {
     let train = with_sql(pr("acme/api-core", 10, "deploy/29-10-2026", "master"));
     let feature = pr("acme/api-core", 9, "feat/x", "deploy/29-10-2026");
     let planned = run(vec![train, feature]);
@@ -90,9 +90,34 @@ fn gate_that_must_wait_for_a_stacked_pr_is_a_question() {
         "acme/api-core#10",
         "stacked"
     ));
-    let codes: Vec<&str> = planned.questions.iter().map(|q| q.code.as_str()).collect();
-    assert_eq!(codes, vec!["gate-has-predecessor"]);
-    assert_eq!(planned.questions[0].pr.as_deref(), Some("acme/api-core#10"));
+    assert!(planned.questions.is_empty(), "{:?}", planned.questions);
+    let item = planned
+        .items
+        .iter()
+        .find(|i| i.id == "acme/api-core#10")
+        .unwrap();
+    assert!(item.gate_late);
+    assert!(item.manual_pause);
+}
+
+#[test]
+fn stacked_gate_does_not_hold_back_unrelated_prs_or_other_gates() {
+    let parent = with_sql(pr("acme/api-core", 10, "deploy/29-10-2026", "master"));
+    let child = pr("acme/api-core", 9, "feat/x", "deploy/29-10-2026");
+    let unrelated = pr("acme/web", 3, "feat/y", "master");
+    let early = with_sql(pr("acme/db", 4, "feat/z", "master"));
+    let planned = run(vec![parent, child, unrelated, early]);
+    assert!(planned.questions.is_empty(), "{:?}", planned.questions);
+    assert!(edge(&planned, "acme/db#4", "acme/web#3", "gate"));
+    assert!(!edge(&planned, "acme/api-core#10", "acme/web#3", "gate"));
+    assert!(!edge(
+        &planned,
+        "acme/api-core#10",
+        "acme/api-core#9",
+        "gate"
+    ));
+    let early_item = planned.items.iter().find(|i| i.id == "acme/db#4").unwrap();
+    assert!(!early_item.gate_late);
 }
 
 #[test]
@@ -147,7 +172,7 @@ fn gate_that_bumps_a_package_published_in_the_plan_is_a_late_gate() {
 }
 
 #[test]
-fn gate_with_a_package_and_a_stacked_predecessor_is_still_a_question() {
+fn gate_with_a_package_and_a_stacked_predecessor_is_a_late_gate() {
     let publisher = pr("acme/kit", 6, "feat/a", "master");
     let train = bump(
         with_sql(pr("acme/web", 10, "deploy/29-10-2026", "master")),
@@ -158,6 +183,15 @@ fn gate_with_a_package_and_a_stacked_predecessor_is_still_a_question() {
         "[packages]\n\"@acme/kit\" = \"acme/kit\"\n",
         vec![publisher, train, feature],
     );
+    assert!(planned.questions.is_empty(), "{:?}", planned.questions);
+}
+
+#[test]
+fn gate_with_an_explicit_depends_on_is_still_a_question() {
+    let first = pr("acme/api-b", 2, "feat/b", "master");
+    let mut gate = with_sql(pr("acme/api-a", 1, "feat/a", "master"));
+    gate.body = "Depends-On: acme/api-b#2".to_string();
+    let planned = run(vec![gate, first]);
     let codes: Vec<&str> = planned.questions.iter().map(|q| q.code.as_str()).collect();
     assert_eq!(codes, vec!["gate-has-predecessor"]);
 }

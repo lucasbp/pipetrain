@@ -49,7 +49,7 @@ The rule: by stage first, then, inside one stage, by layer, then PR number, then
 
 ## Late gates
 
-The rule "gate PRs first" has one exception. A gate PR that must come after another PR by a `package`, `dependency` or `target` edge is a late gate: it is placed by the same rule as every other PR and printed as
+The rule "gate PRs first" has one exception. A gate PR that must come after another PR by a `package`, `dependency`, `target` or `stacked` edge is a late gate: it is placed by the same rule as every other PR and printed as
 
 ```
 # gate: <org>/<repo>#<n> waits for <PR ids> (<rule>: <detail>)

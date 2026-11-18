@@ -588,7 +588,10 @@ impl<'a> Builder<'a> {
 }
 
 pub fn is_late_rule(rule: Rule) -> bool {
-    matches!(rule, Rule::Package | Rule::Dependency | Rule::Target)
+    matches!(
+        rule,
+        Rule::Package | Rule::Dependency | Rule::Target | Rule::Stacked
+    )
 }
 
 pub fn plan(input: PlanInput<'_>) -> Planned {
