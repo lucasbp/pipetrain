@@ -12,6 +12,8 @@ use crate::profile::ProfileSource;
 use crate::publishers::{Publishers, References};
 
 pub const SCHEMA: u32 = 1;
+pub const WAITING_NEXT_STEP: &str =
+    "complete the earlier steps and resolve questions or confirm the gate, then revalidate this PR";
 
 fn is_zero(n: &usize) -> bool {
     *n == 0
@@ -209,7 +211,7 @@ pub fn build(rules: &Rules, gathered: Gathered) -> Plan {
                         .causes
                         .push("manual gate requires confirmation".to_string());
                 }
-                readiness.next_step = "complete the earlier steps and resolve questions or confirm the gate, then revalidate this PR".to_string();
+                readiness.next_step = WAITING_NEXT_STEP.to_string();
             }
         }
     }
