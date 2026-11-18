@@ -186,6 +186,8 @@ Phases include readiness, merging, waiting for deploy (with expected workflow pa
 
 When the plan has open questions (`? ...` lines, the ones that make `plan --emit queue` exit with 3) `--apply` merges nothing and exits with 3. `--allow-questions` merges anyway. The order of the plan is a guess for what the questions are about, so read them first.
 
+Among those questions is `package-release-behind`: before the run, the plan and the dry run flag every PR whose repo version check (`max-behind`, read from its workflows) will fail because the queue itself publishes more new versions of a package than the check allows. The question gives the package, the referenced version, the number of versions the queue publishes and the limit. The PR shows as `waiting` in the preflight. If the limit cannot be read the PR only carries a `(not confirmed)` warning. See `docs/planner.md` for how releases are counted.
+
 ## Timeouts
 
 | Setting | Default | What |
@@ -195,6 +197,7 @@ When the plan has open questions (`? ...` lines, the ones that make `plan --emit
 | `merge.poll_seconds` | `15` | Time between two polls. |
 | `merge.package_poll_seconds` | `10` | Seconds between package feed checks; values below 1 use 1 second. |
 | `merge.package_wait_seconds` | `600` | Package wait timeout in seconds, independently of deploy timeouts. `0` checks once without sleeping. |
+| `merge.package_max_behind` | none | Version limit used by the `package-release-behind` preflight when the consumer repo workflows do not state one. Without it and without a readable workflow limit, the preflight only warns `(not confirmed)`. |
 | `merge.no_run_grace_seconds` | `120` | How long to wait for the first workflow run to appear. |
 | `merge.no_deploy_repos` | `[]` | Globs of repos that have no deploy workflow on push. |
 | `merge.method` | `"merge"` | `merge`, `squash` or `rebase`. |

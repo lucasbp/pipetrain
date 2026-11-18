@@ -28,7 +28,7 @@ The structs live in `src/plan.rs` (`Plan`, `SkippedOut`, `Stats`), `src/bundle.r
 | `bundles` | Bundle[] | Suggestions to replace several deploys of one repo with a single one. Empty when there is nothing to bundle. Read-only: nothing is created or retargeted. See `saving-pipelines.md`. |
 | `conflicts` | Conflict[] | PRs of the same repo that change the same files. Always present, `[]` when there is none. Read-only: it never changes `items`, `gate` or `lanes`. Added after schema 1 shipped, and additive only. |
 | `skipped` | SkippedOut[] | PRs found but not ready, or already contained in their base or in the train branch, sorted by `id`. They are not in the plan. |
-| `questions` | Question[] | What the planner could not decide. Discovery and scan questions come first, then planner questions. |
+| `questions` | Question[] | What the planner could not decide. Discovery and scan questions come first, then planner questions, then release preflight questions (`package-release-behind`, about a PR that will fall further behind a package the queue publishes than its version check allows). |
 | `notes` | string[] | Informational lines. Today only `X depends on Y, already merged`. |
 | `stats` | Stats | Request budget and parallelism figures. |
 | `shown_authors` | string[] (optional) | Lowercase logins the author filter keeps visible. Present only when a filter is on. |
@@ -258,7 +258,7 @@ Both examples are hand-written to show shapes, not captured from a run.
 | `base` | string | PR base branch, including for skipped PRs. |
 | `default_branch` | string | Repository default branch from `repository.defaultBranchRef.name`; empty when unavailable. |
 | `merge_state_status` | string | Full GraphQL `mergeStateStatus`, preserved as returned; empty when unavailable. The internal `behind` flag is retained. |
-| `warnings` | string[] | Informational, never new ordering edges. UNKNOWN or unknown mergeability warns `GitHub still computing`; the executor retries for up to a minute. A non-default, non-train base warns `base not landed` when no other selected PR in the same repo has that base as its head. Missing default-branch metadata does not invent a destination. |
+| `warnings` | string[] | Informational, never new ordering edges. UNKNOWN or unknown mergeability warns `GitHub still computing`; the executor retries for up to a minute. A non-default, non-train base warns `base not landed` when no other selected PR in the same repo has that base as its head. Missing default-branch metadata does not invent a destination. When the queue publishes a package the PR references and the repo version limit cannot be determined, a warning starting `(not confirmed)` says so; it never blocks. |
 | `checks` | CheckDetail[] | Reported check contexts, sorted and deduplicated by name, state and URL. Each is `{name: string, state: string, url: string or null}`. CheckRun uses conclusion, falling back to status, and `detailsUrl`; StatusContext uses state and `targetUrl`. Unknown URLs remain null. |
 
 BLOCKED, DIRTY, UNSTABLE, DRAFT and BEHIND block through the same readiness rules used for executor revalidation. CLEAN and HAS_HOOKS pass this preflight. UNKNOWN only warns; any independent blocker still blocks. The executor's final REST check still requires exactly `clean`, including after a HAS_HOOKS preflight. Passing a plan never substitutes for that live check, the head SHA guard, approval or checks. Feature-base warnings do not retarget PRs or change stack order.

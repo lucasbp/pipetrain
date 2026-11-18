@@ -9,6 +9,7 @@ use crate::publishers::{Publishers, References};
 
 mod dependency;
 mod order;
+pub mod release;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]

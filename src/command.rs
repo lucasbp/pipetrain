@@ -17,10 +17,12 @@ use crate::emit::{self, Emit};
 use crate::github::{self, ApiError, Client};
 use crate::model::{Pr, PrKey, Question};
 use crate::plan::{self, Gathered, Plan};
+use crate::planner::release;
 use crate::planner::{self, DepState};
 use crate::progress::{self, Progress};
 use crate::publishers::{self, Publishers, References};
 use crate::render;
+use crate::workflows;
 
 pub mod apply;
 pub mod authors;
@@ -201,10 +203,10 @@ fn scan_publishers(
     rules: &Rules,
     ready: &[(Pr, Scope)],
     questions: &mut Vec<Question>,
-) -> Result<(Publishers, References)> {
+) -> Result<(Publishers, References, Vec<release::Manifest>)> {
     let repos = repos_to_scan(ready);
     if repos.len() < 2 && wanted_packages(rules, ready).is_empty() {
-        return Ok((Publishers::new(), References::new()));
+        return Ok((Publishers::new(), References::new(), Vec::new()));
     }
     progress::phase("reading manifests");
     let mut manifests = Vec::new();
@@ -215,7 +217,43 @@ fn scan_publishers(
     Ok((
         publishers::collect(&manifests),
         publishers::collect_references(&manifests),
+        manifests,
     ))
+}
+
+fn release_context(
+    client: &mut Client,
+    cfg: &Config,
+    rules: &Rules,
+    ready: &[(Pr, Scope)],
+    scanned: &(Publishers, References, Vec<release::Manifest>),
+) -> Result<release::Context> {
+    let (publishers, references, manifests) = scanned;
+    let prs: Vec<&Pr> = ready.iter().map(|(pr, _)| pr).collect();
+    let mut context = release::Context::new(
+        rules,
+        publishers,
+        references,
+        manifests,
+        &prs,
+        cfg.merge.package_max_behind,
+    );
+    let candidates = context.limit_candidates();
+    if candidates.is_empty() {
+        return Ok(context);
+    }
+    progress::phase("reading workflow limits");
+    let repos = repos_to_scan(ready);
+    for (index, repo) in candidates.iter().enumerate() {
+        if let Some((slug, sha)) = repos.get(repo) {
+            let files = workflows::read(client, slug, sha)?;
+            context
+                .limits
+                .insert(repo.clone(), workflows::max_behind(&files));
+        }
+        progress::count(index + 1, candidates.len());
+    }
+    Ok(context)
 }
 
 fn deploy_branch_for(cfg: &Config, date: Option<&str>) -> Result<String> {
@@ -397,7 +435,9 @@ fn build_plan_with_prepare(
     skipped.extend(same);
 
     let external = external_states(&mut client, &ready)?;
-    let (publishers, references) = scan_publishers(&mut client, &rules, &ready, &mut questions)?;
+    let scanned = scan_publishers(&mut client, &rules, &ready, &mut questions)?;
+    let release_context = release_context(&mut client, &cfg, &rules, &ready, &scanned)?;
+    let (publishers, references, _) = scanned;
 
     let collected = Collected {
         ready,
@@ -409,6 +449,7 @@ fn build_plan_with_prepare(
     };
     let gathered = into_gathered(&cfg, &explicit, train, deploy_branch, &client, collected);
     let mut built = plan::build(&rules, gathered);
+    release::annotate(&mut built, &release_context);
     built.profile = Some(profile);
     let logins = author_filter::resolve(&opts.authors.effective(&cfg), &mut client)?;
     if !logins.is_empty() {

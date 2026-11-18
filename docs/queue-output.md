@@ -99,6 +99,8 @@ Each open question is one stderr line, printed before any exit:
 ? (repo): <message>
 ```
 
+A `package-release-behind` question is one of these lines, so it also makes the exit code `3`.
+
 `(repo)` stands for a question that is not about one PR. The queue is still printed.
 
 ## Exit codes

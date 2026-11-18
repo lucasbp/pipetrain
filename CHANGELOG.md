@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- The plan and the `merge` dry run now flag, before the run, every PR that will fall further behind a package than its repo version check allows because the queue itself publishes the new versions. The `package-release-behind` question names the package, the referenced version, how many versions the queue publishes and the limit, and turns the PR into `waiting` (so `--emit queue` exits 3 and `merge --apply` needs `--allow-questions`). No ordering edge is added and `--json` stays schema 1.
+- The limit is read from `max-behind` in the consumer repo workflows. When it cannot be read, `merge.package_max_behind` applies if set; otherwise the PR only gets a `(not confirmed)` preflight warning and is not blocked.
+
 ## 0.9.2
 
 - A pending record inherited from an earlier run whose deploy failed no longer stops every PR of a new queue. When its target is not a target or dependency of any PR in the queue, merge and its dry run say up front that it stays in the state and the queue goes on without it, and the summary lists it as `kept, failed deploy from an earlier run`. On the same target, only that lane is blocked; other repositories and bases proceed. A deploy still running keeps waiting.
