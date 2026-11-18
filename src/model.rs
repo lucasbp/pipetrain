@@ -131,8 +131,12 @@ pub struct Readiness {
     pub default_branch: String,
     pub merge_state_status: String,
     pub warnings: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exceptions: Vec<String>,
     pub checks: Vec<CheckDetail>,
 }
+
+pub const NO_CHECKS_EXCEPTION: &str = "no checks reported; accepted because this repo is configured to merge without checks (allow_missing_checks or checks_optional_repos)";
 
 impl Readiness {
     pub fn lines(&self) -> Vec<String> {
@@ -153,6 +157,11 @@ impl Readiness {
             self.warnings
                 .iter()
                 .map(|warning| format!("{}: warning: {warning}", self.id)),
+        );
+        lines.extend(
+            self.exceptions
+                .iter()
+                .map(|exception| format!("{}: exception: {exception}", self.id)),
         );
         lines.extend(self.checks.iter().map(|check| {
             format!(
@@ -262,6 +271,10 @@ impl Pr {
                 "GitHub still computing; merge retries mergeability for up to a minute".to_string(),
             );
         }
+        let mut exceptions = Vec::new();
+        if reasons.is_empty() && self.state == PrState::Open && self.checks == Checks::Missing {
+            exceptions.push(NO_CHECKS_EXCEPTION.to_string());
+        }
         Readiness {
             id: self.key.to_string(),
             status: if reasons.is_empty() {
@@ -280,6 +293,7 @@ impl Pr {
             default_branch: self.default_branch.clone(),
             merge_state_status: self.merge_state_status.clone(),
             warnings,
+            exceptions,
             checks: self.check_details.clone(),
         }
     }
