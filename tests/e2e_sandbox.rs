@@ -817,6 +817,8 @@ fn rendered(report: &Value, sandbox: &Sandbox) -> String {
             total: number("total"),
             budget: number("budget").try_into().unwrap(),
             exceeds_budget: report["api_estimate"]["exceeds_budget"].as_bool().unwrap(),
+            rate_remaining: report["api_estimate"]["rate_remaining"].as_u64(),
+            warn: report["api_estimate"]["warn"].as_bool().unwrap(),
         },
         max_parallel: report["max_parallel"].as_u64().unwrap().try_into().unwrap(),
         summary: Summary::from_steps(&steps),
