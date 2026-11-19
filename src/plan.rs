@@ -5,7 +5,8 @@ use serde::Serialize;
 use crate::bundle::{self, Bundle};
 use crate::config::Rules;
 use crate::conflicts::{self, Conflict, Snapshot};
-use crate::discovery::Skipped;
+use crate::discovery::{Scope, Skipped};
+use crate::merge::category::{self, Category};
 use crate::model::{Pr, Question, Readiness};
 use crate::planner::{self, DepState, Item, PlanInput, Rule};
 use crate::profile::ProfileSource;
@@ -151,7 +152,108 @@ fn stacked_pairs(items: &[Item]) -> BTreeSet<(String, String)> {
     pairs
 }
 
-pub fn build(rules: &Rules, gathered: Gathered) -> Plan {
+const DEPENDENCY_RULES: [Rule; 4] = [
+    Rule::DependsOn,
+    Rule::Package,
+    Rule::Stacked,
+    Rule::Dependency,
+];
+
+fn finished_work(reasons: &[String]) -> bool {
+    reasons.iter().any(|reason| {
+        reason == "already merged" || reason == "closed" || reason.starts_with("already in ")
+    })
+}
+
+fn hold_dependents(rules: &Rules, gathered: &mut Gathered) {
+    let parents: Vec<Pr> = gathered
+        .skipped
+        .iter()
+        .filter(|skipped| !finished_work(&skipped.reasons))
+        .map(|skipped| skipped.pr.clone())
+        .collect();
+    if parents.is_empty() || gathered.ready.is_empty() {
+        return;
+    }
+    let mut everyone = gathered.ready.clone();
+    everyone.extend(
+        parents
+            .iter()
+            .map(|pr| (pr.clone(), "explicit".to_string())),
+    );
+    let planned = planner::plan(PlanInput {
+        rules,
+        prs: everyone,
+        external: gathered.external.clone(),
+        publishers: gathered.publishers.clone(),
+        references: gathered.references.clone(),
+    });
+    let mut left_out: BTreeMap<String, Category> = gathered
+        .skipped
+        .iter()
+        .filter(|skipped| !finished_work(&skipped.reasons))
+        .map(|skipped| {
+            (
+                skipped.pr.key.to_string(),
+                category::classify(&skipped.reasons),
+            )
+        })
+        .collect();
+    let causes: BTreeMap<String, String> = gathered
+        .skipped
+        .iter()
+        .map(|skipped| (skipped.pr.key.to_string(), skipped.reasons.join(", ")))
+        .collect();
+    let mut reasons: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    loop {
+        let mut grew = false;
+        for item in &planned.items {
+            if left_out.contains_key(&item.id)
+                || !gathered
+                    .ready
+                    .iter()
+                    .any(|(pr, _)| pr.key.to_string() == item.id)
+            {
+                continue;
+            }
+            let parent = item
+                .after
+                .iter()
+                .find(|dep| DEPENDENCY_RULES.contains(&dep.rule) && left_out.contains_key(&dep.id));
+            if let Some(dep) = parent {
+                let state = left_out[&dep.id];
+                let mut lines = vec![category::depends_on(&dep.id, state)];
+                let cause = causes
+                    .get(&dep.id)
+                    .cloned()
+                    .or_else(|| reasons.get(&dep.id).and_then(|r| r.first().cloned()));
+                if let Some(cause) = cause {
+                    lines.push(format!("{}: {cause}", dep.id));
+                }
+                reasons.insert(item.id.clone(), lines);
+                left_out.insert(item.id.clone(), Category::Waiting);
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    let ready = std::mem::take(&mut gathered.ready);
+    for (pr, scope) in ready {
+        match reasons.remove(&pr.key.to_string()) {
+            Some(reasons) => gathered.skipped.push(Skipped {
+                pr,
+                scope: Scope::from_name(&scope).unwrap_or(Scope::Explicit),
+                reasons,
+            }),
+            None => gathered.ready.push((pr, scope)),
+        }
+    }
+}
+
+pub fn build(rules: &Rules, mut gathered: Gathered) -> Plan {
+    hold_dependents(rules, &mut gathered);
     let snapshots = snapshots(&gathered.ready);
     let selected: Vec<&Pr> = gathered
         .ready

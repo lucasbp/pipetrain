@@ -782,7 +782,7 @@ The text report prints one line per repo (`opened`, `skipped` or `failed`, with 
 
 | Code | Meaning |
 |---|---|
-| 0 | A plan was generated. Skipped PRs and `?` questions do not change this for a normal text/JSON plan without `--strict`. |
+| 0 | A plan was generated. Skipped PRs and `?` questions do not change this for a normal text/JSON plan without `--strict`. `merge --apply` also stays 0 when PRs are left out as `waiting` (yellow, needs a person or another PR) or `blocked` (red, something is broken); only a PR that failed to merge or deploy makes it fail. See [Waiting and blocked](docs/merge.md#waiting-and-blocked). |
 | 1 | An error: no token, bad config, bad `--date`, a PR not found, budget reached, GitHub failure. The message goes to stderr as `error: ...`. For `bundle` it also means the prompt was declined or a write failed. |
 | 3 | Queue output has open questions; also used when questions block `merge --apply` and by `order suggest` for a dependency cycle. |
 | 4 | With `--strict`, no visible selected PR is eligible; merge dry runs can also use it when no merge step exists. Precedence and exceptions are in [Common flows](docs/flows.md#use-by-agents). |

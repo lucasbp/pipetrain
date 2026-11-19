@@ -101,6 +101,7 @@ fn report(steps: Vec<StepReport>, not_merging: Vec<NotMerging>) -> Report {
         not_merging,
         questions: Vec::new(),
         notices: Vec::new(),
+        held: Vec::new(),
     }
 }
 
@@ -144,10 +145,10 @@ fn the_preview_has_one_line_per_pr_and_no_check_lines_or_urls() {
             merge_step("acme/api#2"),
             merge_step("acme/web#3"),
         ],
-        vec![NotMerging {
-            id: "acme/ui#9".to_string(),
-            reasons: vec!["review required".to_string(), "checks pending".to_string()],
-        }],
+        vec![NotMerging::new(
+            "acme/ui#9",
+            vec!["review required".to_string(), "checks pending".to_string()],
+        )],
     );
     let text = strip(&preview(&report, &plan, true));
     let rows: Vec<&str> = text
@@ -164,7 +165,7 @@ fn the_preview_has_one_line_per_pr_and_no_check_lines_or_urls() {
         "{text}"
     );
     assert!(
-        rows[3].contains("ui#9") && rows[3].contains("blocked"),
+        rows[3].contains("ui#9") && rows[3].contains("waiting"),
         "{text}"
     );
     assert!(rows[3].contains("needs human approval"), "{text}");
@@ -172,7 +173,7 @@ fn the_preview_has_one_line_per_pr_and_no_check_lines_or_urls() {
     assert!(!text.contains("check "), "{text}");
     assert!(!text.contains("acme/"), "{text}");
     assert!(text.contains("3 enter the queue"), "{text}");
-    assert!(text.contains("1 blocked"), "{text}");
+    assert!(text.contains("1 waiting · 0 blocked"), "{text}");
     assert!(text.contains("dry run, nothing was merged"), "{text}");
     assert!(text.contains("--verbose"), "{text}");
 }
@@ -569,10 +570,10 @@ fn samples_for_the_pull_request_body() {
             merge_step("acme/api#2"),
             merge_step("acme/web#3"),
         ],
-        vec![NotMerging {
-            id: "acme/ui#9".to_string(),
-            reasons: vec!["review required".to_string()],
-        }],
+        vec![NotMerging::new(
+            "acme/ui#9",
+            vec!["review required".to_string()],
+        )],
     );
     dry.api_estimate = estimate(true);
     println!(

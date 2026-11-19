@@ -14,6 +14,7 @@ use crate::command::PlanOptions;
 use crate::config::Config;
 use crate::emit;
 use crate::github::{Client, LivePr, PrWrite};
+use crate::merge::category;
 use crate::merge::{
     AdminOverride, DependencyFailure, DeployOutcome, Kind, NotMerging, Pending, REPORT_SCHEMA,
     Report, STOPPED, State, Status, Step, StepReport, Store, Summary, Verdict, judge,
@@ -245,10 +246,7 @@ fn not_merging(plan: &Plan) -> Vec<NotMerging> {
     plan.skipped
         .iter()
         .filter(|skipped| !skipped.hidden)
-        .map(|skipped| NotMerging {
-            id: skipped.id.clone(),
-            reasons: skipped.reasons.clone(),
-        })
+        .map(|skipped| NotMerging::new(&skipped.id, skipped.reasons.clone()))
         .collect()
 }
 
@@ -1094,13 +1092,53 @@ fn open_target(slug: &str, branch: &str) -> String {
     format!("{slug}:{branch}")
 }
 
+fn later_deploy_exists(client: &mut Client, pending: &Pending, sha: &str) -> bool {
+    let Ok(tip) = client.branch_sha(&pending.repo, &pending.base) else {
+        return false;
+    };
+    tip != sha
+        && client
+            .contains_commit(&pending.repo, &tip, sha)
+            .unwrap_or(false)
+}
+
+fn hold_unchanged_resumes(report: &mut Report, store: &Store, client: &mut Client) {
+    let steps = std::mem::take(&mut report.steps);
+    for step in steps {
+        let held = (step.kind == Kind::Resume)
+            .then(|| {
+                let pending = store
+                    .state
+                    .pending
+                    .iter()
+                    .find(|pending| pending.id == step.target)?;
+                let sha = pending.sha.as_deref()?;
+                let failure = deploy_failed(client, pending)?;
+                (!later_deploy_exists(client, pending, sha)).then(|| (pending.clone(), failure))
+            })
+            .flatten();
+        match held {
+            Some((pending, failure)) => {
+                report.not_merging.push(NotMerging::new(
+                    &pending.id,
+                    vec![category::deploy_failed_cause(&failure), failure],
+                ));
+                report.held.push(pending);
+            }
+            None => report.steps.push(step),
+        }
+    }
+}
+
 fn arrange(
     report: &mut Report,
     plan: &Plan,
     store: &Store,
     settings: &Settings,
+    client: &mut Client,
 ) -> BTreeMap<String, Bundled> {
     report.steps.splice(0..0, resume_steps(&store.state));
+    hold_unchanged_resumes(report, store, client);
     let mut groups: BTreeMap<String, Bundled> = BTreeMap::new();
     if !settings.open_pr {
         return groups;
@@ -1378,6 +1416,7 @@ fn merge_plan_prepared(
         not_merging: not_merging(plan),
         questions: emit::question_lines(plan),
         notices: Vec::new(),
+        held: Vec::new(),
     };
     for step in &mut report.steps {
         if step.kind == Kind::Merge {
@@ -1395,7 +1434,7 @@ fn merge_plan_prepared(
                     Some(env.push_reading(client, &key, &item.base, &item.sha, &item.sha));
             }
         }
-        let bundles = arrange(&mut report, plan, store, settings);
+        let bundles = arrange(&mut report, plan, store, settings, client);
         set_aside_inherited(&mut report, plan, &bundles, store, client);
         settle::annotate(&mut report.steps, plan, cfg, &store.state);
         report.api_estimate = estimate(plan, cfg, settings, store, requests, &report.steps);
@@ -1414,7 +1453,7 @@ fn merge_plan_prepared(
             code: emit::EXIT_QUESTIONS,
         });
     }
-    let bundles = arrange(&mut report, plan, store, settings);
+    let bundles = arrange(&mut report, plan, store, settings, client);
     set_aside_inherited(&mut report, plan, &bundles, store, client);
     settle::annotate(&mut report.steps, plan, cfg, &store.state);
     if report.steps.is_empty() {
@@ -1441,7 +1480,15 @@ fn merge_plan_prepared(
         store.state.profile = profile.map(str::to_string);
     }
     if cfg.max_parallel > 1 || settings.bump {
-        parallel::execute(&env, client, store, hooks, &mut report.steps, &bundles)?;
+        parallel::execute(
+            &env,
+            client,
+            store,
+            hooks,
+            &mut report.steps,
+            &bundles,
+            &report.held,
+        )?;
         report.summary = Summary::from_steps(&report.steps);
         let code = report.exit_code();
         return Ok(Outcome {
@@ -1453,6 +1500,15 @@ fn merge_plan_prepared(
     let mut progress_state = crate::progress::merge::MergeProgress::new(report.steps.len());
     let mut halted: Option<String> = None;
     let mut failures = failure::DeployFailures::default();
+    for pending in &report.held {
+        let has_consumers = failures.record(pending, plan, true);
+        if has_consumers
+            && settings.dependency_failure == DependencyFailure::Stop
+            && halted.is_none()
+        {
+            halted = Some(pending.id.clone());
+        }
+    }
     for index in 0..report.steps.len() {
         let mut step = report.steps[index].clone();
         if let Some(blocker) = &halted {
@@ -1800,12 +1856,18 @@ fn render_with_steps(report: &Report, color: bool, include_steps: bool) -> Strin
             )
         ));
         for skipped in &report.not_merging {
+            let label = skipped.state.as_str();
+            let label = match skipped.state {
+                category::Category::Waiting => tint(color, yellow, label),
+                category::Category::Blocked => tint(color, red, label),
+            };
             out.push_str(&format!(
-                "  {}: {}\n",
+                "  {} ({label}): {}\n",
                 skipped.id,
                 skipped.reasons.join(", ")
             ));
         }
+        out.push_str(&format!("{}\n", compact::footer_counts(report, color)));
     }
     for question in &report.questions {
         out.push_str(&format!("{question}\n"));

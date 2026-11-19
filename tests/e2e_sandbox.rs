@@ -836,6 +836,7 @@ fn rendered(report: &Value, sandbox: &Sandbox) -> String {
         not_merging: Vec::new(),
         questions: Vec::new(),
         notices: Vec::new(),
+        held: Vec::new(),
     };
     pipetrain::command::merge::render(&report, false)
 }
