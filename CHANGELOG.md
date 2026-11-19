@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `merge --bump-behind --apply` (off by default) executes the `bump` step shown for a PR held with `needs a bump of <package> to <version>`: it pushes a branch from the PR head with the new pin, proves it with the restore mode (`--restore-mode`, `--solution`, same rules as `bump`) and opens a draft bump PR into the PR head branch. The PR and its dependents stay `waiting`, and the PR is never merged by pipetrain. The bump PR is saved in the state file (`bump_behind`, schema stays `2`, only added) and later runs check it instead of opening another; after it is merged the held PR is planned again with the new pin. A failed bump follows `--dependency-failure`. Without the flag nothing changes. See [docs/bump-in-merge.md](docs/bump-in-merge.md).
+
 - `bump` targets the latest stable version by default (no `-` suffix); `--prerelease` opts into a newer prerelease and the dry run states when one was ignored. A feed with no stable version is an error that names `--prerelease` and `--to`. `bump --json` adds `ignored_prerelease` (schema stays `1`).
 - `bump --apply` for NuGet gains `--restore-mode locked|unlocked|skip` (default `locked`, the previous behavior; `unlocked` is a plain restore plus a build; `skip` does neither), settable per repo under `[bump.repos."org/repo"]` or for all under `[bump]`. The mode of each repo shows in the dry run and the output, and `restore_mode` is added to the JSON.
 - `bump --solution <path>` and `solution` in `[bump.repos]` choose among several solutions; without a choice the skip message lists the files found. See [docs/bump-restore-modes.md](docs/bump-restore-modes.md).

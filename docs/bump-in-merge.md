@@ -1,6 +1,6 @@
 # Bump needed by the version gate
 
-Part of issue 54. This page covers the prediction in `merge`; executing the bump under `--bump-behind` is a separate change.
+Part of issue 54. This page covers the prediction in `merge` and its execution under `--bump-behind`.
 
 ## What it does
 
@@ -20,6 +20,31 @@ The PR is then left out as `waiting: needs a bump of <package> to <version>` and
 ## Waiting, not blocked
 
 The cause is a `waiting` cause: it resolves with a bump PR, not a failing check. Dependents of the held PR wait with `depends on <repo#n>, which is waiting`, using the existing propagation.
+
+## Executing it: `--bump-behind`
+
+Without the flag `merge --apply` behaves as before and the step stays a prediction. With `merge --bump-behind --apply`, before the merges, each held PR with a named target version gets:
+
+1. A lookup of the PR on GitHub. A closed PR or one from a fork is not touched, since pipetrain cannot push to a fork.
+2. A branch `pipetrain/bump/<package>-<version>-pr<number>` cut from the PR head with the pin rewritten in every manifest that pins the package below the target. The branch name carries the PR number so two held PRs of one repo never collide.
+3. The same proof `bump --apply` runs, chosen by `--restore-mode locked|unlocked|skip` and `--solution`, or by `[bump]` and `[bump.repos]` in the config (flag, then repo, then global, then `locked`). The branch is pushed only after the proof passes.
+4. A draft PR from that branch into the head branch of the held PR, so that once it is merged the held PR carries the new pin and the next plan stops holding it.
+
+The bump PR is saved in the state file under `bump_behind` (`id`, `package`, `from`, `to`, `number`, `pull_request_url`, `branch`, `recorded_at`). The field is only added to the state, the schema number does not change, and a state file with it keeps the run resumable. The next run looks at the saved PR before anything else:
+
+| Saved PR | Step | Held PR |
+|---|---|---|
+| open | `waiting`, names the URL, nothing is opened | stays `waiting` |
+| merged | `done`, entry removed | planned again with the new pin by that run or the next |
+| closed without merge | `failed`, entry removed | the next run opens a new one |
+
+Running the command twice therefore opens one bump PR. If the state file is lost, an existing bump branch is detected and nothing is pushed over it.
+
+Pipetrain never merges the bump PR: it is opened as a draft, so a person marks it ready and the repo's own review rules apply. This is also why the held PR stays `waiting` and does not change the exit code. Merging a bump PR that needs no review once its CI is green is not done by this change.
+
+A held PR that needs a version the queue itself publishes (no `to`) is not bumped by `--bump-behind`: `--bump` prepares that one after the publisher deploys.
+
+A failed bump (restore, build, push or PR creation) is a `failed` step and exits 1, because a real operation failed. It follows `--dependency-failure`: with `skip` only the PRs that depend on the held one wait and independent PRs merge; with `stop` the run stops when some PR depends on it. `waiting` never changes the exit code.
 
 ## JSON
 
