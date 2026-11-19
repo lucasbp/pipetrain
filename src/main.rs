@@ -193,9 +193,15 @@ struct BumpArgs {
 
     #[arg(
         long,
-        help = "Target version; without it the latest published version is used"
+        help = "Target version; without it the latest stable published version is used"
     )]
     to: Option<String>,
+
+    #[arg(
+        long,
+        help = "Let the default target be a prerelease when it is the newest version"
+    )]
+    prerelease: bool,
 
     #[arg(
         long,
@@ -221,6 +227,19 @@ struct BumpArgs {
         help = "Repo to scan as org/repo; repeatable, without it the exact names in the profile's [[layer]] and [[order]]"
     )]
     repos: Vec<String>,
+
+    #[arg(
+        long,
+        value_enum,
+        help = "How --apply proves a nuget pin: locked (lock files), unlocked (plain restore plus build) or skip (neither)"
+    )]
+    restore_mode: Option<pipetrain::consumer_bump::RestoreMode>,
+
+    #[arg(
+        long,
+        help = "Solution file to restore when a repo has several, relative to the repo root"
+    )]
+    solution: Option<String>,
 
     #[arg(
         long,
@@ -986,6 +1005,9 @@ fn run_bump(args: BumpArgs) -> Result<i32> {
     bump::run(BumpOptions {
         package: args.package,
         to: args.to,
+        prerelease: args.prerelease,
+        restore_mode: args.restore_mode,
+        solution: args.solution,
         ecosystem: args.ecosystem,
         org: args.org,
         registry: args.registry,

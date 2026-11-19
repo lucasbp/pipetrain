@@ -8,6 +8,33 @@ pub mod apply;
 pub mod backend;
 pub mod journal;
 
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum, serde::Deserialize, Serialize,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum RestoreMode {
+    #[default]
+    Locked,
+    Unlocked,
+    Skip,
+}
+
+impl RestoreMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Locked => "locked",
+            Self::Unlocked => "unlocked",
+            Self::Skip => "skip",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RestoreSettings {
+    pub mode: RestoreMode,
+    pub solution: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Consumer {
     pub repository: String,
@@ -46,6 +73,12 @@ pub trait BumpGateway {
     fn read(&mut self, path: &str) -> Result<String>;
     fn write(&mut self, path: &str, text: &str) -> Result<()>;
     fn restore(&mut self, solution: &str, locked: bool) -> Result<()>;
+    fn restore_plain(&mut self, _solution: &str) -> Result<()> {
+        bail!("this workspace cannot run a plain restore")
+    }
+    fn build(&mut self, _solution: &str) -> Result<()> {
+        bail!("this workspace cannot run a build")
+    }
     fn changed_files(&mut self) -> Result<Vec<String>>;
     fn commit(&mut self, paths: &[String], message: &str) -> Result<String>;
     fn push_new_branch(&mut self, branch: &str, commit: &str) -> Result<()>;
@@ -143,6 +176,7 @@ pub(crate) struct Pinned {
 pub(crate) fn pin_commit_push(
     pins: &BTreeMap<String, (String, String)>,
     consumer: &Consumer,
+    mode: RestoreMode,
     gateway: &mut impl BumpGateway,
 ) -> Result<Option<Pinned>> {
     ensure_head(gateway, consumer)?;
@@ -175,15 +209,25 @@ pub(crate) fn pin_commit_push(
     for (path, text) in &patches {
         gateway.write(path, text)?;
     }
-    gateway.restore(&consumer.solution, false)?;
-    gateway.restore(&consumer.solution, true)?;
+    match mode {
+        RestoreMode::Locked => {
+            gateway.restore(&consumer.solution, false)?;
+            gateway.restore(&consumer.solution, true)?;
+        }
+        RestoreMode::Unlocked => {
+            gateway.restore_plain(&consumer.solution)?;
+            gateway.build(&consumer.solution)?;
+        }
+        RestoreMode::Skip => {}
+    }
     let changed = gateway.changed_files()?;
+    let locks_allowed = mode != RestoreMode::Skip;
     if changed.is_empty()
         || changed.iter().any(|p| {
             !safe_path(p)
                 || (!patches.contains_key(p)
-                    && !p.ends_with("/packages.lock.json")
-                    && p != "packages.lock.json")
+                    && !(locks_allowed
+                        && (p.ends_with("/packages.lock.json") || p == "packages.lock.json")))
         })
     {
         bail!("restore changed files outside the selected pins and NuGet lock files");
@@ -221,7 +265,7 @@ pub(crate) fn pin_commit_push(
             }
         }
     }
-    if locked != changed_packages {
+    if mode == RestoreMode::Locked && locked != changed_packages {
         bail!("restore did not produce the exact published package in a changed lock file");
     }
     ensure_head(gateway, consumer)?;
@@ -289,7 +333,7 @@ pub fn prepare_many(
             )
         })
         .collect();
-    let Some(pinned) = pin_commit_push(&pins, consumer, gateway)? else {
+    let Some(pinned) = pin_commit_push(&pins, consumer, RestoreMode::Locked, gateway)? else {
         return Ok(PrepareResult::Skipped {
             reason: "consumer already pins the published version".into(),
         });

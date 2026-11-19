@@ -262,7 +262,7 @@ pipetrain bump Acme.Util --org acme --to 2.0.0 --repo acme/api --check --json
 
 #### What happens in each phase
 
-It takes the target directly from `--to`, or looks up the latest version in the feed when `--to` is absent. It scans the selected repositories' manifests and classifies current pins against that target. It prints proposed changes without editing, committing, pushing or opening PRs. `--check` supplies a nonzero result when manifests would change. `--apply` opts into one draft PR per repo after the version is proven in the feed. Selection, filtering and error codes live in the [standalone bump reference](../README.md#bumping-a-package).
+It takes the target directly from `--to`, or looks up the latest stable version in the feed when `--to` is absent (`--prerelease` opts into a newer prerelease; the dry run states when one was ignored). For NuGet it also shows, per repo, the restore mode `--apply` would use (`locked`, `unlocked` or `skip`, from `--restore-mode`, `[bump.repos]` or `[bump]`) and the chosen solution. The reasons for the modes are in [bump restore modes](bump-restore-modes.md). It scans the selected repositories' manifests and classifies current pins against that target. It prints proposed changes without editing, committing, pushing or opening PRs. `--check` supplies a nonzero result when manifests would change. `--apply` opts into one draft PR per repo after the version is proven in the feed. Selection, filtering and error codes live in the [standalone bump reference](../README.md#bumping-a-package).
 
 #### What can go wrong and the right way out
 
@@ -271,7 +271,9 @@ There is no standalone `--apply`. Supply repositories explicitly or configure ex
 #### Tests
 
 - `tests/bump_scan.rs`: `a_dry_run_reports_each_manifest_and_only_reads`, `an_unknown_repo_is_skipped_with_a_warning_and_the_rest_is_read`, `when_no_repo_can_be_read_the_scan_fails`.
-- `tests/bump_cli.rs`: `apply_does_not_exist`, `a_package_missing_from_the_feed_exits_1`, `without_repos_or_profile_names_it_stops_before_the_feed`.
+- `tests/bump_cli.rs`: `apply_does_not_exist`, `a_package_missing_from_the_feed_exits_1`, `without_repos_or_profile_names_it_stops_before_the_feed`, `without_a_stable_version_the_default_target_stops_and_names_the_way_out`, `the_new_flags_are_accepted_by_the_parser`.
+- `tests/bump_apply.rs`: `unlocked_restores_plainly_builds_and_opens_a_repo_without_lock_files`, `skip_pins_and_opens_without_restoring_or_building`, `a_chosen_solution_resolves_a_repo_with_two_of_them`, `two_solutions_without_a_choice_name_the_files_in_the_skip_reason`.
+- `tests/bump_config.rs`: `a_repo_entry_beats_the_global_mode_and_the_global_mode_beats_the_default`, `the_command_line_beats_the_config_and_the_repo_key_ignores_case`.
 
 ## Use by agents
 

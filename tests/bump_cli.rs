@@ -193,6 +193,66 @@ fn changes_only_and_check_are_accepted_together() {
 }
 
 #[test]
+fn the_new_flags_are_accepted_by_the_parser() {
+    passes_the_parser(&[
+        "--restore-mode",
+        "unlocked",
+        "--solution",
+        "src/Acme.sln",
+        "--prerelease",
+    ]);
+}
+
+#[test]
+fn an_unknown_restore_mode_lists_the_valid_ones() {
+    let output = bump(&["Acme.Util", "--restore-mode", "fast"]);
+    assert_eq!(output.status.code(), Some(2));
+    let text = stderr(&output);
+    assert!(text.contains("invalid value 'fast'"), "{text}");
+    for mode in ["locked", "unlocked", "skip"] {
+        assert!(text.contains(mode), "{text}");
+    }
+}
+
+const ONLY_PRERELEASES: &str = r#"{"versions":{"2.0.0-beta.1":{},"2.0.0-beta.2":{}}}"#;
+
+fn only_prereleases(extra: &[&str]) -> (Output, Server) {
+    let server = serve(200, ONLY_PRERELEASES);
+    let mut args = vec![
+        "@acme/ui",
+        "--ecosystem",
+        "npm",
+        "--registry",
+        &server.base,
+        "--repo",
+        "acme/web",
+    ];
+    args.extend_from_slice(extra);
+    let output = bump(&args);
+    (output, server)
+}
+
+#[test]
+fn without_a_stable_version_the_default_target_stops_and_names_the_way_out() {
+    let (output, _server) = only_prereleases(&[]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(text.contains("no stable version"), "{text}");
+    assert!(text.contains("--prerelease"), "{text}");
+    assert!(stdout(&output).is_empty());
+}
+
+#[test]
+fn prerelease_moves_past_the_stable_gate() {
+    let (output, _server) = only_prereleases(&["--prerelease"]);
+    assert!(
+        !stderr(&output).contains("no stable version"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
 fn json_and_color_cannot_be_combined() {
     let output = bump(&["Acme.Util", "--json", "--color", "always"]);
     assert!(!output.status.success());
