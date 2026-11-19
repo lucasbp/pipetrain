@@ -246,6 +246,8 @@ fn bump_tool(args: &Value, config: Option<PathBuf>) -> Result<Output, Failure> {
         only: levels(args)?,
         changes_only: flag(args, "changes_only")?,
         check: false,
+        apply: false,
+        yes: false,
     };
     let outcome = bump::execute(&options)?;
     let text = bump::json_text(&outcome, &options)?;

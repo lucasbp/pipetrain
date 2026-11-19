@@ -262,7 +262,7 @@ pipetrain bump Acme.Util --org acme --to 2.0.0 --repo acme/api --check --json
 
 #### What happens in each phase
 
-It takes the target directly from `--to`, or looks up the latest version in the feed when `--to` is absent. It scans the selected repositories' manifests and classifies current pins against that target. It prints proposed changes without editing, committing, pushing or opening PRs. `--check` supplies a nonzero result when manifests would change. Selection, filtering and error codes live in the [standalone bump reference](../README.md#bumping-a-package-dry-run).
+It takes the target directly from `--to`, or looks up the latest version in the feed when `--to` is absent. It scans the selected repositories' manifests and classifies current pins against that target. It prints proposed changes without editing, committing, pushing or opening PRs. `--check` supplies a nonzero result when manifests would change. `--apply` opts into one draft PR per repo after the version is proven in the feed. Selection, filtering and error codes live in the [standalone bump reference](../README.md#bumping-a-package).
 
 #### What can go wrong and the right way out
 

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add opt-in `bump --apply` (with `--yes`): after proving the target version in the package feed, it opens one draft PR per repo from an isolated `pipetrain/bump/<package>-<version>` branch, with one commit that moves the manifests the dry run lists as `change`. It reuses the git, restore and push code of `merge --bump`, never forces a push, skips a repo whose bump branch already exists and stops at the first failure. NuGet repos need one solution and `packages.lock.json` files; npm repos with a lock file are skipped. Without `--apply` the behavior and `--json` are unchanged, `--apply` cannot be combined with `--check`, and the MCP `bump` tool stays a dry run.
+- Document what `merge --bump` covers and does not cover, including the consumer that falls behind a package the queue publishes without having a package edge to it.
 - `pipetrain update` prints a short aligned report: a bold `pipetrain <old> -> <new>` line, then `asset`, `sha256` (first 12 characters, the full hash with `--verbose`), `location` and a final `ok`. `location` no longer shows the Windows `\\?\` prefix (`\\?\UNC\srv\share` shows as `\\srv\share`), and the same goes for the path in `--dry-run`. Colors and bold follow the usual rules (terminal only, `NO_COLOR`); `--check` and `--json` are unchanged. The `error` prefix on failures is red on a terminal.
 - A repo with no PR workflow can merge approved PRs: `allow_missing_checks` (also per profile) and `checks_optional_repos` already accept a PR with no reported check, and the exception is now visible in the compact dry run, in `--verbose` and in the additive `exceptions` field of `preflight` in `--json`. Strict stays the default, and pending or failing checks and a branch rule that requires a check still block.
 

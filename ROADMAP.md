@@ -37,7 +37,8 @@ pipetrain plans the merge order of pull requests across repos. This file says wh
 - `pipetrain bundle --apply` shows a live colored checklist on stderr while it writes, one row per action with its duration, and stops with the failed row in red. Off with `--json`, `--no-progress`, `CI=true` or a redirected stderr.
 
 - `pipetrain feed <package> [--version <v>]`: a read-only check of whether a version is published in its NuGet or npm feed (GitHub Packages or a public registry), with `--json` and exit codes a runner can use.
-- `pipetrain bump <package> [--to <v>]`: a dry run of the consumer bump, built on `feed`. It reads the manifests of the chosen repos (or the exact repos of the profile) and reports each as `change`, `up_to_date`, `ahead` or `range`, with `--json`. It writes nothing and has no `--apply`.
+- `pipetrain bump <package> [--to <v>]`: a dry run of the consumer bump, built on `feed`. It reads the manifests of the chosen repos (or the exact repos of the profile) and reports each as `change`, `up_to_date`, `ahead` or `range`, with `--json`. Without `--apply` it writes nothing.
+- `pipetrain bump --apply`: opt-in, opens one draft PR per repo from an isolated branch with a commit that moves the manifests the dry run lists as `change`, only after the version is proven in the feed. It reuses the git, restore and push logic of `merge --bump`, never forces a push and stops at the first failure. NuGet needs one solution and lock files; npm skips repos with a lock file. See the README and `docs/publication-bump.md`.
 - `plan --check-feeds`: an opt-in flag that appends `(published)`, `(not yet)` or `(feed check failed: ...)` to each `# wait` comment that names a version, using the `feed` lookup. Informational only, with `published` and `feed_error` on `after[]` in `--json`.
 - A train label in addition to the branch name: `train_label` in the config (and in a profile) marks the PRs of the train by label, next to `train_branch`. A PR that matches either one is in the train.
 - `bump --only major|minor|patch`, `--changes-only` and `--check`: additive options on the dry run. `--only` (repeatable) leaves the other levels as `other_level`, `--changes-only` lists just the manifests that would change, and `--check` exits 1 when something would. Without them the output and the JSON are unchanged.
@@ -61,11 +62,10 @@ pipetrain plans the merge order of pull requests across repos. This file says wh
 Small, well understood, in this order:
 
 1. Finish the in-place update (`update` without a flag): download, verify the SHA-256 and swap the executable, on top of the existing experimental path.
-2. `bump --apply`: an opt-in mode that opens one PR per repo with the new version, on top of the dry run.
-3. A deeper conflict report that simulates the merge, beyond files changed by more than one PR.
-4. `feed`, `bump` and `plan --check-feeds` for Cargo (crates.io), `pyproject.toml` (PyPI) and Go modules: today they only know NuGet and npm.
-5. `cargo audit` (and `cargo deny` if it fits) in the CI workflow, so advisories fail a PR instead of being checked by hand.
-6. Compact `plan` text output by default, the way `merge` already is: per-check detail and full causes move to `--verbose`.
+2. A deeper conflict report that simulates the merge, beyond files changed by more than one PR.
+3. `feed`, `bump` and `plan --check-feeds` for Cargo (crates.io), `pyproject.toml` (PyPI) and Go modules: today they only know NuGet and npm.
+4. `cargo audit` (and `cargo deny` if it fits) in the CI workflow, so advisories fail a PR instead of being checked by hand.
+5. Compact `plan` text output by default, the way `merge` already is: per-check detail and full causes move to `--verbose`.
 
 ## Later
 
