@@ -843,6 +843,7 @@ fn applied() -> Settings {
         dependency_failure: DependencyFailure::Stop,
         bump: false,
         bump_options: Default::default(),
+        bump_behind: None,
     }
 }
 

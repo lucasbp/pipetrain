@@ -534,7 +534,7 @@ attention event and exit code 5 without changing the dependency graph.
 
 ## PRs that need a bump first
 
-The dry run reads the feed of every package a PR consumes through an exact pin. A PR whose pin is further behind than the repo's `max-behind` allows is left out as `waiting: needs a bump of <package> to <version>`, and a `bump` step in `planned` state appears before it. Its dependents wait for it. `merge --apply` does not execute that step yet. Rules and reasons: [bump-in-merge.md](bump-in-merge.md).
+The dry run reads the feed of every package a PR consumes through an exact pin. A PR whose pin is further behind than the repo's `max-behind` allows is left out as `waiting: needs a bump of <package> to <version>`, and a `bump` step in `planned` state appears before it. Its dependents wait for it. `merge --apply` executes that step only with `--bump-behind` (off by default): it opens a draft bump PR into the default branch of the consumer and keeps the PR waiting until that PR is merged, then updates the branch of the held PR with its base (a conflict makes it `blocked: merge conflict`) so the next plan releases it. Rules and reasons: [bump-in-merge.md](bump-in-merge.md).
 
 ## Shared preflight
 

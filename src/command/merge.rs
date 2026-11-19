@@ -27,6 +27,7 @@ use crate::style::{bold, dim, green, red, yellow};
 use crate::workflows::{self, PushRuns};
 
 mod admin;
+pub mod behind;
 pub mod bump;
 pub mod compact;
 mod failure;
@@ -57,6 +58,7 @@ pub struct MergeOptions {
     pub dependency_failure: DependencyFailure,
     pub bump: bool,
     pub bump_options: bump::Options,
+    pub bump_behind: Option<behind::Options>,
 }
 
 pub struct Settings {
@@ -70,6 +72,7 @@ pub struct Settings {
     pub dependency_failure: DependencyFailure,
     pub bump: bool,
     pub bump_options: bump::Options,
+    pub bump_behind: Option<behind::Options>,
 }
 
 pub struct Hooks<'a> {
@@ -198,6 +201,36 @@ fn bump_steps(plan: &Plan) -> Vec<StepReport> {
         .iter()
         .map(|need| StepReport::new(Kind::Bump, &need.id, Status::Planned, &need.step_detail()))
         .collect()
+}
+
+fn has_dependents(plan: &Plan, id: &str) -> bool {
+    let marker = format!("depends on {id}");
+    plan.skipped.iter().any(|skipped| {
+        skipped
+            .reasons
+            .iter()
+            .any(|reason| reason.contains(&marker))
+    })
+}
+
+fn behind_confirmation(plan: &Plan, store: &Store) -> String {
+    let mut text = String::from(
+        "\n--bump-behind: this run will push branches and open draft PRs in the consumer repos, then wait for them to be merged\n",
+    );
+    for need in &plan.bumps {
+        let known = store
+            .state
+            .bump_behind
+            .iter()
+            .any(|entry| entry.id == need.id && entry.package == need.package);
+        let state = if known {
+            "bump PR already open, checking it"
+        } else {
+            "opens a draft bump PR"
+        };
+        text.push_str(&format!("  {}: {state}\n", need.step_detail()));
+    }
+    text
 }
 
 fn planned_steps(plan: &Plan, cfg: &Config) -> Vec<StepReport> {
@@ -1464,18 +1497,23 @@ fn merge_plan_prepared(
     let bundles = arrange(&mut report, plan, store, settings, client);
     set_aside_inherited(&mut report, plan, &bundles, store, client);
     settle::annotate(&mut report.steps, plan, cfg, &store.state);
-    if report.steps.is_empty() {
+    let behind_work = settings.bump_behind.is_some()
+        && (!plan.bumps.is_empty() || !store.state.bump_behind.is_empty());
+    if report.steps.is_empty() && !behind_work {
         return Ok(Outcome {
             report,
             aborted: false,
             code: 0,
         });
     }
-    let confirmation = if compact {
+    let mut confirmation = if compact {
         compact::preview(&report, plan, true)
     } else {
         render(&report, false)
     };
+    if behind_work {
+        confirmation.push_str(&behind_confirmation(plan, store));
+    }
     if !(hooks.confirm)(&confirmation) {
         return Ok(Outcome {
             report,
@@ -1487,6 +1525,52 @@ fn merge_plan_prepared(
     if store.state.profile.is_none() {
         store.state.profile = profile.map(str::to_string);
     }
+    let mut behind_steps = Vec::new();
+    let mut behind_halt: Option<String> = None;
+    if let Some(options) = &settings.bump_behind {
+        let mut gateway = behind::GithubGateway {
+            client: &mut *client,
+            cfg,
+            options,
+        };
+        behind_steps = behind::run(&plan.bumps, store, &mut gateway);
+        for step in &behind_steps {
+            (hooks.observe)(step);
+            if step.status == Status::Skipped && step.blocked_by.is_some() {
+                let conflict = NotMerging::new(&step.target, vec!["merge conflict".to_string()]);
+                match report
+                    .not_merging
+                    .iter_mut()
+                    .find(|entry| entry.id == step.target)
+                {
+                    Some(entry) => *entry = conflict,
+                    None => report.not_merging.push(conflict),
+                }
+            }
+            if step.status == Status::Failed
+                && settings.dependency_failure == DependencyFailure::Stop
+                && has_dependents(plan, &step.target)
+                && behind_halt.is_none()
+            {
+                behind_halt = Some(step.target.clone());
+            }
+        }
+    }
+    if let Some(blocker) = behind_halt {
+        for step in &mut report.steps {
+            step.status = Status::Skipped;
+            step.detail = STOPPED.to_string();
+            step.blocked_by = Some(blocker.clone());
+        }
+        report.steps.splice(0..0, behind_steps);
+        report.summary = Summary::from_steps(&report.steps);
+        let code = report.exit_code();
+        return Ok(Outcome {
+            report,
+            aborted: false,
+            code,
+        });
+    }
     if cfg.max_parallel > 1 || settings.bump {
         parallel::execute(
             &env,
@@ -1497,6 +1581,7 @@ fn merge_plan_prepared(
             &bundles,
             &report.held,
         )?;
+        report.steps.splice(0..0, behind_steps);
         report.summary = Summary::from_steps(&report.steps);
         let code = report.exit_code();
         return Ok(Outcome {
@@ -1630,6 +1715,7 @@ fn merge_plan_prepared(
         (hooks.progress)(&progress_state.frame());
         report.steps[index] = step;
     }
+    report.steps.splice(0..0, behind_steps);
     report.summary = Summary::from_steps(&report.steps);
     let code = report.exit_code();
     Ok(Outcome {
@@ -1755,6 +1841,9 @@ fn step_text(step: &StepReport, color: bool) -> String {
             format!("{what}{suffix}{deploy}{prediction}{settling}")
         }
         Status::Done => format!("{} {what}{suffix}{deploy}", tint(color, green, "done:")),
+        Status::Skipped if step.kind == Kind::Bump && step.blocked_by.is_none() => {
+            format!("{} {what}{suffix}", tint(color, yellow, "waiting:"))
+        }
         Status::Skipped => format!(
             "{} {what}{suffix}{deploy}",
             tint(
@@ -1978,6 +2067,7 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
         dependency_failure: opts.dependency_failure,
         bump: opts.bump,
         bump_options: opts.bump_options.clone(),
+        bump_behind: opts.bump_behind.clone(),
     };
     let (apply, yes) = (opts.apply, opts.yes);
     let mut confirmation_steps = planned_steps(&built, &cfg);

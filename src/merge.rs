@@ -281,6 +281,18 @@ impl AuditEntry {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BumpBehind {
+    pub id: String,
+    pub package: String,
+    pub from: String,
+    pub to: String,
+    pub number: u64,
+    pub pull_request_url: String,
+    pub branch: String,
+    pub recorded_at: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct State {
     #[serde(default)]
@@ -305,6 +317,8 @@ pub struct State {
     pub audit: Vec<AuditEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub admin_overrides: Vec<AdminOverrideRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bump_behind: Vec<BumpBehind>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

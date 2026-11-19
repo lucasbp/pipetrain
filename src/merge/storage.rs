@@ -302,6 +302,7 @@ fn has_work(state: &State) -> bool {
     !state.pending.is_empty()
         || !state.deploy_prs.is_empty()
         || !state.active_jobs.is_empty()
+        || !state.bump_behind.is_empty()
         || state.bump.as_ref().is_some_and(|journal| {
             !journal.publishers.is_empty()
                 || !journal.contracts.is_empty()

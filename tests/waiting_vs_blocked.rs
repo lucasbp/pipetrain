@@ -200,6 +200,7 @@ impl Fixture {
                 dependency_failure: DependencyFailure::Stop,
                 bump: false,
                 bump_options: Default::default(),
+                bump_behind: None,
             },
             &mut store,
             &mut Hooks {

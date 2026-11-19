@@ -772,6 +772,26 @@ struct MergeArgs {
 
     #[arg(
         long,
+        help = "With --apply, open a draft bump PR into each PR held with `needs a bump of` and wait for it to be merged (off by default)"
+    )]
+    bump_behind: bool,
+
+    #[arg(
+        long,
+        requires = "bump_behind",
+        help = "How --bump-behind proves a nuget pin: locked (lock files), unlocked (plain restore plus build) or skip (neither)"
+    )]
+    restore_mode: Option<pipetrain::consumer_bump::RestoreMode>,
+
+    #[arg(
+        long,
+        requires = "bump_behind",
+        help = "Solution file --bump-behind restores when a repo has several, relative to the repo root"
+    )]
+    solution: Option<String>,
+
+    #[arg(
+        long,
         requires = "apply",
         help = "Merge even though the plan has open questions (the default stops before merging anything)"
     )]
@@ -994,6 +1014,11 @@ fn run_merge(args: MergeArgs) -> Result<i32> {
             push_step: args.bump_push_step,
             ..Default::default()
         },
+        bump_behind: args.bump_behind.then_some(merge::behind::Options {
+            restore_mode: args.restore_mode,
+            solution: args.solution,
+            workspace: None,
+        }),
         allow_questions: args.allow_questions,
         method: args.method,
         timeout_minutes: args.timeout_minutes,
