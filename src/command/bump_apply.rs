@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -6,9 +7,10 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use super::apply::{Gate, gate, tint};
-use super::bump::{BumpOptions, Outcome, Report, Status};
+use super::bump::{BumpOptions, Outcome, Report, Status, restore_note};
 use super::feed::{self as feed_command, FeedOptions};
 use crate::config::ApiConfig;
+use crate::consumer_bump::RestoreSettings;
 use crate::consumer_bump::apply::{
     Applied, Candidate, DefaultBranchRemote, apply_repo, branch_name, pull_request_title,
 };
@@ -25,6 +27,8 @@ pub struct RepoResult {
     pub repo: String,
     pub status: &'static str,
     pub detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restore_mode: Option<&'static str>,
     pub branch: Option<String>,
     pub commit: Option<String>,
     pub pull_request_url: Option<String>,
@@ -82,7 +86,14 @@ pub fn plan_text(report: &Report, targets: &Targets, color: bool) -> String {
         )
     );
     for (repo, rows) in targets {
-        out.push_str(&format!("{}\n", tint(color, bold, repo)));
+        let note = report
+            .repos
+            .iter()
+            .find(|found| found.repo == *repo)
+            .and_then(|found| found.restore.as_ref())
+            .map(|settings| format!("  {}", tint(color, dim, &restore_note(settings))))
+            .unwrap_or_default();
+        out.push_str(&format!("{}{note}\n", tint(color, bold, repo)));
         for (path, current) in rows {
             out.push_str(&format!("  {path}  {current} -> {}\n", report.target));
         }
@@ -108,6 +119,7 @@ fn result(repo: &str, status: &'static str, detail: impl Into<String>) -> RepoRe
         repo: repo.to_string(),
         status,
         detail: detail.into(),
+        restore_mode: None,
         branch: None,
         commit: None,
         pull_request_url: None,
@@ -129,6 +141,7 @@ fn open_one(
     (package, version): (&str, &str),
     (repo, rows): (&str, &[(String, String)]),
     root: &Path,
+    settings: &RestoreSettings,
 ) -> Result<RepoResult> {
     let branch = branch_name(package, version);
     let meta = client.rest(&format!("/repos/{repo}"))?;
@@ -169,7 +182,14 @@ fn open_one(
     };
     let mut backend =
         LocalBackend::new(root.to_path_buf(), ProcessRunner, remote, WORKSPACE_TIMEOUT);
-    let applied = apply_repo(ecosystem, package, version, &candidate, &mut backend);
+    let applied = apply_repo(
+        ecosystem,
+        package,
+        version,
+        &candidate,
+        settings,
+        &mut backend,
+    );
     let workspace = backend.workspace().map(Path::to_path_buf);
     match applied {
         Ok(Applied::Opened(opened)) => {
@@ -198,10 +218,10 @@ fn open_one(
 pub fn apply_all(
     client: &mut Client,
     ecosystem: Ecosystem,
-    package: &str,
-    version: &str,
+    (package, version): (&str, &str),
     targets: &Targets,
     root: &Path,
+    settings: &BTreeMap<String, RestoreSettings>,
     observe: &mut dyn FnMut(&RepoResult),
 ) -> Vec<RepoResult> {
     let mut done = Vec::new();
@@ -210,10 +230,23 @@ pub fn apply_all(
         let found = if stopped {
             result(repo, "skipped", STOPPED)
         } else {
-            match open_one(client, ecosystem, (package, version), (repo, rows), root) {
+            let chosen = settings.get(repo).cloned().unwrap_or_default();
+            match open_one(
+                client,
+                ecosystem,
+                (package, version),
+                (repo, rows),
+                root,
+                &chosen,
+            ) {
                 Ok(found) => found,
                 Err(error) => result(repo, "failed", format!("{error:#}")),
             }
+        };
+        let found = RepoResult {
+            restore_mode: (ecosystem == Ecosystem::Nuget)
+                .then(|| settings.get(repo).map_or("locked", |s| s.mode.as_str())),
+            ..found
         };
         stopped |= found.status == "failed";
         observe(&found);
@@ -229,7 +262,11 @@ fn result_line(found: &RepoResult, color: bool) -> String {
         other => tint(color, dim, other),
     };
     let tail = found.pull_request_url.as_deref().unwrap_or(&found.detail);
-    format!("{label} {}  {tail}", found.repo)
+    let mode = found
+        .restore_mode
+        .map(|mode| format!(" ({mode})"))
+        .unwrap_or_default();
+    format!("{label} {}{mode}  {tail}", found.repo)
 }
 
 pub fn summary_line(repos: &[RepoResult], color: bool) -> String {
@@ -342,14 +379,19 @@ fn write_all(
         .context("no safe cache directory for isolated bump workspaces")?;
     let mut client = Client::new(github::token()?, api, opts.verbose);
     let color = !opts.json;
+    let settings: BTreeMap<String, RestoreSettings> = report
+        .repos
+        .iter()
+        .filter_map(|repo| Some((repo.repo.clone(), repo.restore.clone()?)))
+        .collect();
     let mut observe = |found: &RepoResult| eprintln!("{}", result_line(found, color));
     Ok(apply_all(
         &mut client,
         report.ecosystem,
-        &report.package,
-        &report.target,
+        (&report.package, &report.target),
         targets,
         &root,
+        &settings,
         &mut observe,
     ))
 }

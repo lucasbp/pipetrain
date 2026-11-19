@@ -11,6 +11,7 @@ use super::order::{Names, configured, names_of, read_repo, requests_line};
 use super::resolve;
 use crate::cache::{Cache, CacheMode};
 use crate::config::ApiConfig;
+use crate::consumer_bump::{RestoreMode, RestoreSettings};
 use crate::elapsed;
 use crate::feed::{self, Ecosystem};
 use crate::github::{self, Client};
@@ -36,6 +37,9 @@ pub struct BumpOptions {
     pub check: bool,
     pub apply: bool,
     pub yes: bool,
+    pub prerelease: bool,
+    pub restore_mode: Option<RestoreMode>,
+    pub solution: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -208,6 +212,7 @@ pub struct Row {
 pub struct RepoRows {
     pub repo: String,
     pub files: Vec<Row>,
+    pub restore: Option<RestoreSettings>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -216,6 +221,14 @@ pub struct Report {
     pub ecosystem: Ecosystem,
     pub target: String,
     pub repos: Vec<RepoRows>,
+    pub ignored_prerelease: Option<String>,
+}
+
+pub fn restore_note(settings: &RestoreSettings) -> String {
+    match &settings.solution {
+        Some(solution) => format!("restore: {}, solution {solution}", settings.mode.as_str()),
+        None => format!("restore: {}", settings.mode.as_str()),
+    }
 }
 
 impl Report {
@@ -233,6 +246,7 @@ impl Report {
                         status: classify(current, target),
                     })
                     .collect(),
+                restore: None,
             })
             .collect();
         Self {
@@ -240,7 +254,20 @@ impl Report {
             ecosystem,
             target: target.to_string(),
             repos,
+            ignored_prerelease: None,
         }
+    }
+
+    pub fn with_ignored_prerelease(mut self, ignored: Option<String>) -> Self {
+        self.ignored_prerelease = ignored;
+        self
+    }
+
+    pub fn with_restore(mut self, settings: impl Fn(&str) -> RestoreSettings) -> Self {
+        for repo in &mut self.repos {
+            repo.restore = Some(settings(&repo.repo));
+        }
+        self
     }
 
     pub fn restrict(mut self, only: &[Level]) -> Self {
@@ -311,6 +338,16 @@ pub fn render_rows(
     let mut out = String::new();
     let title = format!("bump {} to {}", report.package, report.target);
     out.push_str(&format!("{}\n", tint(color, bold, &title)));
+    if let Some(ignored) = &report.ignored_prerelease {
+        out.push_str(&format!(
+            "{}\n",
+            tint(
+                color,
+                yellow,
+                &format!("ignored newer prerelease {ignored}; pass --prerelease to use it")
+            )
+        ));
+    }
     for repo in &report.repos {
         let rows: Vec<&Row> = repo
             .files
@@ -320,7 +357,12 @@ pub fn render_rows(
         if rows.is_empty() {
             continue;
         }
-        out.push_str(&format!("{}\n", tint(color, bold, &repo.repo)));
+        let note = repo
+            .restore
+            .as_ref()
+            .map(|settings| format!("  {}", tint(color, dim, &restore_note(settings))))
+            .unwrap_or_default();
+        out.push_str(&format!("{}{note}\n", tint(color, bold, &repo.repo)));
         for row in rows {
             out.push_str(&format!("  {}\n", row_text(report, row, color)));
         }
@@ -359,7 +401,14 @@ pub fn to_json_with(report: &Report, only: &[Level], changes_only: bool) -> Valu
                     })
                 })
                 .collect();
-            json!({ "repo": repo.repo, "files": files })
+            let mut entry = json!({ "repo": repo.repo, "files": files });
+            if let Some(settings) = &repo.restore {
+                entry["restore_mode"] = json!(settings.mode.as_str());
+                if let Some(solution) = &settings.solution {
+                    entry["solution"] = json!(solution);
+                }
+            }
+            entry
         })
         .collect();
     let mut out = json!({
@@ -370,6 +419,9 @@ pub fn to_json_with(report: &Report, only: &[Level], changes_only: bool) -> Valu
         "repos": repos,
         "dry_run": true,
     });
+    if let Some(ignored) = &report.ignored_prerelease {
+        out["ignored_prerelease"] = json!(ignored);
+    }
     if !only.is_empty() {
         out["only"] = only.iter().map(|level| level.as_str()).collect();
     }
@@ -432,8 +484,17 @@ pub fn execute(opts: &BumpOptions) -> Result<Outcome> {
         registry: opts.registry.clone(),
         json: false,
     };
+    let mut ignored_prerelease = None;
     let target = match target_version(opts.to.as_deref(), || {
-        feed_command::latest(&feed_options, &mut before)
+        Ok(
+            match feed_command::latest_target(&feed_options, opts.prerelease, &mut before)? {
+                Ok(target) => {
+                    ignored_prerelease = target.ignored_prerelease;
+                    Ok(target.version)
+                }
+                Err(code) => Err(code),
+            },
+        )
     })? {
         Ok(target) => target,
         Err(code) => return Ok(Outcome::stop(before, code, started)),
@@ -454,8 +515,15 @@ pub fn execute(opts: &BumpOptions) -> Result<Outcome> {
         ));
         return Ok(Outcome::stop(before, 1, started));
     }
-    let report =
-        Report::build(&opts.package, ecosystem, &target, &scanned.repos).restrict(&opts.only);
+    let mut report = Report::build(&opts.package, ecosystem, &target, &scanned.repos)
+        .restrict(&opts.only)
+        .with_ignored_prerelease(ignored_prerelease);
+    if ecosystem == Ecosystem::Nuget {
+        report = report.with_restore(|repo| {
+            cfg.bump
+                .settings_for(repo, opts.restore_mode, opts.solution.as_deref())
+        });
+    }
     let elapsed = started.elapsed();
     let mut after = vec![requests_line(
         client.requests(),

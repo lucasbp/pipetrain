@@ -111,6 +111,16 @@ infra_globs = ["**/*.tf"]
 [packages]
 "acme.orders.client" = "acme/orders-client"
 
+# pipetrain bump --apply for nuget: how each pin is proven. locked (default)
+# needs packages.lock.json, unlocked restores plainly and builds, skip does
+# neither. A repo entry beats this value; --restore-mode beats both.
+[bump]
+restore_mode = "locked"
+
+[bump.repos."acme/orders-api"]
+restore_mode = "unlocked"
+solution = "src/Orders.slnx"
+
 # Request budget for one run.
 [api]
 max_requests = 300

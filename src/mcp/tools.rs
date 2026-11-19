@@ -233,6 +233,9 @@ fn bump_tool(args: &Value, config: Option<PathBuf>) -> Result<Output, Failure> {
     let options = BumpOptions {
         package: need(args, "package")?,
         to: text_arg(args, "to")?,
+        prerelease: false,
+        restore_mode: None,
+        solution: None,
         ecosystem: ecosystem(args)?,
         org: text_arg(args, "org")?,
         registry: text_arg(args, "registry")?,

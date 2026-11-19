@@ -5,7 +5,7 @@ use std::process::{Command, Output, Stdio};
 
 use anyhow::{Result, bail};
 use pipetrain::consumer_bump::apply::{Applied, Candidate, apply_repo};
-use pipetrain::consumer_bump::{BumpGateway, Consumer};
+use pipetrain::consumer_bump::{BumpGateway, Consumer, RestoreMode, RestoreSettings};
 use pipetrain::feed::Ecosystem;
 use serde_json::{Value, json};
 
@@ -518,6 +518,7 @@ struct Fake {
     files: BTreeMap<String, String>,
     head: String,
     resolves_lock: bool,
+    build_fails: bool,
     log: Vec<String>,
     committed: Vec<String>,
     body: String,
@@ -535,6 +536,7 @@ impl Fake {
             files,
             head: HEAD.to_string(),
             resolves_lock: true,
+            build_fails: false,
             log: Vec::new(),
             committed: Vec::new(),
             body: String::new(),
@@ -574,6 +576,17 @@ impl BumpGateway for Fake {
         }
         Ok(())
     }
+    fn restore_plain(&mut self, solution: &str) -> Result<()> {
+        self.log.push(format!("restore-plain {solution}"));
+        Ok(())
+    }
+    fn build(&mut self, solution: &str) -> Result<()> {
+        self.log.push(format!("build {solution}"));
+        if self.build_fails {
+            bail!("build failed");
+        }
+        Ok(())
+    }
     fn changed_files(&mut self) -> Result<Vec<String>> {
         Ok(self
             .files
@@ -610,7 +623,12 @@ fn rows(current: &str) -> Vec<(String, String)> {
     vec![(CSPROJ.to_string(), current.to_string())]
 }
 
-fn run_nuget(fake: &mut Fake, tree: &[String], rows: &[(String, String)]) -> Result<Applied> {
+fn run_nuget_with(
+    fake: &mut Fake,
+    tree: &[String],
+    rows: &[(String, String)],
+    settings: &RestoreSettings,
+) -> Result<Applied> {
     apply_repo(
         Ecosystem::Nuget,
         "Acme.Util",
@@ -622,8 +640,117 @@ fn run_nuget(fake: &mut Fake, tree: &[String], rows: &[(String, String)]) -> Res
             tree,
             rows,
         },
+        settings,
         fake,
     )
+}
+
+fn run_nuget(fake: &mut Fake, tree: &[String], rows: &[(String, String)]) -> Result<Applied> {
+    run_nuget_with(fake, tree, rows, &RestoreSettings::default())
+}
+
+fn settings(mode: RestoreMode, solution: Option<&str>) -> RestoreSettings {
+    RestoreSettings {
+        mode,
+        solution: solution.map(str::to_string),
+    }
+}
+
+#[test]
+fn unlocked_restores_plainly_builds_and_opens_a_repo_without_lock_files() {
+    let mut fake = Fake::nuget("1.2.0");
+    fake.files.remove(LOCK);
+    fake.original.remove(LOCK);
+    let found = tree(&["Acme.sln", CSPROJ]);
+    let applied = run_nuget_with(
+        &mut fake,
+        &found,
+        &rows("1.2.0"),
+        &settings(RestoreMode::Unlocked, None),
+    )
+    .unwrap();
+    assert!(matches!(applied, Applied::Opened(_)), "{applied:?}");
+    assert_eq!(
+        fake.log,
+        vec![
+            "worktree".to_string(),
+            format!("write {CSPROJ}"),
+            "restore-plain Acme.sln".to_string(),
+            "build Acme.sln".to_string(),
+            "commit bump Acme.Util to 2.0.0".to_string(),
+            "push pipetrain/bump/acme.util-2.0.0".to_string(),
+            "open".to_string(),
+        ]
+    );
+    assert_eq!(fake.committed, vec![CSPROJ.to_string()]);
+}
+
+#[test]
+fn a_failing_build_stops_an_unlocked_bump_before_the_push() {
+    let mut fake = Fake::nuget("1.2.0");
+    fake.build_fails = true;
+    let found = tree(&["Acme.sln", CSPROJ]);
+    let error = run_nuget_with(
+        &mut fake,
+        &found,
+        &rows("1.2.0"),
+        &settings(RestoreMode::Unlocked, None),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("build failed"), "{error}");
+    assert!(!fake.log.iter().any(|entry| entry.starts_with("push")));
+}
+
+#[test]
+fn skip_pins_and_opens_without_restoring_or_building() {
+    let mut fake = Fake::nuget("1.2.0");
+    let found = tree(&[CSPROJ]);
+    let applied = run_nuget_with(
+        &mut fake,
+        &found,
+        &rows("1.2.0"),
+        &settings(RestoreMode::Skip, None),
+    )
+    .unwrap();
+    assert!(matches!(applied, Applied::Opened(_)), "{applied:?}");
+    assert!(
+        !fake
+            .log
+            .iter()
+            .any(|entry| entry.starts_with("restore") || entry.starts_with("build")),
+        "{:?}",
+        fake.log
+    );
+}
+
+#[test]
+fn a_chosen_solution_resolves_a_repo_with_two_of_them() {
+    let mut fake = Fake::nuget("1.2.0");
+    let found = tree(&["A.sln", "B.slnx", CSPROJ, LOCK]);
+    let applied = run_nuget_with(
+        &mut fake,
+        &found,
+        &rows("1.2.0"),
+        &settings(RestoreMode::Locked, Some("B.slnx")),
+    )
+    .unwrap();
+    assert!(matches!(applied, Applied::Opened(_)), "{applied:?}");
+    assert!(fake.log.contains(&"restore B.slnx locked=true".to_string()));
+}
+
+#[test]
+fn two_solutions_without_a_choice_name_the_files_in_the_skip_reason() {
+    let mut fake = Fake::nuget("1.2.0");
+    let found = tree(&["A.sln", "B.slnx", CSPROJ, LOCK]);
+    let Applied::Skipped(reason) = run_nuget(&mut fake, &found, &rows("1.2.0")).unwrap() else {
+        panic!("expected a skip");
+    };
+    assert!(
+        reason.contains("A.sln") && reason.contains("B.slnx"),
+        "{reason}"
+    );
+    assert!(reason.contains("--solution"), "{reason}");
+    assert!(fake.log.is_empty());
 }
 
 #[test]

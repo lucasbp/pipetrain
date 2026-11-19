@@ -330,6 +330,31 @@ impl<R: Runner, G: ConsumerRemote> BumpGateway for LocalBackend<R, G> {
         self.execute(&tree, "dotnet", &args)?;
         Ok(())
     }
+    fn restore_plain(&mut self, solution: &str) -> Result<()> {
+        self.file(solution)?;
+        let tree = self.tree.clone().context("missing worktree")?;
+        let args = vec![
+            "restore".into(),
+            solution.into(),
+            "--nologo".into(),
+            "--disable-build-servers".into(),
+        ];
+        self.execute(&tree, "dotnet", &args)?;
+        Ok(())
+    }
+    fn build(&mut self, solution: &str) -> Result<()> {
+        self.file(solution)?;
+        let tree = self.tree.clone().context("missing worktree")?;
+        let args = vec![
+            "build".into(),
+            solution.into(),
+            "--no-restore".into(),
+            "--nologo".into(),
+            "--disable-build-servers".into(),
+        ];
+        self.execute(&tree, "dotnet", &args)?;
+        Ok(())
+    }
     fn changed_files(&mut self) -> Result<Vec<String>> {
         let status = self.git(&["status", "--porcelain=v1", "--untracked-files=all"])?;
         status

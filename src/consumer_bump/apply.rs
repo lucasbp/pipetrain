@@ -5,7 +5,9 @@ use regex::Regex;
 use serde_json::{Value, json};
 
 use super::backend::{ConsumerRemote, GithubRemote};
-use super::{BumpGateway, Consumer, ensure_head, pin_commit_push, safe_path};
+use super::{
+    BumpGateway, Consumer, RestoreMode, RestoreSettings, ensure_head, pin_commit_push, safe_path,
+};
 use crate::command::bump::{Status, classify};
 use crate::feed::Ecosystem;
 use crate::github::Client;
@@ -75,6 +77,7 @@ pub fn pull_request_body(
     package: &str,
     version: &str,
     rows: &[(String, String)],
+    mode: RestoreMode,
 ) -> String {
     let files = rows
         .iter()
@@ -82,9 +85,17 @@ pub fn pull_request_body(
         .collect::<Vec<_>>()
         .join("\n");
     let closing = match ecosystem {
-        Ecosystem::Nuget => {
-            "The commit also holds the restored `packages.lock.json` files. Restore and locked-mode restore passed in an isolated workspace."
-        }
+        Ecosystem::Nuget => match mode {
+            RestoreMode::Locked => {
+                "The commit also holds the restored `packages.lock.json` files. Restore and locked-mode restore passed in an isolated workspace."
+            }
+            RestoreMode::Unlocked => {
+                "Restore mode `unlocked`: a plain restore and a build of the solution passed in an isolated workspace, which is the proof of the pin. The repository has no lock file proving it."
+            }
+            RestoreMode::Skip => {
+                "Restore mode `skip`: nothing was restored or built, so only the manifests changed and CI is the only proof of the pin."
+            }
+        },
         Ecosystem::Npm => {
             "The repository has no npm lock file next to these manifests, so only the manifests changed."
         }
@@ -106,23 +117,51 @@ fn sibling(dir: &str, name: &str) -> String {
     }
 }
 
-pub fn find_solution(tree: &[String]) -> Result<String, String> {
+pub fn find_solution(tree: &[String], chosen: Option<&str>) -> Result<String, String> {
     let found: Vec<&String> = tree
         .iter()
         .filter(|path| path.ends_with(".sln") || path.ends_with(".slnx"))
         .collect();
+    let listed = found
+        .iter()
+        .map(|path| path.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if let Some(wanted) = chosen {
+        return if found.iter().any(|path| path.as_str() == wanted) {
+            Ok(wanted.to_string())
+        } else if found.is_empty() {
+            Err(format!(
+                "solution {wanted} is not in the repository, which has no solution file"
+            ))
+        } else {
+            Err(format!(
+                "solution {wanted} is not in the repository; found: {listed}"
+            ))
+        };
+    }
     match found.as_slice() {
         [one] => Ok((*one).clone()),
         [] => Err("no solution file in the repository, so there is nothing to restore".into()),
         many => Err(format!(
-            "{} solution files in the repository; pipetrain does not guess which one to restore",
+            "{} solution files in the repository ({listed}); pipetrain does not guess which one to restore, pass --solution or set `solution` for this repo under [bump.repos]",
             many.len()
         )),
     }
 }
 
-pub fn check_nuget(tree: &[String], rows: &[(String, String)]) -> Result<String, String> {
-    let solution = find_solution(tree)?;
+pub fn check_nuget(
+    tree: &[String],
+    rows: &[(String, String)],
+    settings: &RestoreSettings,
+) -> Result<String, String> {
+    if settings.mode == RestoreMode::Skip {
+        return Ok(settings.solution.clone().unwrap_or_default());
+    }
+    let solution = find_solution(tree, settings.solution.as_deref())?;
+    if settings.mode == RestoreMode::Unlocked {
+        return Ok(solution);
+    }
     let locks: BTreeSet<&str> = tree
         .iter()
         .map(String::as_str)
@@ -130,7 +169,7 @@ pub fn check_nuget(tree: &[String], rows: &[(String, String)]) -> Result<String,
         .collect();
     if locks.is_empty() {
         return Err(
-            "the repository has no packages.lock.json, so a locked restore cannot prove the pin"
+            "the repository has no packages.lock.json, so a locked restore cannot prove the pin; use --restore-mode unlocked or skip, or set restore_mode for this repo under [bump.repos]"
                 .into(),
         );
     }
@@ -244,13 +283,14 @@ pub fn apply_repo(
     package: &str,
     version: &str,
     candidate: &Candidate,
+    settings: &RestoreSettings,
     gateway: &mut impl BumpGateway,
 ) -> Result<Applied> {
     if candidate.rows.is_empty() || candidate.rows.iter().any(|(path, _)| !safe_path(path)) {
         bail!("manifest paths must be relative paths inside the repository");
     }
     let solution = match ecosystem {
-        Ecosystem::Nuget => match check_nuget(candidate.tree, candidate.rows) {
+        Ecosystem::Nuget => match check_nuget(candidate.tree, candidate.rows, settings) {
             Ok(solution) => solution,
             Err(reason) => return Ok(Applied::Skipped(reason)),
         },
@@ -281,7 +321,7 @@ pub fn apply_repo(
                 package.to_ascii_lowercase(),
                 (package.to_string(), version.to_string()),
             )]);
-            pin_commit_push(&pins, &consumer, gateway)?.map(|pinned| pinned.commit)
+            pin_commit_push(&pins, &consumer, settings.mode, gateway)?.map(|pinned| pinned.commit)
         }
         Ecosystem::Npm => pin_npm_commit_push(package, version, &consumer, gateway)?,
     };
@@ -290,7 +330,7 @@ pub fn apply_repo(
             "the manifests already pin that version".into(),
         ));
     };
-    let body = pull_request_body(ecosystem, package, version, candidate.rows);
+    let body = pull_request_body(ecosystem, package, version, candidate.rows, settings.mode);
     let url = gateway.open_review_pr(&consumer, &commit, &body)?;
     Ok(Applied::Opened(Box::new(Opened {
         branch,
@@ -360,6 +400,95 @@ mod tests {
             .collect()
     }
 
+    fn locked() -> RestoreSettings {
+        RestoreSettings::default()
+    }
+
+    fn with(mode: RestoreMode, solution: Option<&str>) -> RestoreSettings {
+        RestoreSettings {
+            mode,
+            solution: solution.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn unlocked_needs_a_solution_but_no_lock_file() {
+        let found = tree(&["Acme.sln", "Api.csproj"]);
+        assert_eq!(
+            check_nuget(
+                &found,
+                &rows(&["Api.csproj"]),
+                &with(RestoreMode::Unlocked, None)
+            ),
+            Ok("Acme.sln".to_string())
+        );
+        let none = tree(&["Api.csproj"]);
+        assert!(
+            check_nuget(
+                &none,
+                &rows(&["Api.csproj"]),
+                &with(RestoreMode::Unlocked, None)
+            )
+            .unwrap_err()
+            .contains("no solution file")
+        );
+    }
+
+    #[test]
+    fn skip_needs_neither_a_solution_nor_a_lock_file() {
+        let found = tree(&["Api.csproj"]);
+        assert_eq!(
+            check_nuget(
+                &found,
+                &rows(&["Api.csproj"]),
+                &with(RestoreMode::Skip, None)
+            ),
+            Ok(String::new())
+        );
+    }
+
+    #[test]
+    fn several_solutions_list_the_files_found_and_a_choice_picks_one() {
+        let found = tree(&["Acme.sln", "Acme.slnx", "Api.csproj", "packages.lock.json"]);
+        let error = check_nuget(&found, &rows(&["Api.csproj"]), &locked()).unwrap_err();
+        assert!(error.contains("2 solution files"), "{error}");
+        assert!(error.contains("Acme.sln, Acme.slnx"), "{error}");
+        assert!(error.contains("--solution"), "{error}");
+        assert_eq!(
+            check_nuget(
+                &found,
+                &rows(&["Api.csproj"]),
+                &with(RestoreMode::Locked, Some("Acme.slnx"))
+            ),
+            Ok("Acme.slnx".to_string())
+        );
+    }
+
+    #[test]
+    fn a_chosen_solution_that_is_not_in_the_repository_is_refused_with_the_files_found() {
+        let found = tree(&["Acme.sln", "Api.csproj", "packages.lock.json"]);
+        let error = check_nuget(
+            &found,
+            &rows(&["Api.csproj"]),
+            &with(RestoreMode::Locked, Some("Other.sln")),
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("Other.sln is not in the repository"),
+            "{error}"
+        );
+        assert!(error.contains("found: Acme.sln"), "{error}");
+    }
+
+    #[test]
+    fn the_body_says_which_restore_mode_proved_the_pin() {
+        let rows = [("A.csproj".to_string(), "1.0.0".to_string())];
+        let body = |mode| pull_request_body(Ecosystem::Nuget, "Acme.Util", "2.0.0", &rows, mode);
+        assert!(body(RestoreMode::Locked).contains("locked-mode restore passed"));
+        assert!(body(RestoreMode::Unlocked).contains("`unlocked`"));
+        assert!(body(RestoreMode::Skip).contains("`skip`"));
+    }
+
     #[test]
     fn the_branch_name_is_isolated_and_safe_for_scoped_packages() {
         assert_eq!(
@@ -380,24 +509,24 @@ mod tests {
             "src/Api/packages.lock.json",
         ]);
         assert_eq!(
-            check_nuget(&ok, &rows(&["src/Api/Api.csproj"])),
+            check_nuget(&ok, &rows(&["src/Api/Api.csproj"]), &locked()),
             Ok("Acme.sln".to_string())
         );
         let two = tree(&["A.sln", "B.sln", "Api.csproj", "packages.lock.json"]);
         assert!(
-            check_nuget(&two, &rows(&["Api.csproj"]))
+            check_nuget(&two, &rows(&["Api.csproj"]), &locked())
                 .unwrap_err()
                 .contains("2 solution files")
         );
         let none = tree(&["Api.csproj", "packages.lock.json"]);
         assert!(
-            check_nuget(&none, &rows(&["Api.csproj"]))
+            check_nuget(&none, &rows(&["Api.csproj"]), &locked())
                 .unwrap_err()
                 .contains("no solution file")
         );
         let unlocked = tree(&["Acme.sln", "Api.csproj"]);
         assert!(
-            check_nuget(&unlocked, &rows(&["Api.csproj"]))
+            check_nuget(&unlocked, &rows(&["Api.csproj"]), &locked())
                 .unwrap_err()
                 .contains("no packages.lock.json")
         );
@@ -408,7 +537,7 @@ mod tests {
             "a/packages.lock.json",
         ]);
         assert_eq!(
-            check_nuget(&partial, &rows(&["b/B.csproj"])).unwrap_err(),
+            check_nuget(&partial, &rows(&["b/B.csproj"]), &locked()).unwrap_err(),
             "b/B.csproj has no packages.lock.json next to it"
         );
     }
@@ -421,7 +550,7 @@ mod tests {
             "x/packages.lock.json",
         ]);
         assert_eq!(
-            check_nuget(&found, &rows(&["Directory.Packages.props"])),
+            check_nuget(&found, &rows(&["Directory.Packages.props"]), &locked()),
             Ok("Acme.slnx".to_string())
         );
     }
@@ -478,6 +607,7 @@ mod tests {
             "@acme/ui",
             "2.0.0",
             &[("web/package.json".to_string(), "1.0.0".to_string())],
+            RestoreMode::Locked,
         );
         assert!(body.contains("pipetrain opened this draft pull request"));
         assert!(body.contains("`@acme/ui` to 2.0.0"));

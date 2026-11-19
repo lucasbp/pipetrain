@@ -8,6 +8,7 @@ use chrono::format::{Item, StrftimeItems};
 use globset::{Glob, GlobBuilder, GlobSet, GlobSetBuilder};
 use serde::Deserialize;
 
+use crate::consumer_bump::{RestoreMode, RestoreSettings};
 use crate::model::{ChangedFile, Pr};
 
 mod order;
@@ -71,7 +72,46 @@ pub struct Config {
     pub packages: BTreeMap<String, String>,
     pub api: ApiConfig,
     pub merge: MergeConfig,
+    pub bump: BumpConfig,
     pub log: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BumpConfig {
+    pub restore_mode: Option<RestoreMode>,
+    pub repos: BTreeMap<String, BumpRepoConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BumpRepoConfig {
+    pub restore_mode: Option<RestoreMode>,
+    pub solution: Option<String>,
+}
+
+impl BumpConfig {
+    pub fn settings_for(
+        &self,
+        repo: &str,
+        mode: Option<RestoreMode>,
+        solution: Option<&str>,
+    ) -> RestoreSettings {
+        let own = self
+            .repos
+            .iter()
+            .find(|(slug, _)| slug.eq_ignore_ascii_case(repo))
+            .map(|(_, config)| config);
+        RestoreSettings {
+            mode: mode
+                .or(own.and_then(|config| config.restore_mode))
+                .or(self.restore_mode)
+                .unwrap_or_default(),
+            solution: solution
+                .map(str::to_string)
+                .or_else(|| own.and_then(|config| config.solution.clone())),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -200,6 +240,7 @@ impl Default for Config {
             packages: BTreeMap::new(),
             api: ApiConfig::default(),
             merge: MergeConfig::default(),
+            bump: BumpConfig::default(),
             log: false,
         }
     }

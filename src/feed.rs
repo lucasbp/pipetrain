@@ -154,6 +154,10 @@ impl Version {
         &self.numbers
     }
 
+    pub fn is_prerelease(&self) -> bool {
+        !self.pre.is_empty()
+    }
+
     pub fn parse(text: &str) -> Self {
         let text = text.trim();
         let text = text.strip_prefix(['v', 'V']).unwrap_or(text);
@@ -204,6 +208,10 @@ pub fn compare(a: &str, b: &str) -> Ordering {
     Version::parse(a).cmp(&Version::parse(b))
 }
 
+pub fn is_prerelease(text: &str) -> bool {
+    Version::parse(text).is_prerelease()
+}
+
 pub fn newest_first(versions: &[String]) -> Vec<String> {
     let mut sorted = versions.to_vec();
     sorted.sort_by(|a, b| compare(b, a).then_with(|| b.cmp(a)));
@@ -219,6 +227,7 @@ pub struct Report {
     pub version: Option<String>,
     pub published: Option<bool>,
     pub latest: Option<String>,
+    pub latest_stable: Option<String>,
     pub versions: Vec<String>,
 }
 
@@ -243,6 +252,7 @@ impl Report {
             version: version.map(str::to_string),
             published,
             latest: ordered.first().cloned(),
+            latest_stable: ordered.iter().find(|v| !is_prerelease(v)).cloned(),
             versions: ordered.into_iter().take(RECENT).collect(),
         }
     }
@@ -460,6 +470,35 @@ mod tests {
 
     fn strings(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| item.to_string()).collect()
+    }
+
+    #[test]
+    fn a_suffix_after_a_dash_marks_a_prerelease_and_build_metadata_does_not() {
+        assert!(is_prerelease("1.2611.1900.46-develop"));
+        assert!(is_prerelease("2.0.0-rc.1"));
+        assert!(!is_prerelease("2.0.0"));
+        assert!(!is_prerelease("2.0.0+build.7"));
+    }
+
+    #[test]
+    fn the_report_names_the_latest_stable_version_next_to_the_latest() {
+        let report = Report::build(
+            "Acme.Util",
+            Ecosystem::Nuget,
+            "feed",
+            None,
+            &strings(&["1.0.0", "1.1.0", "1.2.0-develop"]),
+        );
+        assert_eq!(report.latest.as_deref(), Some("1.2.0-develop"));
+        assert_eq!(report.latest_stable.as_deref(), Some("1.1.0"));
+        let only_pre = Report::build(
+            "Acme.Util",
+            Ecosystem::Nuget,
+            "feed",
+            None,
+            &strings(&["1.0.0-beta"]),
+        );
+        assert_eq!(only_pre.latest_stable, None);
     }
 
     #[test]

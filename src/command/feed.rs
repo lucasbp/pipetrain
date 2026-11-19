@@ -351,6 +351,52 @@ pub fn latest(opts: &FeedOptions, notes: &mut Vec<String>) -> Result<Result<Stri
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target {
+    pub version: String,
+    pub ignored_prerelease: Option<String>,
+}
+
+pub fn choose_target(report: &feed::Report, prerelease: bool) -> Result<Target, String> {
+    let latest = report
+        .latest
+        .clone()
+        .ok_or_else(|| feed::not_found_message(&report.feed))?;
+    if prerelease {
+        return Ok(Target {
+            version: latest,
+            ignored_prerelease: None,
+        });
+    }
+    match &report.latest_stable {
+        Some(stable) => Ok(Target {
+            ignored_prerelease: (*stable != latest).then_some(latest),
+            version: stable.clone(),
+        }),
+        None => Err(format!(
+            "{} has no stable version in the feed (latest is {latest}); pass --prerelease or --to",
+            report.package
+        )),
+    }
+}
+
+pub fn latest_target(
+    opts: &FeedOptions,
+    prerelease: bool,
+    notes: &mut Vec<String>,
+) -> Result<Result<Target, i32>> {
+    Ok(match lookup(opts, notes)? {
+        Ok(report) => match choose_target(&report, prerelease) {
+            Ok(target) => Ok(target),
+            Err(message) => {
+                notes.push(message);
+                Err(feed::EXIT_NOT_PUBLISHED)
+            }
+        },
+        Err(code) => Err(code),
+    })
+}
+
 pub fn proof(opts: &FeedOptions, notes: &mut Vec<String>) -> Result<Result<bool, i32>> {
     Ok(lookup(opts, notes)?.map(|report| report.published == Some(true)))
 }
@@ -525,4 +571,49 @@ pub fn run(opts: FeedOptions) -> Result<i32> {
         println!("{text}");
     }
     Ok(rendered.exit)
+}
+
+#[cfg(test)]
+mod choose_tests {
+    use super::*;
+
+    fn report(versions: &[&str]) -> Report {
+        let found: Vec<String> = versions.iter().map(|v| v.to_string()).collect();
+        Report::build("Acme.Util", Ecosystem::Nuget, "feed", None, &found)
+    }
+
+    #[test]
+    fn the_default_is_the_latest_stable_and_reports_the_ignored_prerelease() {
+        let target = choose_target(&report(&["1.0.0", "1.1.0", "1.2.0-develop"]), false).unwrap();
+        assert_eq!(target.version, "1.1.0");
+        assert_eq!(target.ignored_prerelease.as_deref(), Some("1.2.0-develop"));
+    }
+
+    #[test]
+    fn a_stable_latest_ignores_nothing() {
+        let target = choose_target(&report(&["1.0.0", "1.1.0"]), false).unwrap();
+        assert_eq!(target.version, "1.1.0");
+        assert_eq!(target.ignored_prerelease, None);
+    }
+
+    #[test]
+    fn a_prerelease_older_than_the_stable_is_not_reported() {
+        let target = choose_target(&report(&["1.0.0-rc.1", "1.0.0"]), false).unwrap();
+        assert_eq!(target.version, "1.0.0");
+        assert_eq!(target.ignored_prerelease, None);
+    }
+
+    #[test]
+    fn the_opt_in_takes_the_latest_even_when_it_is_a_prerelease() {
+        let target = choose_target(&report(&["1.1.0", "1.2.0-develop"]), true).unwrap();
+        assert_eq!(target.version, "1.2.0-develop");
+        assert_eq!(target.ignored_prerelease, None);
+    }
+
+    #[test]
+    fn only_prereleases_without_the_opt_in_is_an_error_that_names_the_way_out() {
+        let message = choose_target(&report(&["1.0.0-beta"]), false).unwrap_err();
+        assert!(message.contains("no stable version"), "{message}");
+        assert!(message.contains("--prerelease"), "{message}");
+    }
 }
