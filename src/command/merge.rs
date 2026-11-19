@@ -32,6 +32,7 @@ mod failure;
 mod package;
 mod parallel;
 mod recovery;
+mod settle;
 mod stacked;
 
 const MERGEABILITY_TIMEOUT: Duration = Duration::from_secs(60);
@@ -95,6 +96,7 @@ struct Env<'a> {
     method: &'a str,
     readings: RefCell<BTreeMap<PushReadingKey, PushRuns>>,
     stacked: stacked::Evidence,
+    landings: settle::Landings,
 }
 
 impl Env<'_> {
@@ -597,6 +599,7 @@ fn merge_one(
 ) {
     let key = PrKey::new(&item.org, &item.repo, item.number);
     let slug = key.slug();
+    settle::wait(env, &slug, &item.base, &item.id, hooks);
     (hooks.progress)(&format!("checking merge readiness of {}", item.id));
     let started = (hooks.now)();
     let mut tries = 0;
@@ -891,6 +894,9 @@ fn finish_deploy(
     let (status, text) = deploy_phase(env, client, hooks, slug, base, sha, report);
     report.deploy = Some(text);
     report.status = status;
+    if report.deploy_outcome == Some(DeployOutcome::Confirmed) {
+        env.landings.record(slug, base, (hooks.now)());
+    }
     report.detail = match status {
         Status::Done => format!("merged {} into {base}", short(sha)),
         Status::Skipped => format!("merged {} into {base}, deploy skipped", short(sha)),
@@ -1336,6 +1342,7 @@ fn merge_plan_prepared(
         method: &method,
         readings: RefCell::new(BTreeMap::new()),
         stacked: stacked::Evidence::default(),
+        landings: settle::Landings::default(),
     };
     let requests = client.requests();
     let mut report = Report {
@@ -1386,6 +1393,7 @@ fn merge_plan_prepared(
         }
         let bundles = arrange(&mut report, plan, store, settings);
         set_aside_inherited(&mut report, plan, &bundles, store, client);
+        settle::annotate(&mut report.steps, plan, cfg, &store.state);
         report.api_estimate = estimate(plan, cfg, settings, store, requests, &report.steps);
         return Ok(Outcome {
             report,
@@ -1404,6 +1412,7 @@ fn merge_plan_prepared(
     }
     let bundles = arrange(&mut report, plan, store, settings);
     set_aside_inherited(&mut report, plan, &bundles, store, client);
+    settle::annotate(&mut report.steps, plan, cfg, &store.state);
     if report.steps.is_empty() {
         return Ok(Outcome {
             report,
@@ -1666,7 +1675,11 @@ fn step_text(step: &StepReport, color: bool) -> String {
                     format!("; {}", reading.detail(branch))
                 })
                 .unwrap_or_default();
-            format!("{what}{suffix}{deploy}{prediction}")
+            let settling = step
+                .settle_seconds
+                .map(|seconds| format!("; settling {seconds}s"))
+                .unwrap_or_default();
+            format!("{what}{suffix}{deploy}{prediction}{settling}")
         }
         Status::Done => format!("{} {what}{suffix}{deploy}", tint(color, green, "done:")),
         Status::Skipped => format!(

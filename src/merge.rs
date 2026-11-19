@@ -584,6 +584,8 @@ pub struct StepReport {
     pub resolution: Option<Resolution>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deploy_outcome: Option<DeployOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settle_seconds: Option<u64>,
     #[serde(skip)]
     pub inherited: bool,
 }
@@ -604,6 +606,7 @@ impl StepReport {
             expected_runs: Vec::new(),
             resolution: None,
             deploy_outcome: None,
+            settle_seconds: None,
             inherited: false,
         }
     }
