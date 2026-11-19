@@ -8,7 +8,7 @@ Start with [Common flows](docs/flows.md) for queue building, merge execution and
 
 ## Requirements
 
-- **Git is optional for planning and ordinary merges.** These use the GitHub API over HTTPS. `merge --bump --apply` and `bump --apply` require local Git, Git authentication and commit identity, plus the .NET SDK for NuGet restore checks; it fetches into isolated workspaces and can commit and push a bump branch. See [publication-backed preparation](docs/publication-bump.md). `merge --bump-behind --apply` needs the same tools: it opens a draft bump PR into each PR held with `needs a bump of`, see [docs/bump-in-merge.md](docs/bump-in-merge.md).
+- **Git is optional for planning and ordinary merges.** These use the GitHub API over HTTPS. `merge --bump --apply` and `bump --apply` require local Git, Git authentication and commit identity, plus the .NET SDK for NuGet restore checks; it fetches into isolated workspaces and can commit and push a bump branch. See [publication-backed preparation](docs/publication-bump.md). `merge --bump-behind --apply` needs the same tools: it opens a draft bump PR into the default branch for each PR held with `needs a bump of`, then updates the held PR branch with its base once that is merged, see [docs/bump-in-merge.md](docs/bump-in-merge.md).
 - **A GitHub token**, from one of two places: the GitHub CLI (`gh`, optional) once you ran `gh auth login`, or the `GH_TOKEN` environment variable. You need only one of them.
 - **Rust only to build from source.** A prebuilt binary needs nothing else. Building needs a recent stable Rust toolchain (the crate uses edition 2024).
 

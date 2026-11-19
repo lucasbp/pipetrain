@@ -518,7 +518,7 @@ pub fn finished_line(step: &StepReport, color: bool) -> String {
             tint(color, yellow, "stopped"),
             tint(color, dim, &cause(&step.detail))
         ),
-        Status::Skipped if step.kind == Kind::Bump => format!(
+        Status::Skipped if step.kind == Kind::Bump && step.blocked_by.is_none() => format!(
             "{label}  {}  {}",
             tint(color, yellow, "waiting"),
             tint(color, dim, &cause(&step.detail))

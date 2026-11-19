@@ -7,8 +7,7 @@ use crate::command::bump::{Status as RowStatus, classify, refs_of};
 use crate::config::Config;
 use crate::consumer_bump::RestoreMode;
 use crate::consumer_bump::apply::{
-    Applied, Candidate, DefaultBranchRemote, Placement, apply_placed, branch_name,
-    pull_request_title,
+    Applied, Candidate, DefaultBranchRemote, apply_repo, branch_name, pull_request_title,
 };
 use crate::consumer_bump::backend::{LocalBackend, ProcessRunner};
 use crate::feed::Ecosystem;
@@ -40,12 +39,20 @@ pub enum Opening {
         url: String,
         branch: String,
     },
+    AlreadyPinned,
     Skipped(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Update {
+    Updated,
+    Conflict(String),
 }
 
 pub trait Gateway {
     fn state(&mut self, repo: &str, number: u64) -> Result<PullState>;
     fn open(&mut self, need: &Need, to: &str) -> Result<Opening>;
+    fn update(&mut self, repo: &str, number: u64) -> Result<Update>;
 }
 
 fn repo_of(id: &str) -> &str {
@@ -90,6 +97,39 @@ fn settled(store: &mut Store, index: usize, state: PullState) -> StepReport {
     }
 }
 
+fn release(gateway: &mut dyn Gateway, need: &Need, via: &str) -> StepReport {
+    let Some(number) = number_of(&need.id) else {
+        return step(&need.id, Status::Failed, "the PR id has no number");
+    };
+    match gateway.update(repo_of(&need.id), number) {
+        Ok(Update::Updated) => step(
+            &need.id,
+            Status::Done,
+            format!(
+                "{via}; updated the branch of {} with its base, the next plan reads the new pin and releases it",
+                need.id
+            ),
+        ),
+        Ok(Update::Conflict(message)) => {
+            let mut blocked = step(
+                &need.id,
+                Status::Skipped,
+                format!(
+                    "merge conflict updating the branch of {} with its base: {message}",
+                    need.id
+                ),
+            );
+            blocked.blocked_by = Some(need.id.clone());
+            blocked
+        }
+        Err(error) => step(
+            &need.id,
+            Status::Failed,
+            format!("cannot update the branch of {}: {error:#}", need.id),
+        ),
+    }
+}
+
 fn existing(store: &mut Store, gateway: &mut dyn Gateway, need: &Need, index: usize) -> StepReport {
     let entry = store.state.bump_behind[index].clone();
     match gateway.state(repo_of(&need.id), entry.number) {
@@ -101,6 +141,24 @@ fn existing(store: &mut Store, gateway: &mut dyn Gateway, need: &Need, index: us
                 entry.pull_request_url
             ),
         ),
+        Ok(PullState::Merged) => {
+            let released = release(
+                gateway,
+                need,
+                &format!("bump PR {} was merged", entry.pull_request_url),
+            );
+            if released.status == Status::Failed {
+                return released;
+            }
+            match remove(store, index) {
+                Ok(_) => released,
+                Err(error) => step(
+                    &need.id,
+                    Status::Stopped,
+                    format!("cannot update the merge state: {error:#}"),
+                ),
+            }
+        }
         Ok(state) => settled(store, index, state),
         Err(error) => step(
             &need.id,
@@ -143,6 +201,11 @@ fn open_new(store: &mut Store, gateway: &mut dyn Gateway, need: &Need, to: &str)
                 ),
             }
         }
+        Ok(Opening::AlreadyPinned) => release(
+            gateway,
+            need,
+            &format!("the default branch already pins {} {to}", need.package),
+        ),
         Ok(Opening::Skipped(reason)) => step(
             &need.id,
             Status::Failed,
@@ -150,6 +213,26 @@ fn open_new(store: &mut Store, gateway: &mut dyn Gateway, need: &Need, to: &str)
         ),
         Err(error) => step(&need.id, Status::Failed, format!("{error:#}")),
     }
+}
+
+fn share(store: &mut Store, need: &Need, to: &str) -> Option<usize> {
+    let shared = store
+        .state
+        .bump_behind
+        .iter()
+        .find(|entry| {
+            entry.package == need.package
+                && entry.to == to
+                && repo_of(&entry.id) == repo_of(&need.id)
+        })?
+        .clone();
+    store.state.bump_behind.push(BumpBehind {
+        id: need.id.clone(),
+        from: need.from.clone(),
+        ..shared
+    });
+    store.save().ok()?;
+    Some(store.state.bump_behind.len() - 1)
 }
 
 pub fn run(needs: &[Need], store: &mut Store, gateway: &mut dyn Gateway) -> Vec<StepReport> {
@@ -162,7 +245,10 @@ pub fn run(needs: &[Need], store: &mut Store, gateway: &mut dyn Gateway) -> Vec<
             .position(|entry| entry.id == need.id && entry.package == need.package);
         let report = match (found, need.to.as_deref()) {
             (Some(index), _) => existing(store, gateway, need, index),
-            (None, Some(to)) => open_new(store, gateway, need, to),
+            (None, Some(to)) => match share(store, need, to) {
+                Some(index) => existing(store, gateway, need, index),
+                None => open_new(store, gateway, need, to),
+            },
             (None, None) => step(
                 &need.id,
                 Status::Skipped,
@@ -253,6 +339,21 @@ impl Gateway for GithubGateway<'_> {
         }
     }
 
+    fn update(&mut self, repo: &str, number: u64) -> Result<Update> {
+        let path = format!("/repos/{repo}/pulls/{number}/update-branch");
+        let reply = self.client.put_json(&path, &serde_json::json!({}))?;
+        match reply.status {
+            200..=299 => Ok(Update::Updated),
+            422 if reply.message().to_ascii_lowercase().contains("conflict") => {
+                Ok(Update::Conflict(reply.message()))
+            }
+            status => bail!(
+                "GitHub refused to update the branch of {repo}#{number} (HTTP {status}): {}",
+                reply.message()
+            ),
+        }
+    }
+
     fn open(&mut self, need: &Need, to: &str) -> Result<Opening> {
         let repo = repo_of(&need.id);
         let number = number_of(&need.id).context("the PR id has no number")?;
@@ -260,22 +361,14 @@ impl Gateway for GithubGateway<'_> {
         if pull["state"].as_str() != Some("open") {
             return Ok(Opening::Skipped(format!("{} is not open", need.id)));
         }
-        let same_repo = pull["head"]["repo"]["full_name"]
+        let base = pull["base"]["ref"]
             .as_str()
-            .is_some_and(|name| name.eq_ignore_ascii_case(repo));
-        if !same_repo {
-            return Ok(Opening::Skipped(
-                "the PR comes from a fork, pipetrain cannot push to it".into(),
-            ));
-        }
-        let head_ref = pull["head"]["ref"]
-            .as_str()
-            .context("GitHub did not name the PR head branch")?
+            .context("GitHub did not name the PR base branch")?
             .to_string();
-        let head_sha = pull["head"]["sha"]
-            .as_str()
-            .context("GitHub did not give the PR head commit")?
-            .to_string();
+        let head_sha = self
+            .client
+            .branch_tip(repo, &base)?
+            .with_context(|| format!("the base branch {base} of {} does not exist", need.id))?;
         let ecosystem = Ecosystem::default_for(&need.package);
         let (tree, truncated) = self.client.tree(repo, &head_sha)?;
         if truncated {
@@ -299,12 +392,9 @@ impl Gateway for GithubGateway<'_> {
             .filter(|(_, spec)| classify(spec, to) == RowStatus::Change)
             .collect();
         if rows.is_empty() {
-            return Ok(Opening::Skipped(format!(
-                "no manifest pins {} below {to}",
-                need.package
-            )));
+            return Ok(Opening::AlreadyPinned);
         }
-        let bump_branch = format!("{}-pr{number}", branch_name(&need.package, to));
+        let bump_branch = branch_name(&need.package, to);
         if self.client.branch_tip(repo, &bump_branch)?.is_some() {
             return Ok(Opening::Skipped(format!(
                 "branch {bump_branch} already exists, so an earlier run or someone else got there first"
@@ -318,26 +408,21 @@ impl Gateway for GithubGateway<'_> {
         let root = self.root()?;
         let candidate = Candidate {
             repo,
-            default_branch: &head_ref,
+            default_branch: &base,
             head_sha: &head_sha,
             tree: &tree,
             rows: &rows,
-        };
-        let placement = Placement {
-            number,
-            head_branch: head_ref.clone(),
-            bump_branch: bump_branch.clone(),
         };
         let remote = DefaultBranchRemote {
             client: &mut *self.client,
             title: pull_request_title(&need.package, to),
         };
         let mut backend = LocalBackend::new(root, ProcessRunner, remote, WORKSPACE_TIMEOUT);
-        let applied = apply_placed(
+        let applied = apply_repo(
             ecosystem,
-            (&need.package, to),
+            &need.package,
+            to,
             &candidate,
-            &placement,
             &settings,
             &mut backend,
         );
@@ -382,6 +467,9 @@ mod tests {
         opened: Vec<String>,
         refuse: Option<String>,
         next: u64,
+        updated: Vec<String>,
+        conflict: Option<String>,
+        pinned: bool,
     }
 
     impl Gateway for Fake {
@@ -396,6 +484,9 @@ mod tests {
             if let Some(reason) = &self.refuse {
                 bail!("{reason}");
             }
+            if self.pinned {
+                return Ok(Opening::AlreadyPinned);
+            }
             self.next += 1;
             let number = 100 + self.next;
             self.states.insert(number, PullState::Open);
@@ -403,8 +494,23 @@ mod tests {
             Ok(Opening::Opened {
                 number,
                 url: format!("https://example.test/acme/web/pull/{number}"),
-                branch: format!("pipetrain/bump/acme.core-{to}-pr{number}"),
+                branch: format!("pipetrain/bump/acme.core-{to}"),
             })
+        }
+
+        fn update(&mut self, repo: &str, number: u64) -> Result<Update> {
+            self.updated.push(format!("{repo}#{number}"));
+            Ok(match &self.conflict {
+                Some(message) => Update::Conflict(message.clone()),
+                None => Update::Updated,
+            })
+        }
+    }
+
+    fn other_need() -> Need {
+        Need {
+            id: "acme/web#8".into(),
+            ..need(Some("1.4.0"))
         }
     }
 
@@ -448,6 +554,66 @@ mod tests {
         let resumed = run(&[need(Some("1.4.0"))], &mut store, &mut fake);
         assert_eq!(resumed[0].status, Status::Done);
         assert!(resumed[0].detail.contains("was merged"));
+        assert!(resumed[0].detail.contains("updated the branch"));
+        assert_eq!(fake.updated, vec!["acme/web#7".to_string()]);
+        assert!(store.state.bump_behind.is_empty());
+    }
+
+    #[test]
+    fn an_open_bump_pr_does_not_update_the_branch() {
+        let mut store = store();
+        let mut fake = Fake::default();
+        run(&[need(Some("1.4.0"))], &mut store, &mut fake);
+        run(&[need(Some("1.4.0"))], &mut store, &mut fake);
+        assert!(fake.updated.is_empty());
+    }
+
+    #[test]
+    fn a_conflict_updating_the_branch_blocks_the_pr() {
+        let mut store = store();
+        let mut fake = Fake {
+            conflict: Some("merge conflict between base and head".into()),
+            ..Fake::default()
+        };
+        run(&[need(Some("1.4.0"))], &mut store, &mut fake);
+        fake.states.insert(101, PullState::Merged);
+        let found = run(&[need(Some("1.4.0"))], &mut store, &mut fake);
+        assert_eq!(found[0].status, Status::Skipped);
+        assert_eq!(found[0].blocked_by.as_deref(), Some("acme/web#7"));
+        assert!(found[0].detail.contains("merge conflict"));
+        assert!(store.state.bump_behind.is_empty());
+    }
+
+    #[test]
+    fn a_base_that_already_pins_the_version_goes_straight_to_the_update() {
+        let mut store = store();
+        let mut fake = Fake {
+            pinned: true,
+            ..Fake::default()
+        };
+        let found = run(&[need(Some("1.4.0"))], &mut store, &mut fake);
+        assert_eq!(found[0].status, Status::Done);
+        assert_eq!(fake.updated, vec!["acme/web#7".to_string()]);
+        assert!(fake.opened.is_empty());
+        assert!(store.state.bump_behind.is_empty());
+    }
+
+    #[test]
+    fn two_prs_of_one_repo_share_one_bump_pr() {
+        let mut store = store();
+        let mut fake = Fake::default();
+        let found = run(&[need(Some("1.4.0")), other_need()], &mut store, &mut fake);
+        assert_eq!(fake.opened.len(), 1);
+        assert_eq!(found[1].status, Status::Skipped);
+        assert_eq!(store.state.bump_behind.len(), 2);
+        fake.states.insert(101, PullState::Merged);
+        let resumed = run(&[need(Some("1.4.0")), other_need()], &mut store, &mut fake);
+        assert_eq!(resumed[0].status, Status::Done);
+        assert_eq!(resumed[1].status, Status::Done);
+        assert_eq!(
+            fake.updated,
+            vec!["acme/web#7".to_string(), "acme/web#8".to_string()]
+        );
         assert!(store.state.bump_behind.is_empty());
     }
 

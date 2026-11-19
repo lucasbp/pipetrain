@@ -278,41 +278,11 @@ fn pin_npm_commit_push(
     Ok(Some(commit))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Placement {
-    pub number: u64,
-    pub head_branch: String,
-    pub bump_branch: String,
-}
-
 pub fn apply_repo(
     ecosystem: Ecosystem,
     package: &str,
     version: &str,
     candidate: &Candidate,
-    settings: &RestoreSettings,
-    gateway: &mut impl BumpGateway,
-) -> Result<Applied> {
-    let placement = Placement {
-        number: 0,
-        head_branch: candidate.default_branch.to_string(),
-        bump_branch: branch_name(package, version),
-    };
-    apply_placed(
-        ecosystem,
-        (package, version),
-        candidate,
-        &placement,
-        settings,
-        gateway,
-    )
-}
-
-pub fn apply_placed(
-    ecosystem: Ecosystem,
-    (package, version): (&str, &str),
-    candidate: &Candidate,
-    placement: &Placement,
     settings: &RestoreSettings,
     gateway: &mut impl BumpGateway,
 ) -> Result<Applied> {
@@ -329,7 +299,7 @@ pub fn apply_placed(
             Err(reason) => return Ok(Applied::Skipped(reason)),
         },
     };
-    let branch = placement.bump_branch.clone();
+    let branch = branch_name(package, version);
     let files: Vec<String> = candidate
         .rows
         .iter()
@@ -337,8 +307,8 @@ pub fn apply_placed(
         .collect();
     let consumer = Consumer {
         repository: candidate.repo.to_string(),
-        number: placement.number,
-        head_branch: placement.head_branch.clone(),
+        number: 0,
+        head_branch: candidate.default_branch.to_string(),
         head_sha: candidate.head_sha.to_string(),
         default_branch: candidate.default_branch.to_string(),
         bump_branch: branch.clone(),

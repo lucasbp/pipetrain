@@ -32,6 +32,7 @@ fn merged_sha(number: u64) -> String {
 #[derive(Default)]
 struct Script {
     bump_pull: &'static str,
+    conflict: bool,
     log: Vec<String>,
 }
 
@@ -59,6 +60,16 @@ impl Script {
                 "merged" => (200, json!({"state": "closed", "merged": true})),
                 "closed" => (200, json!({"state": "closed", "merged": false})),
                 _ => (500, json!({"message": "boom"})),
+            };
+        }
+        if line.starts_with("PUT ") && line.ends_with("/update-branch") {
+            return if self.conflict {
+                (
+                    422,
+                    json!({"message": "merge conflict between base and head"}),
+                )
+            } else {
+                (202, json!({"message": "Updating pull request branch."}))
             };
         }
         if line.starts_with("POST /repos/") {
@@ -160,6 +171,7 @@ impl Fixture {
         .unwrap();
         let script = Arc::new(Mutex::new(Script {
             bump_pull,
+            conflict: false,
             log: Vec::new(),
         }));
         let shared = script.clone();
@@ -180,7 +192,7 @@ impl Fixture {
                 to: "1.4.0".into(),
                 number: 101,
                 pull_request_url: "https://github.com/acme/web/pull/101".into(),
-                branch: "pipetrain/bump/acme.core-1.4.0-pr7".into(),
+                branch: "pipetrain/bump/acme.core-1.4.0".into(),
                 recorded_at: "2026-11-18T12:00:00Z".into(),
             });
             store.save().unwrap();
@@ -266,6 +278,21 @@ impl Fixture {
             .filter(|step| step.kind == Kind::Bump)
             .map(|step| (step.status, step.detail.clone()))
             .collect()
+    }
+
+    fn with_conflict(self) -> Self {
+        self.script.lock().unwrap().conflict = true;
+        self
+    }
+
+    fn updates(&self) -> usize {
+        self.script
+            .lock()
+            .unwrap()
+            .log
+            .iter()
+            .filter(|line| line.as_str() == "PUT /repos/acme/web/pulls/7/update-branch")
+            .count()
     }
 
     fn touched_bump_pull(&self) -> bool {
@@ -371,14 +398,67 @@ fn the_independent_pr_still_merges_while_the_bump_waits() {
 }
 
 #[test]
-fn a_merged_bump_pr_is_cleared_from_the_state() {
+fn a_merged_bump_pr_updates_the_held_branch_and_clears_the_state() {
     let fixture = Fixture::new("merged", true);
     let outcome = fixture.run(&fixture.plan(false), true, true);
     let steps = Fixture::bump_steps(&outcome);
     assert_eq!(steps[0].0, Status::Done);
     assert!(steps[0].1.contains("was merged"));
+    assert!(steps[0].1.contains("updated the branch"));
+    assert_eq!(fixture.updates(), 1);
     assert!(fixture.store().state.bump_behind.is_empty());
     assert_eq!(outcome.code, 0);
+}
+
+#[test]
+fn an_open_bump_pr_never_updates_the_held_branch() {
+    let fixture = Fixture::new("open", true);
+    fixture.run(&fixture.plan(false), true, true);
+    assert_eq!(fixture.updates(), 0);
+}
+
+#[test]
+fn a_conflict_updating_the_branch_blocks_the_held_pr_and_the_queue_goes_on() {
+    let fixture = Fixture::new("merged", true).with_conflict();
+    let outcome = fixture.run(&fixture.plan(false), true, true);
+    let steps = Fixture::bump_steps(&outcome);
+    assert_eq!(steps[0].0, Status::Skipped);
+    assert!(steps[0].1.contains("merge conflict"));
+    let held = outcome
+        .report
+        .not_merging
+        .iter()
+        .find(|held| held.id == "acme/web#7")
+        .unwrap();
+    assert_eq!(held.reasons, vec!["merge conflict".to_string()]);
+    assert_eq!(held.state, pipetrain::merge::category::Category::Blocked);
+    assert!(
+        outcome
+            .report
+            .steps
+            .iter()
+            .any(|step| step.kind == Kind::Merge && step.status == Status::Done)
+    );
+    assert!(fixture.store().state.bump_behind.is_empty());
+}
+
+#[test]
+fn running_again_after_the_merge_updates_again_without_opening_anything() {
+    let fixture = Fixture::new("merged", true);
+    fixture.run(&fixture.plan(false), true, true);
+    let second = fixture.run(&fixture.plan(false), true, true);
+    assert_eq!(Fixture::bump_steps(&second)[0].0, Status::Done);
+    assert_eq!(fixture.updates(), 2);
+    assert!(fixture.store().state.bump_behind.is_empty());
+    assert!(
+        !fixture
+            .script
+            .lock()
+            .unwrap()
+            .log
+            .iter()
+            .any(|line| line.starts_with("POST /repos/"))
+    );
 }
 
 #[test]

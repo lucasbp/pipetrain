@@ -1536,6 +1536,17 @@ fn merge_plan_prepared(
         behind_steps = behind::run(&plan.bumps, store, &mut gateway);
         for step in &behind_steps {
             (hooks.observe)(step);
+            if step.status == Status::Skipped && step.blocked_by.is_some() {
+                let conflict = NotMerging::new(&step.target, vec!["merge conflict".to_string()]);
+                match report
+                    .not_merging
+                    .iter_mut()
+                    .find(|entry| entry.id == step.target)
+                {
+                    Some(entry) => *entry = conflict,
+                    None => report.not_merging.push(conflict),
+                }
+            }
             if step.status == Status::Failed
                 && settings.dependency_failure == DependencyFailure::Stop
                 && has_dependents(plan, &step.target)
@@ -1830,7 +1841,7 @@ fn step_text(step: &StepReport, color: bool) -> String {
             format!("{what}{suffix}{deploy}{prediction}{settling}")
         }
         Status::Done => format!("{} {what}{suffix}{deploy}", tint(color, green, "done:")),
-        Status::Skipped if step.kind == Kind::Bump => {
+        Status::Skipped if step.kind == Kind::Bump && step.blocked_by.is_none() => {
             format!("{} {what}{suffix}", tint(color, yellow, "waiting:"))
         }
         Status::Skipped => format!(
