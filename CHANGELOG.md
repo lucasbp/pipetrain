@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.11.0
 
 - Deploy polling backs off: the first 4 sleeps use `merge.poll_seconds` (15), then the interval doubles up to the new `merge.poll_max_seconds` (default `60`; a value at or below `poll_seconds` turns it off). The sleep is still capped by the remaining deadline, so deadlines and outcomes do not change. The `merge` API estimate simulates this scale (a 30 minute deploy counts 35 polls instead of 121) and its warning is now one short line, shown only when the total is over `api.max_requests` (still `300`) or over half of the known rate limit. `--json` `api_estimate` adds `warn` and, when known, `rate_remaining`.
 - New `merge.same_target_settle_seconds` (default `0`, off) and `merge.repo_same_target_settle_seconds` (per `org/repo` or `org/repo@base`): after a confirmed deploy, the next merge on the same repo and base waits for that window, capped by the deploy timeout. It helps when a workflow ends green while a blue/green deployment is still active. The dry run shows `settling <n>s` and `--json` adds the optional step field `settle_seconds`. When a deploy fails with `already has an active deployment`, the failure block explains it and gives the resume command.
