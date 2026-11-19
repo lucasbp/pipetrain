@@ -311,7 +311,19 @@ fn update_replaces_the_executable_after_verifying_it() {
     assert_eq!(fs::read(&sandbox.exe).unwrap(), NEW_BYTES);
     assert!(!sandbox.leftovers());
     let stdout = text(&out.stdout);
-    assert!(stdout.contains("updated pipetrain"), "{stdout}");
+    assert!(stdout.starts_with("pipetrain "), "{stdout}");
+    assert!(stdout.contains(" -> 99.0.0\n"), "{stdout}");
+    assert!(stdout.contains("\nasset    "), "{stdout}");
+    assert!(stdout.contains("\nlocation "), "{stdout}");
+    assert!(stdout.trim_end().ends_with("\nok"), "{stdout}");
+    assert!(
+        !stdout.contains('\x1b') && !stdout.contains(r"\\?\"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains(&sha256_hex(&Scenario::new().archive)),
+        "{stdout}"
+    );
     assert!(!stdout.contains(FAKE_TOKEN) && !stderr.contains(FAKE_TOKEN));
     let first = server.requests().remove(0).to_lowercase();
     assert!(first.contains(&format!(

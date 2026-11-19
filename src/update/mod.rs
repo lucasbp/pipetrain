@@ -1,5 +1,6 @@
 pub mod archive;
 pub mod checksum;
+pub mod display;
 pub mod error;
 pub mod notice;
 pub mod release;

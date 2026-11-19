@@ -351,6 +351,10 @@ pub fn latest(opts: &FeedOptions, notes: &mut Vec<String>) -> Result<Result<Stri
     })
 }
 
+pub fn proof(opts: &FeedOptions, notes: &mut Vec<String>) -> Result<Result<bool, i32>> {
+    Ok(lookup(opts, notes)?.map(|report| report.published == Some(true)))
+}
+
 pub struct WaitOptions {
     pub interval: Duration,
     pub timeout: Duration,

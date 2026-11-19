@@ -4,6 +4,7 @@ use regex::Regex;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
+pub mod apply;
 pub mod backend;
 pub mod journal;
 
@@ -51,7 +52,7 @@ pub trait BumpGateway {
     fn open_review_pr(&mut self, consumer: &Consumer, commit: &str, body: &str) -> Result<String>;
 }
 
-fn safe_path(path: &str) -> bool {
+pub(crate) fn safe_path(path: &str) -> bool {
     !path.is_empty()
         && !path.contains(['\\', ':'])
         && !path.chars().any(char::is_control)
@@ -119,7 +120,7 @@ pub fn pin_manifest(text: &str, package: &str, version: &str) -> Result<String> 
     Ok(patched)
 }
 
-fn ensure_head(gateway: &mut impl BumpGateway, consumer: &Consumer) -> Result<()> {
+pub(crate) fn ensure_head(gateway: &mut impl BumpGateway, consumer: &Consumer) -> Result<()> {
     if gateway.consumer_head(consumer)? != consumer.head_sha {
         bail!("consumer head moved; replan before preparing a bump");
     }
@@ -132,6 +133,111 @@ pub fn prepare(
     gateway: &mut impl BumpGateway,
 ) -> Result<PrepareResult> {
     prepare_many(std::slice::from_ref(publication), consumer, gateway)
+}
+
+pub(crate) struct Pinned {
+    pub commit: String,
+    pub packages: BTreeSet<String>,
+}
+
+pub(crate) fn pin_commit_push(
+    pins: &BTreeMap<String, (String, String)>,
+    consumer: &Consumer,
+    gateway: &mut impl BumpGateway,
+) -> Result<Option<Pinned>> {
+    ensure_head(gateway, consumer)?;
+    gateway.create_worktree(consumer)?;
+    if !gateway.changed_files()?.is_empty() {
+        bail!("new bump workspace is not clean");
+    }
+    let mut patches = BTreeMap::new();
+    let mut changed_packages = BTreeSet::new();
+    for path in &consumer.manifests {
+        let original = gateway.read(path)?;
+        let mut patched = original.clone();
+        for (key, (name, version)) in pins {
+            if crate::manifest::package_versions(path, &patched, name).is_empty() {
+                continue;
+            }
+            let next = pin_manifest(&patched, name, version)?;
+            if next != patched {
+                changed_packages.insert(key.clone());
+            }
+            patched = next;
+        }
+        if original != patched {
+            patches.insert(path.clone(), patched);
+        }
+    }
+    if patches.is_empty() {
+        return Ok(None);
+    }
+    for (path, text) in &patches {
+        gateway.write(path, text)?;
+    }
+    gateway.restore(&consumer.solution, false)?;
+    gateway.restore(&consumer.solution, true)?;
+    let changed = gateway.changed_files()?;
+    if changed.is_empty()
+        || changed.iter().any(|p| {
+            !safe_path(p)
+                || (!patches.contains_key(p)
+                    && !p.ends_with("/packages.lock.json")
+                    && p != "packages.lock.json")
+        })
+    {
+        bail!("restore changed files outside the selected pins and NuGet lock files");
+    }
+    for path in patches.keys() {
+        let current = gateway.read(path)?;
+        for key in &changed_packages {
+            let (name, version) = &pins[key];
+            if !crate::manifest::package_versions(path, &current, name).is_empty()
+                && pin_manifest(&current, name, version)? != current
+            {
+                bail!("restore changed the requested package pin");
+            }
+        }
+    }
+    let mut locked = BTreeSet::new();
+    for path in changed.iter().filter(|p| p.ends_with("packages.lock.json")) {
+        let value: serde_json::Value = serde_json::from_str(&gateway.read(path)?)?;
+        for framework in value["dependencies"]
+            .as_object()
+            .context("invalid NuGet lock dependency graph")?
+            .values()
+        {
+            for (package, dependency) in framework
+                .as_object()
+                .context("invalid NuGet target graph")?
+            {
+                let key = package.to_ascii_lowercase();
+                if changed_packages.contains(&key) {
+                    if dependency["resolved"] != pins[&key].1.as_str() {
+                        bail!("lock file resolves a different package version");
+                    }
+                    locked.insert(key);
+                }
+            }
+        }
+    }
+    if locked != changed_packages {
+        bail!("restore did not produce the exact published package in a changed lock file");
+    }
+    ensure_head(gateway, consumer)?;
+    let described = changed_packages
+        .iter()
+        .map(|key| format!("{} to {}", pins[key].0, pins[key].1))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let commit = gateway.commit(&changed, &format!("bump {described}"))?;
+    ensure_head(gateway, consumer)?;
+    gateway.push_new_branch(&consumer.bump_branch, &commit)?;
+    ensure_head(gateway, consumer)?;
+    Ok(Some(Pinned {
+        commit,
+        packages: changed_packages,
+    }))
 }
 
 pub fn prepare_many(
@@ -171,102 +277,26 @@ pub fn prepare_many(
     {
         bail!("consumer must name a PR head, isolated bump branch and safe NuGet project paths");
     }
-    ensure_head(gateway, consumer)?;
-    gateway.create_worktree(consumer)?;
-    if !gateway.changed_files()?.is_empty() {
-        bail!("new bump workspace is not clean");
-    }
-    let mut patches = BTreeMap::new();
-    let mut changed_packages = BTreeSet::new();
-    for path in &consumer.manifests {
-        let original = gateway.read(path)?;
-        let mut patched = original.clone();
-        for (package, evidence) in &evidence_by_package {
-            if crate::manifest::package_versions(path, &patched, evidence.package()).is_empty() {
-                continue;
-            }
-            let next = pin_manifest(&patched, evidence.package(), evidence.version())?;
-            if next != patched {
-                changed_packages.insert(package.clone());
-            }
-            patched = next;
-        }
-        if original != patched {
-            patches.insert(path.clone(), patched);
-        }
-    }
-    if patches.is_empty() {
+    let pins = evidence_by_package
+        .iter()
+        .map(|(key, evidence)| {
+            (
+                key.clone(),
+                (
+                    evidence.package().to_string(),
+                    evidence.version().to_string(),
+                ),
+            )
+        })
+        .collect();
+    let Some(pinned) = pin_commit_push(&pins, consumer, gateway)? else {
         return Ok(PrepareResult::Skipped {
             reason: "consumer already pins the published version".into(),
         });
-    }
-    for (path, text) in &patches {
-        gateway.write(path, text)?;
-    }
-    gateway.restore(&consumer.solution, false)?;
-    gateway.restore(&consumer.solution, true)?;
-    let changed = gateway.changed_files()?;
-    if changed.is_empty()
-        || changed.iter().any(|p| {
-            !safe_path(p)
-                || (!patches.contains_key(p)
-                    && !p.ends_with("/packages.lock.json")
-                    && p != "packages.lock.json")
-        })
-    {
-        bail!("restore changed files outside the selected pins and NuGet lock files");
-    }
-    for path in patches.keys() {
-        let current = gateway.read(path)?;
-        for package in &changed_packages {
-            let evidence = evidence_by_package[package];
-            if !crate::manifest::package_versions(path, &current, evidence.package()).is_empty()
-                && pin_manifest(&current, evidence.package(), evidence.version())? != current
-            {
-                bail!("restore changed the requested package pin");
-            }
-        }
-    }
-    let mut locked = BTreeSet::new();
-    for path in changed.iter().filter(|p| p.ends_with("packages.lock.json")) {
-        let value: serde_json::Value = serde_json::from_str(&gateway.read(path)?)?;
-        for framework in value["dependencies"]
-            .as_object()
-            .context("invalid NuGet lock dependency graph")?
-            .values()
-        {
-            for (package, dependency) in framework
-                .as_object()
-                .context("invalid NuGet target graph")?
-            {
-                let key = package.to_ascii_lowercase();
-                if changed_packages.contains(&key) {
-                    let evidence = evidence_by_package[&key];
-                    if dependency["resolved"] != evidence.version() {
-                        bail!("lock file resolves a different package version");
-                    }
-                    locked.insert(key);
-                }
-            }
-        }
-    }
-    if locked != changed_packages {
-        bail!("restore did not produce the exact published package in a changed lock file");
-    }
-    ensure_head(gateway, consumer)?;
-    let pins = changed_packages
-        .iter()
-        .map(|package| {
-            let e = evidence_by_package[package];
-            format!("{} to {}", e.package(), e.version())
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    let commit = gateway.commit(&changed, &format!("bump {pins}"))?;
-    ensure_head(gateway, consumer)?;
-    gateway.push_new_branch(&consumer.bump_branch, &commit)?;
-    ensure_head(gateway, consumer)?;
-    let evidence = changed_packages
+    };
+    let commit = pinned.commit;
+    let evidence = pinned
+        .packages
         .iter()
         .map(|package| evidence_by_package[package].clone())
         .collect::<Vec<_>>();

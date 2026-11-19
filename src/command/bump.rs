@@ -10,6 +10,7 @@ use super::feed::{self as feed_command, FeedOptions};
 use super::order::{Names, configured, names_of, read_repo, requests_line};
 use super::resolve;
 use crate::cache::{Cache, CacheMode};
+use crate::config::ApiConfig;
 use crate::elapsed;
 use crate::feed::{self, Ecosystem};
 use crate::github::{self, Client};
@@ -33,6 +34,8 @@ pub struct BumpOptions {
     pub only: Vec<Level>,
     pub changes_only: bool,
     pub check: bool,
+    pub apply: bool,
+    pub yes: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -379,6 +382,8 @@ pub struct Outcome {
     pub after: Vec<String>,
     pub exit: i32,
     pub elapsed: Duration,
+    pub(crate) feed: Option<FeedOptions>,
+    pub(crate) api: Option<ApiConfig>,
 }
 
 impl Outcome {
@@ -389,6 +394,8 @@ impl Outcome {
             after: Vec::new(),
             exit,
             elapsed: started.elapsed(),
+            feed: None,
+            api: None,
         }
     }
 }
@@ -467,6 +474,8 @@ pub fn execute(opts: &BumpOptions) -> Result<Outcome> {
         after,
         exit,
         elapsed,
+        feed: Some(feed_options),
+        api: Some(cfg.api.clone()),
     })
 }
 
@@ -479,7 +488,13 @@ pub fn json_text(outcome: &Outcome, opts: &BumpOptions) -> Result<Option<String>
 }
 
 pub fn run(opts: BumpOptions) -> Result<i32> {
+    if opts.apply {
+        super::bump_apply::check_gate(&opts)?;
+    }
     let outcome = execute(&opts)?;
+    if opts.apply {
+        return super::bump_apply::run(&opts, outcome);
+    }
     for note in &outcome.before {
         eprintln!("{note}");
     }

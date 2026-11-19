@@ -27,6 +27,7 @@ use crate::workflows;
 pub mod apply;
 pub mod authors;
 pub mod bump;
+pub mod bump_apply;
 mod checklist;
 pub mod feed;
 pub mod init;

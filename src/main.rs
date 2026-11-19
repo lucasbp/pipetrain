@@ -179,7 +179,10 @@ struct UpdateArgs {
     #[arg(long, hide = true)]
     api_url: Option<String>,
 
-    #[arg(long, help = "Log every API request to stderr")]
+    #[arg(
+        long,
+        help = "Log every API request to stderr and print the full sha256 of the download"
+    )]
     verbose: bool,
 }
 
@@ -277,6 +280,20 @@ struct BumpArgs {
         help = "Exit 1 when something would change, 0 when nothing would"
     )]
     check: bool,
+
+    #[arg(
+        long,
+        conflicts_with = "check",
+        help = "Open one draft PR per repo with the manifests listed as change, after the version is proven in the feed; without it nothing is written"
+    )]
+    apply: bool,
+
+    #[arg(
+        long,
+        requires = "apply",
+        help = "With --apply, skip the confirmation question (needed without a terminal)"
+    )]
+    yes: bool,
 }
 
 #[derive(clap::Args)]
@@ -982,6 +999,8 @@ fn run_bump(args: BumpArgs) -> Result<i32> {
         only: args.only,
         changes_only: args.changes_only,
         check: args.check,
+        apply: args.apply,
+        yes: args.yes,
     })
 }
 
@@ -1145,7 +1164,7 @@ fn dispatch(result: &Result<i32>) -> ExitCode {
         Ok(0) => ExitCode::SUCCESS,
         Ok(code) => ExitCode::from(u8::try_from(*code).unwrap_or(1)),
         Err(err) => {
-            eprintln!("error: {err:#}");
+            anstream::eprintln!("{}: {err:#}", pipetrain::style::error_label());
             ExitCode::FAILURE
         }
     }

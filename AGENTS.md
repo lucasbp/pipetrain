@@ -4,7 +4,7 @@ Read this first. `CLAUDE.md` imports it.
 
 ## What this is
 
-pipetrain is a Rust CLI that plans and executes merge queues across repositories. Planning is read-only on GitHub. `bundle --apply` creates deploy branches, retargets PRs and optionally opens deploy PRs. `merge --apply` merges PRs and waits for deployments; `merge --bump --apply` can also commit and push isolated dependency branches and open draft PRs. Standalone `bump` remains a dry run. Start with [common flows](docs/flows.md); see the README's scope and [merge contract](docs/merge.md) for boundaries.
+pipetrain is a Rust CLI that plans and executes merge queues across repositories. Planning is read-only on GitHub. `bundle --apply` creates deploy branches, retargets PRs and optionally opens deploy PRs. `merge --apply` merges PRs and waits for deployments; `merge --bump --apply` can also commit and push isolated dependency branches and open draft PRs. Standalone `bump` is a dry run unless given `--apply`, which opens one draft PR per repo after proving the version in the feed; the MCP `bump` tool stays a dry run. Start with [common flows](docs/flows.md); see the README's scope and [merge contract](docs/merge.md) for boundaries.
 
 ## Layout
 
