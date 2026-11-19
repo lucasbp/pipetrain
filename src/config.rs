@@ -88,6 +88,8 @@ pub struct MergeConfig {
     pub no_run_grace_seconds: u64,
     pub no_deploy_repos: Vec<String>,
     pub repo_timeout_minutes: BTreeMap<String, u64>,
+    pub same_target_settle_seconds: u64,
+    pub repo_same_target_settle_seconds: BTreeMap<String, u64>,
 }
 
 impl Default for MergeConfig {
@@ -104,11 +106,35 @@ impl Default for MergeConfig {
             no_run_grace_seconds: 120,
             no_deploy_repos: Vec::new(),
             repo_timeout_minutes: BTreeMap::new(),
+            same_target_settle_seconds: 0,
+            repo_same_target_settle_seconds: BTreeMap::new(),
         }
     }
 }
 
 impl MergeConfig {
+    pub fn same_target_settle(&self, slug: &str, base: &str) -> std::time::Duration {
+        let exact = self
+            .repo_same_target_settle_seconds
+            .iter()
+            .find(|(key, _)| {
+                key.split_once('@')
+                    .is_some_and(|(repo, branch)| repo.eq_ignore_ascii_case(slug) && branch == base)
+            })
+            .map(|(_, seconds)| *seconds);
+        let repo = || {
+            self.repo_same_target_settle_seconds
+                .iter()
+                .find(|(key, _)| !key.contains('@') && key.eq_ignore_ascii_case(slug))
+                .map(|(_, seconds)| *seconds)
+        };
+        std::time::Duration::from_secs(
+            exact
+                .or_else(repo)
+                .unwrap_or(self.same_target_settle_seconds),
+        )
+    }
+
     pub fn timeout_for(&self, slug: &str) -> std::time::Duration {
         let minutes = self
             .repo_timeout_minutes

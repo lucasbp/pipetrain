@@ -128,6 +128,12 @@ package_wait_seconds = 600
 # package_max_behind = 1
 no_run_grace_seconds = 120
 no_deploy_repos = []
+# Seconds to wait after a confirmed deploy before the next merge on the same repo and base. 0 is off.
+same_target_settle_seconds = 0
 
 [merge.repo_timeout_minutes]
 "acme/orders-api" = 60
+
+# Override per repo ("org/repo") or per target ("org/repo@base"), for example a blue/green deploy.
+[merge.repo_same_target_settle_seconds]
+"acme/orders-api@main" = 120

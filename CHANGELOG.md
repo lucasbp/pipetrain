@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- New `merge.same_target_settle_seconds` (default `0`, off) and `merge.repo_same_target_settle_seconds` (per `org/repo` or `org/repo@base`): after a confirmed deploy, the next merge on the same repo and base waits for that window, capped by the deploy timeout. It helps when a workflow ends green while a blue/green deployment is still active. The dry run shows `settling <n>s` and `--json` adds the optional step field `settle_seconds`. When a deploy fails with `already has an active deployment`, the failure block explains it and gives the resume command.
 - A repo with no PR workflow can merge approved PRs: `allow_missing_checks` (also per profile) and `checks_optional_repos` already accept a PR with no reported check, and the exception is now visible in the compact dry run, in `--verbose` and in the additive `exceptions` field of `preflight` in `--json`. Strict stays the default, and pending or failing checks and a branch rule that requires a check still block.
 
 ## 0.10.0

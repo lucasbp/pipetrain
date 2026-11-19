@@ -211,6 +211,12 @@ pub fn preview(report: &Report, plan: &Plan, color: bool) -> String {
                 } else {
                     format!("after {}", after.join(", "))
                 };
+                if let Some(seconds) = step.settle_seconds {
+                    if !note.is_empty() {
+                        note.push_str("; ");
+                    }
+                    note.push_str(&format!("settling {seconds}s"));
+                }
                 if step.admin_override.is_some() {
                     if !note.is_empty() {
                         note.push_str("; ");
@@ -695,6 +701,23 @@ pub fn final_report(report: &Report, color: bool, context: &Context) -> String {
     out
 }
 
+const ACTIVE_DEPLOYMENT: &str = "already has an active deployment";
+
+fn previous_deployment_active(step: &StepReport, context: &Context) -> bool {
+    [
+        step.deploy.as_deref(),
+        Some(step.detail.as_str()),
+        context.details.get(&step.target).map(String::as_str),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|text| text.to_lowercase().contains(ACTIVE_DEPLOYMENT))
+}
+
+fn job_label(detail: &str) -> &str {
+    detail.split_once("; ").map_or(detail, |(label, _)| label)
+}
+
 fn failure_block(step: &StepReport, color: bool, context: &Context, state: Option<&str>) -> String {
     let mut out = String::new();
     let head = if merged_with_failed_deploy(step) {
@@ -713,20 +736,35 @@ fn failure_block(step: &StepReport, color: bool, context: &Context, state: Optio
             .as_deref()
             .map(|sha| sha.chars().take(7).collect::<String>())
             .unwrap_or_default();
-        let mut what = format!("the merge went in at {sha}; {}", deploy_sentence(step));
+        let active = previous_deployment_active(step, context);
+        let mut what = if active {
+            format!(
+                "the merge went in at {sha}, but the previous deployment on this target was still active, so the new deploy was refused"
+            )
+        } else {
+            format!("the merge went in at {sha}; {}", deploy_sentence(step))
+        };
         if let Some(detail) = context.details.get(&step.target) {
-            what.push_str(&format!(" ({detail})"));
+            what.push_str(&format!(" ({})", job_label(detail)));
         }
         out.push_str(&format!("  what:    {what}\n"));
         if let Some(url) = failed_run_url(step) {
             out.push_str(&format!("  run:     {url}\n"));
         }
-        out.push_str("  unknown: whether production changed; open the run before deciding\n");
-        out.push_str(&format!(
-            "  next:    {}\n           or drop it for good: {}\n",
-            context.command,
-            discard_line(&step.target, state)
-        ));
+        if active {
+            out.push_str(&format!(
+                "  next:    wait until the previous deployment finishes, then resume: {}\n           to avoid it next time, set merge.same_target_settle_seconds in the config\n           or drop it for good: {}\n",
+                context.command,
+                discard_line(&step.target, state)
+            ));
+        } else {
+            out.push_str("  unknown: whether production changed; open the run before deciding\n");
+            out.push_str(&format!(
+                "  next:    {}\n           or drop it for good: {}\n",
+                context.command,
+                discard_line(&step.target, state)
+            ));
+        }
     } else {
         out.push_str(&format!(
             "  what:    {}\n  next:    fix it, then run again: {}\n",
@@ -785,10 +823,50 @@ pub fn enrich(client: &mut Client, report: &Report) -> BTreeMap<String, String> 
         };
         let path = format!("/repos/{slug}/actions/runs/{id}/jobs?per_page=100&filter=latest");
         if let Ok(value) = client.rest(&path)
-            && let Some(text) = describe_jobs(&value)
+            && let Some(mut text) = describe_jobs(&value)
         {
+            let known = [step.deploy.as_deref(), Some(step.detail.as_str())]
+                .into_iter()
+                .flatten()
+                .any(|text| text.to_lowercase().contains(ACTIVE_DEPLOYMENT));
+            if !known
+                && let Some(job) = failed_job_id(&value)
+                && let Some(message) = active_deployment_annotation(client, &slug, job)
+            {
+                text.push_str(&format!("; {message}"));
+            }
             details.insert(step.target.clone(), text);
         }
     }
     details
+}
+
+fn failed_job_id(value: &Value) -> Option<u64> {
+    value
+        .get("jobs")?
+        .as_array()?
+        .iter()
+        .find(|job| {
+            matches!(
+                job.get("conclusion").and_then(Value::as_str),
+                Some("failure" | "timed_out" | "cancelled")
+            )
+        })?
+        .get("id")?
+        .as_u64()
+}
+
+fn active_deployment_annotation(client: &mut Client, slug: &str, job: u64) -> Option<String> {
+    let value = client
+        .rest(&format!(
+            "/repos/{slug}/check-runs/{job}/annotations?per_page=50"
+        ))
+        .ok()?;
+    value.as_array()?.iter().find_map(|annotation| {
+        ["message", "title"]
+            .into_iter()
+            .filter_map(|field| annotation.get(field).and_then(Value::as_str))
+            .find(|text| text.to_lowercase().contains(ACTIVE_DEPLOYMENT))
+            .map(|text| truncate(&text.replace(['\n', '\r'], " "), 160))
+    })
 }

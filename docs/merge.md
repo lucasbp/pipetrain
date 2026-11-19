@@ -257,6 +257,8 @@ Among those questions is `package-release-behind`: before the run, the plan and 
 | `merge.package_max_behind` | none | Version limit used by the `package-release-behind` preflight when the consumer repo workflows do not state one. Without it and without a readable workflow limit, the preflight only warns `(not confirmed)`. |
 | `merge.no_run_grace_seconds` | `120` | How long to wait for the first workflow run to appear. |
 | `merge.no_deploy_repos` | `[]` | Globs of repos that have no deploy workflow on push. |
+| `merge.same_target_settle_seconds` | `0` | Seconds to wait after a confirmed deploy before merging the next PR on the same repo and base. `0` turns it off. See [Same-target settle](#same-target-settle). |
+| `merge.repo_same_target_settle_seconds` | none | Table of `"org/repo@base" = seconds` or `"org/repo" = seconds`, overrides the default (repo case-insensitive, `org/repo@base` wins over `org/repo`). |
 | `merge.method` | `"merge"` | `merge`, `squash` or `rebase`. |
 
 Deploy waits use a monotonic `Instant` clock exposed through `Hooks.now`, shared with parallel workers and injectable in integration tests. HTTP, API pacing and client retries count against the timeout and the no-run grace; every poll or error-retry sleep is capped by the remaining timeout. A no-run sleep is also capped by the remaining grace. The deadline is checked before and after each read, so a late green response cannot confirm a deploy. An in-flight request or client pacing/retry operation keeps its existing HTTP timeout and may return after the deadline; it is not cancelled by this wait loop.
@@ -275,6 +277,31 @@ no_deploy_repos = ["acme/docs"]
 
 [merge.repo_timeout_minutes]
 "acme/api" = 60
+```
+
+## Same-target settle
+
+A workflow can end as `success` while the release it started is still running. With a blue/green CodeDeploy deployment the workflow only starts the deployment, and the deployment group refuses a new one (`already has an active Deployment`) until the first finishes. The next merge on the same target then fails its deploy even though nothing is wrong with the PR. pipetrain has no cloud credentials and never reruns workflows, so it cannot see the deployment. It can only leave time between two merges on the same target.
+
+With `merge.same_target_settle_seconds` above `0`, the merge of a PR waits until that many seconds have passed since the last deploy confirmed for the same repo and base. The window starts when the deploy of the previous PR is confirmed, so a deploy that already took longer costs nothing extra. Rules:
+
+- Only a confirmed deploy opens a window. Dispensed, skipped and indeterminate deploys do not, and a different repo or base never waits.
+- `merge.repo_same_target_settle_seconds` overrides the default for one repo (`"org/repo"`) or one target (`"org/repo@base"`); the target key wins. An override of `0` turns the wait off for it.
+- The wait uses `Hooks.now` and `Hooks.sleep`, and is capped by the deploy timeout of that repo (`--timeout-minutes`, `merge.repo_timeout_minutes`, `merge.timeout_minutes`), so it never runs past it.
+- Parallel workers share the window, so the PRs of one target still wait for the previous deploy.
+- The default `0` changes nothing.
+
+The dry run shows `settling <n>s` on every merge that follows another merge on the same target, in the compact line and in `--verbose`, and the live line says `settling <n>s before merging <id>` while it waits. The `--json` report adds the optional `settle_seconds` to those steps (the configured window, in seconds, omitted when no wait applies); nothing else in the report changes and the schema stays 1. The dry run cannot know whether a deploy will be confirmed, so the number is the most that step can wait.
+
+When a deploy fails and the failed job, the deploy text or the job annotations say `already has an active deployment` (compared in lower case), the compact failure block says in plain words that the previous deployment was still active and that the merge went in. It prints the command to resume with the same `--state` after waiting, and points to `merge.same_target_settle_seconds`. To read the annotations pipetrain makes one extra read for the failed job, only when a deploy failed and the text is not already in the deploy result.
+
+```toml
+[merge]
+same_target_settle_seconds = 120
+
+[merge.repo_same_target_settle_seconds]
+"acme/api@main" = 300
+"acme/docs" = 0
 ```
 
 ## Resuming
