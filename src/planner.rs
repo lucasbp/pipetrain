@@ -7,6 +7,7 @@ use crate::detect::{self, Dep};
 use crate::model::{Pr, PrKey, Question};
 use crate::publishers::{Publishers, References};
 
+pub mod behind;
 mod dependency;
 mod order;
 pub mod release;

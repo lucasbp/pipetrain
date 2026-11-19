@@ -8,7 +8,7 @@ use crate::conflicts::{self, Conflict, Snapshot};
 use crate::discovery::{Scope, Skipped};
 use crate::merge::category::{self, Category};
 use crate::model::{Pr, Question, Readiness};
-use crate::planner::{self, DepState, Item, PlanInput, Rule};
+use crate::planner::{self, DepState, Item, PlanInput, Rule, behind};
 use crate::profile::ProfileSource;
 use crate::publishers::{Publishers, References};
 
@@ -78,6 +78,8 @@ pub struct Plan {
     pub skipped: Vec<SkippedOut>,
     pub questions: Vec<Question>,
     pub notes: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub bumps: Vec<behind::Need>,
     pub stats: Stats,
 }
 
@@ -343,6 +345,7 @@ pub fn build(rules: &Rules, mut gathered: Gathered) -> Plan {
         skipped,
         questions,
         notes: planned.notes,
+        bumps: Vec::new(),
         stats: Stats {
             requests: gathered.requests,
             rate_remaining: gathered.rate_remaining,

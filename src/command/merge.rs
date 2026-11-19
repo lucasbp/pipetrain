@@ -193,6 +193,13 @@ fn method_of(settings: &Settings, cfg: &Config) -> Result<String> {
     }
 }
 
+fn bump_steps(plan: &Plan) -> Vec<StepReport> {
+    plan.bumps
+        .iter()
+        .map(|need| StepReport::new(Kind::Bump, &need.id, Status::Planned, &need.step_detail()))
+        .collect()
+}
+
 fn planned_steps(plan: &Plan, cfg: &Config) -> Vec<StepReport> {
     steps(&emit::queue_lines(plan))
         .into_iter()
@@ -1438,6 +1445,7 @@ fn merge_plan_prepared(
         set_aside_inherited(&mut report, plan, &bundles, store, client);
         settle::annotate(&mut report.steps, plan, cfg, &store.state);
         report.api_estimate = estimate(plan, cfg, settings, store, requests, &report.steps);
+        report.steps.splice(0..0, bump_steps(plan));
         return Ok(Outcome {
             report,
             aborted: false,

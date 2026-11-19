@@ -338,6 +338,23 @@ fn lookup(opts: &FeedOptions, notes: &mut Vec<String>) -> Result<Result<Report, 
     }
 }
 
+pub fn versions(opts: &FeedOptions, notes: &mut Vec<String>) -> Result<Result<Vec<String>, i32>> {
+    let ecosystem = opts
+        .ecosystem
+        .unwrap_or_else(|| Ecosystem::default_for(&opts.package));
+    Ok(match fetch(&Session::new(), ecosystem, opts)? {
+        Fetched::Refused { had_token } => {
+            notes.push(feed::refused_message(had_token));
+            Err(feed::EXIT_REFUSED)
+        }
+        Fetched::NotFound { feed } => {
+            notes.push(feed::not_found_message(&feed));
+            Err(feed::EXIT_NOT_PUBLISHED)
+        }
+        Fetched::Found { versions, .. } => Ok(versions),
+    })
+}
+
 pub fn latest(opts: &FeedOptions, notes: &mut Vec<String>) -> Result<Result<String, i32>> {
     Ok(match lookup(opts, notes)? {
         Ok(report) => match report.latest {

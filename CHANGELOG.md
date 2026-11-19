@@ -10,6 +10,8 @@
 - A PR that depends (`Depends-On`, package, stacked or dependency edge) on a PR left out as `waiting` or `blocked` is left out too, transitively, as `waiting: depends on <repo#n>, which is waiting/blocked`. Ordering-only edges do not drop a PR.
 - Exit code: `merge --apply` already exited 0 when PRs were left out and non-zero only for a failed step; that does not change, and the footer count never affects it. `--strict` is unchanged.
 
+- `merge` dry run now predicts the version gate: a PR whose exact pin is further behind its feed than the repo's `max-behind` allows (or would be, counting the queue's own releases) is left out as `waiting: needs a bump of <package> to <stable version>`, and the bump is shown as a `bump` step before it. Only the newest stable version in the same major is proposed, never a prerelease. Its dependents wait for it. `plan` and `bundle` are unchanged, and `merge --json` lists the step with `kind: bump` (schema stays `1`). Execution under `--bump-behind` comes in a follow-up. See [docs/bump-in-merge.md](docs/bump-in-merge.md). Part of #54.
+
 ## 0.11.0
 
 - Deploy polling backs off: the first 4 sleeps use `merge.poll_seconds` (15), then the interval doubles up to the new `merge.poll_max_seconds` (default `60`; a value at or below `poll_seconds` turns it off). The sleep is still capped by the remaining deadline, so deadlines and outcomes do not change. The `merge` API estimate simulates this scale (a 30 minute deploy counts 35 polls instead of 121) and its warning is now one short line, shown only when the total is over `api.max_requests` (still `300`) or over half of the known rate limit. `--json` `api_estimate` adds `warn` and, when known, `rate_remaining`.

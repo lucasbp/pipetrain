@@ -268,7 +268,15 @@ pub fn preview(report: &Report, plan: &Plan, color: bool) -> String {
                 truncate(&shorten(&step.target), CAUSE_WIDTH),
             ),
             Kind::Wait => ("wait", yellow, wait_cause(&step.target)),
-            Kind::Bump => ("bump", cyan, "prepares a dependency bump".to_string()),
+            Kind::Bump => (
+                "bump",
+                cyan,
+                if step.detail.starts_with("bump ") {
+                    truncate(&shorten(&step.detail), CAUSE_WIDTH)
+                } else {
+                    "prepares a dependency bump".to_string()
+                },
+            ),
             Kind::OpenPr => ("open-pr", cyan, "opens the deploy PR".to_string()),
         };
         let name_cell = match step.kind {
