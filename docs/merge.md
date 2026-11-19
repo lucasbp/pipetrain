@@ -365,9 +365,35 @@ Cases that keep the previous behavior:
 - A deploy that is still running or whose runs cannot be read: the resume step waits and stops resumably, and the rest of the run is skipped.
 - A failed inherited record on the same repository and base as a PR in the queue: that PR and the PRs that depend on it are blocked (`blocked by failed deploy of ...`), and the resume step is `failed`. Other repositories and bases proceed, with or without parallelism; no saved independence proof is required of them because the proof belongs to the earlier queue.
 
-The additive text lines are not part of the JSON report: JSON consumers read the resume step, whose `status` is `skipped` and whose `detail` starts with `kept, failed deploy from an earlier run`.
+A saved failed deploy with no later commit is no longer a `resume` step: it is listed in `not_merging` as `waiting` (see [Waiting and blocked](#waiting-and-blocked)) and still blocks its dependents and its repository and base. Deciding this costs one extra workflow-runs request per saved pending record.
+
+## Waiting and blocked
+
+A PR left out of the queue is in one of two categories. Neither category enters the queue and neither changes the exit code.
+
+- `waiting` (yellow): it needs a person or another PR.
+- `blocked` (red): something is broken. When a cause is not recognized, the PR is `blocked`.
+
+The compact footer counts both: `8 enter the queue · 11 waiting · 41 blocked`. `--verbose` prints each PR as `repo#n (waiting): causes`, then a `left out of the queue` count line. `--json` adds `not_merging[].state`; the schema stays `1`.
+
+| Category | Causes |
+|---|---|
+| `waiting` | `review required`, `not approved`, `changes requested`, `checks pending`, `draft`, `waiting for package ...`, `depends on <repo#n>, which is waiting/blocked`, `deploy failed at <workflow> (<conclusion>), needs a new commit` |
+| `blocked` | `checks failing`, `merge conflict`, `branch behind its base, update it`, `no checks reported`, `already merged`, `closed`, `already in <ref>`, a `references ...` release conflict, an admin refusal, any cause not listed here |
+
+The plan adds `branch protection blocks merge (BLOCKED)` and `checks are not passing (UNSTABLE)` as derived causes. They never decide the category when a primary cause exists. Alone they are `blocked`. `checks pending` is `waiting` because the checks finish by themselves; a PR that mixes a waiting and a blocked cause is `blocked`.
+
+### Resume needs evidence of a change
+
+A PR merged by an earlier run whose deploy failed is not queued again just because it is saved. A `resume` step is queued only when the run that failed can be superseded: a later deploy on the base contains the saved SHA, which is the proof `merge` already uses to resolve it. Otherwise the PR is listed as `waiting` with `deploy failed at <workflow> (<conclusion>), needs a new commit`, stays in the state file, and still blocks its dependents and the PRs on its repository and base as in [a failed inherited deploy](#a-failed-inherited-deploy-does-not-block-an-unrelated-queue). The workflow name is the only job detail the cause carries, because naming the step would cost another API call.
+
+### Dependents of a PR left out
+
+A ready PR that depends on a PR left out as `waiting` or `blocked` is also left out, transitively, as `waiting: depends on <repo#n>, which is waiting/blocked`. `--verbose` adds the cause of the PR it depends on. Only edges that mean dependence count: `Depends-On`, package, stacked or base, and dependency edges. Edges that only order PRs (same target, order, layer, gate) do not, so an unrelated PR on the same repository and base stays in the queue. An edge that cannot be proven keeps the existing rule: when in doubt, serial, and the PR is not dropped. A PR left out because its work is finished (`already merged`, `closed`, `already in <ref>`) is never a parent.
 
 ## Exit codes
+
+`merge --apply` exits non-zero only for a PR it tried to merge or deploy that failed. PRs left out as `waiting` or `blocked` never change the exit code, with or without `--apply`; only `--strict` turns an empty queue into `4`.
 
 | Code | Meaning |
 |---|---|
@@ -388,7 +414,7 @@ The additive text lines are not part of the JSON report: JSON consumers read the
 | `stopped` | string, optional | Why it did not start (open questions). |
 | `steps` | Step[] | In execution order. Steps resumed from an earlier run come first. |
 | `steps[].admin_override` | AdminOverride, optional | Review-only admin override: `{reason, requested_by, at?}`. Dry runs omit `at`; successful overrides and resumed merges retain their UTC RFC3339 timestamp. |
-| `not_merging` | `{id, reasons[]}[]` | PRs the plan left out and why. |
+| `not_merging` | `{id, reasons[], state}[]` | PRs left out of the queue and why. `state` is additive: `waiting` or `blocked`, see [Waiting and blocked](#waiting-and-blocked). |
 | `questions` | string[] | The `? ...` lines of the plan. |
 | `preflight` | Readiness[] | Additive readiness snapshot for every visible selected PR, including blocked PRs, using the same shape as [plan-json.md](plan-json.md#readiness). |
 | `state` | StatePreview | Additive snapshot of local state before execution, also present in dry runs. |

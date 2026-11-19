@@ -25,6 +25,18 @@ impl Scope {
             Scope::Released => "released",
         }
     }
+
+    pub fn from_name(name: &str) -> Option<Scope> {
+        [
+            Scope::Train,
+            Scope::SharedBranch,
+            Scope::IntoTrain,
+            Scope::Explicit,
+            Scope::Released,
+        ]
+        .into_iter()
+        .find(|scope| scope.as_str() == name)
+    }
 }
 
 #[derive(Debug, Clone)]

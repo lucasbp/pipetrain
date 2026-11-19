@@ -2275,12 +2275,23 @@ fn resumed_leaf_failure_uses_saved_graph_even_when_merged_pr_is_absent() {
     rig.store.state.pending.push(pending);
     fail_deploy(&rig, 2);
     let run = rig.go(&plan);
-    assert_eq!(run.step(0).kind, Kind::Resume);
     assert_eq!(
         run.statuses(),
-        vec![Status::Skipped, Status::Done, Status::Done, Status::Done]
+        vec![Status::Done, Status::Done, Status::Done]
     );
-    assert!(run.step(0).detail.starts_with(KEPT));
+    assert!(
+        run.outcome
+            .report
+            .steps
+            .iter()
+            .all(|step| step.kind != Kind::Resume)
+    );
+    assert_eq!(run.outcome.report.not_merging.len(), 1);
+    assert!(
+        run.outcome.report.not_merging[0].reasons[0].starts_with("deploy failed"),
+        "{:?}",
+        run.outcome.report.not_merging
+    );
     assert_eq!(rig.puts().len(), 3);
     assert_eq!(rig.store.state.pending.len(), 1);
 }
@@ -2297,8 +2308,8 @@ fn legacy_resume_without_independence_metadata_is_kept_when_unrelated() {
     fail_deploy(&rig, 2);
     let plan = plan_of(vec![pr("acme/sync", 4, "feat/4", "main")], Vec::new());
     let run = rig.go(&plan);
-    assert_eq!(run.statuses(), vec![Status::Skipped, Status::Done]);
-    assert!(run.step(0).detail.starts_with(KEPT));
+    assert_eq!(run.statuses(), vec![Status::Done]);
+    assert_eq!(run.outcome.report.not_merging.len(), 1);
     assert_eq!(rig.puts().len(), 1);
     assert_eq!(rig.store.state.pending.len(), 1);
 }
@@ -2351,14 +2362,10 @@ fn resumed_failure_keeps_inherited_pending_and_runs_new_heads() {
     rig.store.state.pending[0].sha = Some(pending_sha.clone());
     rig.script().runs_by_sha.insert(pending_sha, failed_runs());
     let run = rig.go(&plan);
-    assert_eq!(
-        run.statuses(),
-        vec![Status::Skipped, Status::Done, Status::Done]
-    );
-    assert!(run.step(0).detail.starts_with(KEPT));
+    assert_eq!(run.statuses(), vec![Status::Done, Status::Done]);
+    assert_eq!(run.outcome.report.not_merging.len(), 1);
     assert_eq!(rig.puts().len(), 2);
     let color = render(&run.outcome.report, true);
-    assert!(color.contains(KEPT));
     assert!(color.contains("\x1b[32mdone:"));
     assert!(!render(&run.outcome.report, false).contains('\x1b'));
 }
@@ -2377,10 +2384,11 @@ fn resumed_publisher_failure_still_stops_after_publisher_leaves_plan() {
     plan.items.retain(|item| item.number != 1);
     fail_deploy(&rig, 1);
     let run = rig.go(&plan);
-    assert_eq!(run.step(0).kind, Kind::Resume);
-    assert_eq!(run.step(0).status, Status::Failed);
+    assert_eq!(run.outcome.report.not_merging.len(), 1);
     assert!(
-        run.outcome.report.steps[1..]
+        run.outcome
+            .report
+            .steps
             .iter()
             .all(|step| step.status == Status::Skipped)
     );
@@ -2704,8 +2712,14 @@ fn parallel_legacy_failed_resume_in_an_unrelated_repo_is_kept_and_new_work_goes_
     assert_eq!(run.outcome.code, 0);
     assert_eq!(rig.puts().len(), 1);
     assert_eq!(rig.store.state.pending.len(), 1);
-    assert_eq!(step_of(&run, "acme/sdk#1").status, Status::Skipped);
-    assert!(step_of(&run, "acme/sdk#1").detail.starts_with(KEPT));
+    assert!(
+        run.outcome
+            .report
+            .steps
+            .iter()
+            .all(|step| step.target != "acme/sdk#1")
+    );
+    assert_eq!(run.outcome.report.not_merging[0].id, "acme/sdk#1");
     assert_eq!(step_of(&run, "acme/sync#4").status, Status::Done);
 }
 
@@ -3381,7 +3395,7 @@ fn legacy_pending_without_prediction_keeps_polling_on_resume() {
     rig.script().workflows.clear();
     let run = rig.go(&plan_on(&[]));
     assert_eq!(run.step(0).status, Status::Done);
-    assert_eq!(rig.polls(), 2);
+    assert_eq!(rig.polls(), 3);
     assert!(run.step(0).deploy_prediction.is_none());
     assert!(rig.puts().is_empty());
     assert!(state.reopen().state.pending.is_empty());
@@ -3502,7 +3516,7 @@ fn legacy_train_pending_keeps_branch_only_workflow_behavior() {
         rig.script().workflows = vec![("deploy.yml".into(), workflow.into())];
         let run = rig.go(&plan_on(&[]));
         assert_eq!(run.step(0).status, Status::Done);
-        assert_eq!(rig.polls(), polls);
+        assert_eq!(rig.polls(), polls + 1);
         assert!(run.step(0).deploy_prediction.is_none());
         assert!(rig.puts().is_empty());
         assert!(state.reopen().state.pending.is_empty());
@@ -3833,7 +3847,7 @@ fn legacy_pending_json_keeps_neutral_and_missing_path_compatibility() {
     rig.script().runs = vec![auxiliary];
     let run = rig.go(&plan_on(&[]));
     assert_eq!(run.step(0).status, Status::Done);
-    assert_eq!(rig.polls(), 2);
+    assert_eq!(rig.polls(), 3);
     assert!(
         rig.lines()
             .iter()
@@ -4116,8 +4130,11 @@ fn unrelated_later_commit_does_not_resolve_or_poll_its_green_deploy() {
     rig.script().later_tip = Some(tip.clone());
     rig.script().runs_by_sha.insert(tip.clone(), green());
     let resumed = rig.go(&plan_on(&[]));
-    assert_eq!(resumed.step(0).status, Status::Failed);
-    assert!(resumed.said(0).contains("does not contain saved SHA"));
+    assert!(resumed.outcome.report.steps.is_empty());
+    let held = &resumed.outcome.report.not_merging;
+    assert_eq!(held.len(), 1);
+    assert!(held[0].reasons[0].ends_with("needs a new commit"));
+    assert_eq!(resumed.outcome.code, 0);
     assert!(
         !rig.lines()
             .iter()
@@ -4133,10 +4150,13 @@ fn unchanged_failed_deploy_names_sha_run_and_explains_repeating_will_not_help() 
     let state = failed_deploy_on_disk(&mut rig);
     rig.script().later_tip = Some(merge_sha(1));
     let resumed = rig.go(&plan_on(&[]));
-    let text = resumed.said(0);
-    assert!(text.contains(&merge_sha(1)));
+    assert!(resumed.outcome.report.steps.is_empty());
+    let held = &resumed.outcome.report.not_merging;
+    assert_eq!(held.len(), 1);
+    let text = held[0].reasons.join(" ");
     assert!(text.contains("https://example.test/acme/api/actions/runs/deploy"));
-    assert!(text.contains("no later commit exists; repeating unchanged will not help"));
+    assert!(text.contains("needs a new commit"));
+    assert_eq!(resumed.outcome.code, 0);
     assert_eq!(state.reopen().state.pending.len(), 1);
     assert!(state.reopen().state.audit.is_empty());
 }
@@ -5182,8 +5202,6 @@ fn api_budget_saturates_large_waits_and_recomputes_dispensed_polls() {
     assert!(state.reopen().state.pending.is_empty());
 }
 
-const KEPT: &str = "kept, failed deploy from an earlier run";
-
 fn inherited_pending(rig: &mut Rig, id: &str, repo: &str, base: &str, runs: Vec<Value>) -> String {
     let sha = "e".repeat(40);
     rig.script().runs_by_sha.insert(sha.clone(), runs);
@@ -5231,10 +5249,17 @@ fn an_inherited_failed_deploy_in_an_unrelated_repo_does_not_block_the_queue() {
             "{}",
             render(&run.outcome.report, false)
         );
-        let kept = step_of(&run, "acme/old#34");
-        assert_eq!(kept.kind, Kind::Resume);
-        assert_eq!(kept.status, Status::Skipped);
-        assert!(kept.detail.starts_with(KEPT), "{}", kept.detail);
+        assert!(
+            run.outcome
+                .report
+                .steps
+                .iter()
+                .all(|step| step.target != "acme/old#34")
+        );
+        let held = &run.outcome.report.not_merging;
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].id, "acme/old#34");
+        assert_eq!(held[0].state, pipetrain::merge::category::Category::Waiting);
         assert_eq!(rig.puts().len(), 2);
         for number in merge_numbers(&plan) {
             assert_eq!(
@@ -5244,17 +5269,9 @@ fn an_inherited_failed_deploy_in_an_unrelated_repo_does_not_block_the_queue() {
         }
         assert_eq!(rig.store.state.pending.len(), 1);
         assert_eq!(rig.store.state.pending[0].id, "acme/old#34");
-        let up_front = &run.confirmation_text[0];
-        assert!(
-            up_front.contains(
-                "inherited pending acme/old#34 into master at eeeeeee has a failed deploy"
-            ),
-            "{up_front}"
-        );
-        assert!(up_front.contains("it stays in the state and the queue goes on without it"));
         let text = render_final(&run.outcome.report, false);
-        assert!(text.contains(&format!("{KEPT}: acme/old#34")), "{text}");
         assert!(text.contains("2 PRs merged"), "{text}");
+        assert!(text.contains("1 waiting"), "{text}");
         assert!(!text.contains("same --state to resume"), "{text}");
     }
 }
@@ -5268,11 +5285,16 @@ fn a_dry_run_announces_the_inherited_failed_deploy_it_would_keep() {
 
     let text = render(&run.outcome.report, false);
     assert!(
-        text.contains("inherited pending acme/old#34 into master at eeeeeee has a failed deploy"),
+        text.contains("acme/old#34 (waiting): deploy failed"),
         "{text}"
     );
-    assert!(text.contains("it stays in the state and the queue goes on without it"));
-    assert_eq!(step_of(&run, "acme/old#34").status, Status::Planned);
+    assert!(
+        run.outcome
+            .report
+            .steps
+            .iter()
+            .all(|step| step.target != "acme/old#34")
+    );
     assert!(rig.puts().is_empty());
     assert_eq!(rig.store.state.pending.len(), 1);
 }
@@ -5316,15 +5338,13 @@ fn an_inherited_failed_deploy_on_the_same_target_blocks_only_that_lane() {
 
         let run = rig.go(&plan);
 
-        let kept = step_of(&run, "acme/api#34");
-        assert_eq!(kept.status, Status::Failed);
-        assert!(!kept.detail.starts_with(KEPT), "{}", kept.detail);
+        assert_eq!(run.outcome.report.not_merging[0].id, "acme/api#34");
         let blocked = step_of(&run, "acme/api#1");
         assert_eq!(blocked.status, Status::Skipped);
         assert!(blocked.blocked_by.is_some());
         assert_eq!(step_of(&run, "acme/web#3").status, Status::Done);
         assert_eq!(rig.puts().len(), 1);
-        assert_eq!(run.outcome.code, 1);
+        assert_eq!(run.outcome.code, 0);
         assert_eq!(rig.store.state.pending.len(), 1);
     }
 }

@@ -189,6 +189,7 @@ fn the_compact_dry_run_marks_the_exception_on_the_row() {
         not_merging: Vec::new(),
         questions: Vec::new(),
         notices: Vec::new(),
+        held: Vec::new(),
     };
     let text = anstream::adapter::strip_str(&preview(&report, &plan, false)).to_string();
     let api = text.lines().find(|line| line.contains("api#1")).unwrap();

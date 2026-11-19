@@ -363,6 +363,14 @@ fn jobs(
     (jobs, external)
 }
 
+fn held_failures(env: &Env, held: &[Pending]) -> failure::DeployFailures {
+    let mut failures = failure::DeployFailures::default();
+    for pending in held {
+        failures.record(pending, env.plan, true);
+    }
+    failures
+}
+
 pub(super) fn execute(
     env: &Env,
     client: &Client,
@@ -370,6 +378,7 @@ pub(super) fn execute(
     hooks: &mut Hooks,
     steps: &mut Vec<StepReport>,
     bundles: &BTreeMap<String, Bundled>,
+    held: &[Pending],
 ) -> Result<()> {
     store.state.active_jobs.clear();
     store.save()?;
@@ -388,7 +397,7 @@ pub(super) fn execute(
         hooks,
         steps,
         bundles,
-        failures: failure::DeployFailures::default(),
+        failures: held_failures(env, held),
         progress_state: crate::progress::merge::MergeProgress::new(total),
         control_client: client.fork(),
         events: Vec::new(),

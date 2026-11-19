@@ -6,6 +6,7 @@ use super::{KEPT, is_kept};
 use crate::command::apply::tint;
 use crate::config::GateKind;
 use crate::github::Client;
+use crate::merge::category::Category;
 use crate::merge::{DeployOutcome, Kind, Report, Status, StepReport};
 use crate::plan::Plan;
 use crate::style::{bold, cyan, dim, green, red, yellow};
@@ -175,6 +176,24 @@ fn gate_summary(plan: &Plan) -> Option<String> {
     (!parts.is_empty()).then(|| format!("gates: {}", parts.join(", ")))
 }
 
+pub fn footer_counts(report: &Report, color: bool) -> String {
+    let waiting = report.count_state(Category::Waiting);
+    let blocked = report.count_state(Category::Blocked);
+    format!(
+        "left out of the queue: {} · {} (never changes the exit code)",
+        tint(
+            color,
+            if waiting == 0 { dim } else { yellow },
+            &format!("{waiting} waiting")
+        ),
+        tint(
+            color,
+            if blocked == 0 { dim } else { red },
+            &format!("{blocked} blocked")
+        ),
+    )
+}
+
 pub fn preview(report: &Report, plan: &Plan, color: bool) -> String {
     let mut out = String::new();
     if !report.applied && !report.requested && report.stopped.is_none() {
@@ -278,11 +297,15 @@ pub fn preview(report: &Report, plan: &Plan, color: bool) -> String {
         } else {
             String::new()
         };
+        let (label, label_style): (&str, fn(&str) -> String) = match skipped.state {
+            Category::Waiting => ("waiting", yellow),
+            Category::Blocked => ("blocked", red),
+        };
         out.push_str(&format!(
             "{:>2}  {}  {}  {}{}\n",
             "-",
             cell(color, cyan, &short(&skipped.id), width),
-            cell(color, red, "blocked", 7),
+            cell(color, label_style, label, 7),
             tint(color, bold, &truncate(&cause, CAUSE_WIDTH)),
             tail,
         ));
@@ -303,16 +326,19 @@ pub fn preview(report: &Report, plan: &Plan, color: bool) -> String {
         .iter()
         .filter(|step| step.kind == Kind::Merge)
         .count();
+    let waiting = report.count_state(Category::Waiting);
+    let blocked = report.count_state(Category::Blocked);
     let mut parts = vec![
         tint(color, bold, &format!("{entering} enter the queue")),
         tint(
             color,
-            if report.not_merging.is_empty() {
-                dim
-            } else {
-                red
-            },
-            &format!("{} blocked", report.not_merging.len()),
+            if waiting == 0 { dim } else { yellow },
+            &format!("{waiting} waiting"),
+        ),
+        tint(
+            color,
+            if blocked == 0 { dim } else { red },
+            &format!("{blocked} blocked"),
         ),
     ];
     if let Some(gates) = gate_summary(plan) {
@@ -536,6 +562,9 @@ pub fn final_report(report: &Report, color: bool, context: &Context) -> String {
     }
     if report.steps.is_empty() {
         out.push_str(&format!("{}\n", tint(color, dim, "nothing to merge")));
+        if !report.not_merging.is_empty() {
+            out.push_str(&format!("{}\n", footer_counts(report, color)));
+        }
         return out;
     }
     let summary = &report.summary;
@@ -552,6 +581,9 @@ pub fn final_report(report: &Report, color: bool, context: &Context) -> String {
         summary.merged, deploys_ok, failed, stopped
     );
     out.push_str(&format!("{}\n", tint(color, bold, &counts)));
+    if !report.not_merging.is_empty() {
+        out.push_str(&format!("{}\n", footer_counts(report, color)));
+    }
     let ok: Vec<String> = report
         .steps
         .iter()

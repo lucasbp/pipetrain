@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::emit::PAUSE_LINE;
 use crate::github::Run;
 
+pub mod category;
 mod storage;
 
 pub use storage::{PendingPreview, StatePreview, resolve_state_path};
@@ -668,6 +669,17 @@ impl Summary {
 pub struct NotMerging {
     pub id: String,
     pub reasons: Vec<String>,
+    pub state: category::Category,
+}
+
+impl NotMerging {
+    pub fn new(id: &str, reasons: Vec<String>) -> Self {
+        Self {
+            id: id.to_string(),
+            state: category::classify(&reasons),
+            reasons,
+        }
+    }
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -753,9 +765,18 @@ pub struct Report {
     pub questions: Vec<String>,
     #[serde(skip)]
     pub notices: Vec<String>,
+    #[serde(skip)]
+    pub held: Vec<Pending>,
 }
 
 impl Report {
+    pub fn count_state(&self, state: category::Category) -> usize {
+        self.not_merging
+            .iter()
+            .filter(|skipped| skipped.state == state)
+            .count()
+    }
+
     pub fn count(&self, status: Status) -> usize {
         self.steps.iter().filter(|s| s.status == status).count()
     }

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- `merge` splits the PRs left out of the queue into `waiting` (yellow: needs approval, a draft, changes requested, a review, another PR, or a new commit after a failed deploy) and `blocked` (red: failing checks, conflict, branch behind, no checks, unknown state). The compact footer counts both (`8 enter the queue · 11 waiting · 41 blocked`), `--verbose` labels each PR, and `--json` adds `not_merging[].state` (schema stays `1`). Causes are in [docs/merge.md](docs/merge.md#waiting-and-blocked).
+- A PR merged by an earlier run whose deploy failed is no longer queued as `resume` on every run. It is queued only when a later deploy contains the saved SHA; otherwise it is listed as `waiting` with `deploy failed at <workflow> (<conclusion>), needs a new commit`, kept in the state file, and still blocks its dependents and same-target PRs. A held publisher with consumers still stops the queue under `--dependency-failure stop`. Each saved pending record costs one extra workflow-runs request. Because it is no longer a step, it no longer makes `merge --apply` exit 1.
+- A PR that depends (`Depends-On`, package, stacked or dependency edge) on a PR left out as `waiting` or `blocked` is left out too, transitively, as `waiting: depends on <repo#n>, which is waiting/blocked`. Ordering-only edges do not drop a PR.
+- Exit code: `merge --apply` already exited 0 when PRs were left out and non-zero only for a failed step; that does not change, and the footer count never affects it. `--strict` is unchanged.
+
 ## 0.11.0
 
 - Deploy polling backs off: the first 4 sleeps use `merge.poll_seconds` (15), then the interval doubles up to the new `merge.poll_max_seconds` (default `60`; a value at or below `poll_seconds` turns it off). The sleep is still capped by the remaining deadline, so deadlines and outcomes do not change. The `merge` API estimate simulates this scale (a 30 minute deploy counts 35 polls instead of 121) and its warning is now one short line, shown only when the total is over `api.max_requests` (still `300`) or over half of the known rate limit. `--json` `api_estimate` adds `warn` and, when known, `rate_remaining`.

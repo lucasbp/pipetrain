@@ -192,13 +192,13 @@ fn without_admin_review_required_keeps_legacy_report_and_text() {
     assert_eq!(report["steps"], json!([]));
     assert_eq!(
         report["not_merging"],
-        json!([{"id": "acme/api#1", "reasons": ["review required", "branch protection blocks merge (BLOCKED)"]}])
+        json!([{"id": "acme/api#1", "reasons": ["review required", "branch protection blocks merge (BLOCKED)"], "state": "waiting"}])
     );
     assert!(!report.to_string().contains("admin_override"));
     let output = fixture.run(&[1], &["--verbose"]);
     assert!(output.status.success());
     let text = String::from_utf8(output.stdout).unwrap();
-    assert!(text.contains("nothing to merge\n\nnot merging, the plan marks these as not ready:\n  acme/api#1: review required, branch protection blocks merge (BLOCKED)\n"), "{text}");
+    assert!(text.contains("nothing to merge\n\nnot merging, the plan marks these as not ready:\n  acme/api#1 (waiting): review required, branch protection blocks merge (BLOCKED)\n"), "{text}");
     assert!(!text.contains("--admin") && !text.contains("admin override"));
     assert!(fixture.admin_reads().is_empty());
 }
