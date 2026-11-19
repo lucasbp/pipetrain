@@ -4872,6 +4872,30 @@ fn deploy_sleep_is_capped_by_remaining_deadline() {
 }
 
 #[test]
+fn deploy_backoff_keeps_the_total_deadline_and_the_stopped_outcome() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    rig.cfg.merge.poll_seconds = 1;
+    rig.cfg.merge.poll_max_seconds = 4;
+    rig.script().runs = vec![run_json("deploy", "in_progress", None)];
+    let run = rig
+        .run(
+            &plan_on(&[1]),
+            Settings {
+                timeout: Some(Duration::from_secs(30)),
+                ..applied()
+            },
+            true,
+            true,
+        )
+        .unwrap();
+    assert_eq!(run.step(0).status, Status::Stopped);
+    assert_eq!(rig.polls(), 11);
+    assert_eq!(run.slept, Duration::from_secs(30));
+    assert_eq!(state.reopen().state.pending.len(), 1);
+}
+
+#[test]
 fn no_run_grace_counts_http_and_caps_the_sleep() {
     let mut rig = Rig::new("");
     let state = FilterState::attach(&mut rig);
@@ -5033,6 +5057,7 @@ fn api_budget_preview_warns_for_repo_timeouts_without_blocking_confirmation() {
     let state = FilterState::attach(&mut rig);
     rig.cfg.merge.poll_seconds = 15;
     rig.cfg.merge.timeout_minutes = 30;
+    rig.cfg.api.max_requests = 80;
     rig.cfg
         .merge
         .repo_timeout_minutes
@@ -5046,7 +5071,7 @@ fn api_budget_preview_warns_for_repo_timeouts_without_blocking_confirmation() {
     );
     let run = rig.run(&plan, dry(), true, true).unwrap();
     let estimate = &run.outcome.report.api_estimate;
-    assert_eq!(estimate.deploy_polls, 362);
+    assert_eq!(estimate.deploy_polls, 100);
     assert_eq!(estimate.checks, 6);
     assert_eq!(estimate.discovery, u64::from(plan.stats.requests) + 14);
     assert!(estimate.exceeds_budget);
@@ -5121,13 +5146,24 @@ fn deploy_read_recovery_resets_retry_and_confirmation_counters() {
 fn api_budget_saturates_large_waits_and_recomputes_dispensed_polls() {
     let mut rig = Rig::new("");
     let state = FilterState::attach(&mut rig);
+    rig.cfg.merge.poll_seconds = 15;
+    rig.cfg.merge.poll_max_seconds = 60;
     let settings = Settings {
         timeout: Some(Duration::MAX),
         ..dry()
     };
     let expected = rig.run(&plan_on(&[1, 2]), settings, true, true).unwrap();
-    assert_eq!(expected.outcome.report.api_estimate.deploy_polls, u64::MAX);
-    assert_eq!(expected.outcome.report.api_estimate.total, u64::MAX);
+    let estimate = &expected.outcome.report.api_estimate;
+    let per_repo = pipetrain::merge::estimated_polls(
+        Duration::MAX,
+        Duration::from_secs(15),
+        Duration::from_secs(60),
+    );
+    assert_eq!(estimate.deploy_polls, per_repo * 2);
+    assert_eq!(
+        estimate.total,
+        estimate.discovery + estimate.checks + estimate.deploy_polls
+    );
     rig.script().workflows = path_workflow("    paths: 'service/**'");
     let dispensed = rig
         .run(

@@ -79,6 +79,8 @@ fn estimate(exceeds: bool) -> ApiEstimate {
         total: 60,
         budget: if exceeds { 50 } else { 5000 },
         exceeds_budget: exceeds,
+        rate_remaining: None,
+        warn: exceeds,
     }
 }
 

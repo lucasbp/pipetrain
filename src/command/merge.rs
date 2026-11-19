@@ -142,6 +142,7 @@ impl Env<'_> {
 struct Limits {
     timeout: Duration,
     poll: Duration,
+    poll_ceiling: Duration,
     grace: Duration,
 }
 
@@ -342,6 +343,7 @@ fn wait_for_deploy(
         |message: &str| (hooks.progress)(&format!("waiting for deploy: {workflows}; {message}"));
     let poll = limits.poll.max(Duration::from_millis(1));
     let started = (hooks.now)();
+    let mut sleeps = 0u64;
     let mut consecutive_errors = 0;
     let mut settled: Option<usize> = None;
     let mut last = "no workflow run yet".to_string();
@@ -460,7 +462,8 @@ fn wait_for_deploy(
         } else {
             remaining
         };
-        (hooks.sleep)(poll.min(remaining));
+        (hooks.sleep)(crate::merge::poll_delay(poll, limits.poll_ceiling, sleeps).min(remaining));
+        sleeps += 1;
     };
     (outcome, auxiliary_failures.into_iter().collect())
 }
@@ -520,6 +523,7 @@ fn deploy_phase(
     let limits = Limits {
         timeout,
         poll: Duration::from_secs(env.cfg.merge.poll_seconds.max(1)),
+        poll_ceiling: Duration::from_secs(env.cfg.merge.poll_max_seconds),
         grace: Duration::from_secs(env.cfg.merge.no_run_grace_seconds),
     };
     let (outcome, auxiliary_failures) =
@@ -1575,10 +1579,11 @@ fn deploy_polls(cfg: &Config, settings: &Settings, slug: &str) -> u64 {
     let timeout = settings
         .timeout
         .unwrap_or_else(|| cfg.merge.timeout_for(slug));
-    let interval = Duration::from_secs(cfg.merge.poll_seconds.max(1));
-    u64::try_from(timeout.as_nanos().div_ceil(interval.as_nanos()))
-        .unwrap_or(u64::MAX)
-        .saturating_add(1)
+    crate::merge::estimated_polls(
+        timeout,
+        Duration::from_secs(cfg.merge.poll_seconds.max(1)),
+        Duration::from_secs(cfg.merge.poll_max_seconds),
+    )
 }
 
 fn estimate(
@@ -1627,13 +1632,17 @@ fn estimate(
         }
     }
     let total = discovery.saturating_add(checks).saturating_add(polls);
+    let exceeds_budget = total > u64::from(cfg.api.max_requests);
+    let rate_remaining = plan.stats.rate_remaining;
     crate::merge::ApiEstimate {
         discovery,
         checks,
         deploy_polls: polls,
         total,
         budget: cfg.api.max_requests,
-        exceeds_budget: total > u64::from(cfg.api.max_requests),
+        exceeds_budget,
+        rate_remaining,
+        warn: exceeds_budget || rate_remaining.is_some_and(|left| total > left / 2),
     }
 }
 
@@ -1724,8 +1733,8 @@ fn render_with_steps(report: &Report, color: bool, include_steps: bool) -> Strin
         }
         let estimate = &report.api_estimate;
         out.push_str(&format!("estimated API requests: {} (discovery {}, checks and merges {}, deploy polls {}); budget {}\n", estimate.total, estimate.discovery, estimate.checks, estimate.deploy_polls, estimate.budget));
-        if estimate.exceeds_budget {
-            out.push_str("warning: this queue may exceed its API request budget; raise api.max_requests in the config. This estimate does not block execution.\n");
+        if let Some(warning) = estimate.warning() {
+            out.push_str(&format!("{warning}\n"));
         }
         for pr in &report.preflight {
             for line in pr.lines() {

@@ -333,18 +333,8 @@ pub fn preview(report: &Report, plan: &Plan, color: bool) -> String {
         ));
     }
     let estimate = &report.api_estimate;
-    if estimate.exceeds_budget {
-        out.push_str(&format!(
-            "{}\n",
-            tint(
-                color,
-                yellow,
-                &format!(
-                    "warning: about {} API requests, over the budget of {}; raise api.max_requests (this does not block)",
-                    estimate.total, estimate.budget
-                )
-            )
-        ));
+    if let Some(warning) = estimate.warning() {
+        out.push_str(&format!("{}\n", tint(color, yellow, &warning)));
     }
     if !report.state.pending.is_empty() {
         let ids: Vec<String> = report

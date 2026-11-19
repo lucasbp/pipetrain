@@ -251,7 +251,8 @@ Among those questions is `package-release-behind`: before the run, the plan and 
 |---|---|---|
 | `merge.timeout_minutes` | `30` | How long to wait for the deploy of one merge. |
 | `merge.repo_timeout_minutes` | none | Table of `"org/repo" = minutes`, overrides the default for that repo (case-insensitive). |
-| `merge.poll_seconds` | `15` | Time between two polls. |
+| `merge.poll_seconds` | `15` | Base time between two deploy polls. The first 4 sleeps use it. |
+| `merge.poll_max_seconds` | `60` | Ceiling of the deploy poll backoff. After the first 4 sleeps the interval doubles each poll up to this value (15s, 15s, 15s, 15s, 30s, 60s, 60s, ...). A value at or below `poll_seconds` turns the backoff off. |
 | `merge.package_poll_seconds` | `10` | Seconds between package feed checks; values below 1 use 1 second. |
 | `merge.package_wait_seconds` | `600` | Package wait timeout in seconds, independently of deploy timeouts. `0` checks once without sleeping. |
 | `merge.package_max_behind` | none | Version limit used by the `package-release-behind` preflight when the consumer repo workflows do not state one. Without it and without a readable workflow limit, the preflight only warns `(not confirmed)`. |
@@ -396,6 +397,10 @@ The additive text lines are not part of the JSON report: JSON consumers read the
 | `summary` | MergeSummary | Additive invocation result counts, all zero before execution, including dry runs and declined confirmations. |
 
 `ApiEstimate` contains integer fields `discovery`, `checks`, `deploy_polls`, `total`, `budget`, and boolean `exceeds_budget`. `total` is the saturating sum of the three categories; `budget` is `api.max_requests`, and `exceeds_budget` is `total > budget`. It is a preview snapshot, not actual final usage. The report schema stays 1 and existing fields keep their meaning.
+
+Two additive fields: `warn` (boolean) is true when `total > budget` or when `total` is more than half of `rate_remaining`; `rate_remaining` (integer) is the GitHub rate limit left that discovery or the doctor already read, and is omitted when none was read. `deploy_polls` simulates the poll backoff (`merge.poll_max_seconds`) for each repository's deadline, so it is far below the fixed-interval count: 30 minutes at 15s counted 121 polls and now counts 35. The estimate is deliberately an upper bound, because a deploy that finishes early stops polling.
+
+The text output prints one warning line, only when `warn` is true. The backoff changes only how long the loop sleeps between polls: the sleep is still capped by the remaining deadline, so the deadline is never stretched and the outcome (confirmed, failed, indeterminate) does not change. A deploy that starts after the first 4 sleeps is noticed up to `merge.poll_max_seconds` later than with a fixed interval.
 
 `MergeSummary` contains integer fields `merged`, `earlier_merges_checked`, `deploy_confirmed`, `deploy_dispensed`, `deploy_indeterminate`, `deploy_resolved`, `deploy_skipped`, `deploy_failed`, `failed` and `stopped`. `merged` counts merge steps with a merge SHA; `earlier_merges_checked` counts resume steps with a merge SHA. The six deploy counts partition those merged or checked PRs: original deploy confirmed, wait dispensed by configuration or filters, outcome not reliably determined (including a timeout, unreadable discovery or runs, or interrupted post-merge bookkeeping), audited resolution by a later deploy, all observed workflows skipped, and original deploy failed. A later resolution increments only `deploy_resolved`, retaining the original failure evidence. `failed` and `stopped` count steps of every kind with those statuses, including readiness and gate failures without a merge. These counts do not include historical discarded records and do not change existing status semantics.
 
