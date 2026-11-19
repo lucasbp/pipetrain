@@ -30,6 +30,7 @@ The structs live in `src/plan.rs` (`Plan`, `SkippedOut`, `Stats`), `src/bundle.r
 | `skipped` | SkippedOut[] | PRs found but not ready, or already contained in their base or in the train branch, sorted by `id`. They are not in the plan. |
 | `questions` | Question[] | What the planner could not decide. Discovery and scan questions come first, then planner questions, then release preflight questions (`package-release-behind`, about a PR that will fall further behind a package the queue publishes than its version check allows). |
 | `notes` | string[] | Informational lines. Today only `X depends on Y, already merged`. |
+| `bumps` | Bump[] (optional) | Bumps a PR needs before the version gate lets it merge: `{id, package, from, to?, behind, limit, queue_published}`. `to` is the newest stable version in the pin's major and is absent when only the queue's own release can satisfy the gate. Filled only by `merge` internally, so `plan --json` does not emit it today; omitted when empty, additive. See `bump-in-merge.md`. |
 | `stats` | Stats | Request budget and parallelism figures. |
 | `shown_authors` | string[] (optional) | Lowercase logins the author filter keeps visible. Present only when a filter is on. |
 

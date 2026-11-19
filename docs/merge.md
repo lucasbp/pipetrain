@@ -532,6 +532,10 @@ schema 1. Events are appended after fixed queue steps and streamed at preparatio
 time. A draft requiring review or a partial operation contributes a stopped
 attention event and exit code 5 without changing the dependency graph.
 
+## PRs that need a bump first
+
+The dry run reads the feed of every package a PR consumes through an exact pin. A PR whose pin is further behind than the repo's `max-behind` allows is left out as `waiting: needs a bump of <package> to <version>`, and a `bump` step in `planned` state appears before it. Its dependents wait for it. `merge --apply` does not execute that step yet. Rules and reasons: [bump-in-merge.md](bump-in-merge.md).
+
 ## Shared preflight
 
 The preview and JSON include each selected PR as `eligible`, `blocked` or `waiting`, with causes, next step, base, repository default branch, full GraphQL merge state, warnings and check names/states/URLs. The additive `preflight` array uses the [plan Readiness contract](plan-json.md#readiness); it is a snapshot before execution and never changes existing step status semantics or report schema `1`. Text previews and confirmations show the same information, including PRs excluded from merge steps. Author-hidden PRs are omitted from the merge preflight.

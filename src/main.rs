@@ -931,6 +931,7 @@ fn run_plan(args: PlanArgs) -> Result<i32> {
         cache: CacheMode::from_flags(args.no_cache, args.refresh),
         progress,
         check_feeds: args.check_feeds,
+        check_bumps: false,
         strict: args.strict,
     })
 }
@@ -953,6 +954,7 @@ fn run_bundle(args: BundleArgs) -> Result<i32> {
             cache: CacheMode::from_flags(args.no_cache, args.refresh),
             progress,
             check_feeds: false,
+            check_bumps: false,
             strict: false,
         },
         apply: args.apply,
@@ -980,6 +982,7 @@ fn run_merge(args: MergeArgs) -> Result<i32> {
             cache: CacheMode::from_flags(args.no_cache, args.refresh),
             progress,
             check_feeds: true,
+            check_bumps: true,
             strict: args.strict,
         },
         apply: args.apply,

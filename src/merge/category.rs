@@ -46,6 +46,7 @@ fn waiting_reason(lower: &str) -> bool {
     ) || lower == "draft"
         || lower.starts_with("draft (")
         || lower.starts_with("waiting for package ")
+        || lower.starts_with(crate::planner::behind::PREFIX)
         || lower.starts_with(DEPENDS_PREFIX)
         || lower.starts_with("deploy failed")
         || lower.contains(" depends on ")
@@ -90,6 +91,7 @@ mod tests {
             "draft",
             "checks pending",
             "waiting for package acme.core 1.2.0",
+            "needs a bump of acme.core to 1.4.0",
             "acme/web#2 depends on acme/api#1",
         ] {
             assert_eq!(of(&[cause]), Category::Waiting, "{cause}");

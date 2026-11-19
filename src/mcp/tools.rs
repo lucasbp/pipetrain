@@ -204,6 +204,7 @@ fn plan(args: &Value, config: Option<PathBuf>) -> Result<Output, Failure> {
         cache: CacheMode::Use,
         progress: false,
         check_feeds: flag(args, "check_feeds")?,
+        check_bumps: false,
         strict: false,
     };
     Ok(Output {

@@ -18,7 +18,7 @@ use crate::github::{self, ApiError, Client};
 use crate::model::{Pr, PrKey, Question};
 use crate::plan::{self, Gathered, Plan};
 use crate::planner::release;
-use crate::planner::{self, DepState};
+use crate::planner::{self, DepState, behind};
 use crate::progress::{self, Progress};
 use crate::publishers::{self, Publishers, References};
 use crate::render;
@@ -57,6 +57,7 @@ pub struct PlanOptions {
     pub cache: CacheMode,
     pub progress: bool,
     pub check_feeds: bool,
+    pub check_bumps: bool,
     pub strict: bool,
 }
 
@@ -228,6 +229,7 @@ fn release_context(
     rules: &Rules,
     ready: &[(Pr, Scope)],
     scanned: &(Publishers, References, Vec<release::Manifest>),
+    with_bumps: bool,
 ) -> Result<release::Context> {
     let (publishers, references, manifests) = scanned;
     let prs: Vec<&Pr> = ready.iter().map(|(pr, _)| pr).collect();
@@ -239,7 +241,10 @@ fn release_context(
         &prs,
         cfg.merge.package_max_behind,
     );
-    let candidates = context.limit_candidates();
+    let mut candidates = context.limit_candidates();
+    if with_bumps {
+        candidates.extend(behind::consumers(&context));
+    }
     if candidates.is_empty() {
         return Ok(context);
     }
@@ -255,6 +260,30 @@ fn release_context(
         progress::count(index + 1, candidates.len());
     }
     Ok(context)
+}
+
+fn read_feeds(context: &release::Context) -> behind::Feeds {
+    let wanted = behind::candidates(context);
+    if wanted.is_empty() {
+        return behind::Feeds::new();
+    }
+    progress::phase("reading package feeds");
+    let mut feeds = behind::Feeds::new();
+    for (index, (package, orgs)) in wanted.iter().enumerate() {
+        let opts = feed::FeedOptions {
+            package: package.clone(),
+            version: None,
+            ecosystem: None,
+            org: feed::publishing_org(package, orgs),
+            registry: None,
+            json: false,
+        };
+        if let Ok(Ok(versions)) = feed::versions(&opts, &mut Vec::new()) {
+            feeds.insert(package.clone(), versions);
+        }
+        progress::count(index + 1, wanted.len());
+    }
+    feeds
 }
 
 fn deploy_branch_for(cfg: &Config, date: Option<&str>) -> Result<String> {
@@ -437,8 +466,22 @@ fn build_plan_with_prepare(
 
     let external = external_states(&mut client, &ready)?;
     let scanned = scan_publishers(&mut client, &rules, &ready, &mut questions)?;
-    let release_context = release_context(&mut client, &cfg, &rules, &ready, &scanned)?;
+    let release_context = release_context(
+        &mut client,
+        &cfg,
+        &rules,
+        &ready,
+        &scanned,
+        opts.check_bumps,
+    )?;
     let (publishers, references, _) = scanned;
+    let mut ready = ready;
+    let bumps = if opts.check_bumps {
+        let feeds = read_feeds(&release_context);
+        behind::hold(&release_context, &feeds, &mut ready, &mut skipped)
+    } else {
+        Vec::new()
+    };
 
     let collected = Collected {
         ready,
@@ -451,6 +494,7 @@ fn build_plan_with_prepare(
     let gathered = into_gathered(&cfg, &explicit, train, deploy_branch, &client, collected);
     let mut built = plan::build(&rules, gathered);
     release::annotate(&mut built, &release_context);
+    built.bumps = bumps;
     built.profile = Some(profile);
     let logins = author_filter::resolve(&opts.authors.effective(&cfg), &mut client)?;
     if !logins.is_empty() {
