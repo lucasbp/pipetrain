@@ -317,10 +317,10 @@ mod tests {
 
     #[test]
     fn dotnet_bumped_version_is_read() {
-        let patch = "-    <PackageReference Include=\"CmUtil\" Version=\"1.2610.3022.39\" />\n+    <PackageReference Include=\"CmUtil\" Version=\"1.2610.3022.40\" />";
+        let patch = "-    <PackageReference Include=\"AcmeUtil\" Version=\"1.2610.3022.39\" />\n+    <PackageReference Include=\"AcmeUtil\" Version=\"1.2610.3022.40\" />";
         let versions = bumped_versions(&[file("src/App/App.csproj", patch)]);
         assert_eq!(
-            versions.get("cmutil").map(String::as_str),
+            versions.get("acmeutil").map(String::as_str),
             Some("1.2610.3022.40")
         );
     }
@@ -344,7 +344,7 @@ mod tests {
 
     #[test]
     fn variable_and_wildcard_versions_are_dropped() {
-        let patch = "-    <PackageReference Include=\"CmUtil\" Version=\"1.0.0\" />\n+    <PackageReference Include=\"CmUtil\" Version=\"$(CmUtilVersion)\" />";
+        let patch = "-    <PackageReference Include=\"AcmeUtil\" Version=\"1.0.0\" />\n+    <PackageReference Include=\"AcmeUtil\" Version=\"$(AcmeUtilVersion)\" />";
         assert!(bumped_versions(&[file("a.csproj", patch)]).is_empty());
         let wildcard = "+    <PackageReference Include=\"B\" Version=\"1.*\" />\n+    <PackageReference Include=\"C\" Version=\"1.x\" />\n+    <PackageReference Include=\"D\" Version=\"[1.0,2.0)\" />";
         assert!(bumped_versions(&[file("a.csproj", wildcard)]).is_empty());

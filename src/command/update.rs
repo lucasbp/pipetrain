@@ -3,9 +3,12 @@ use std::path::PathBuf;
 use anyhow::Result;
 use serde_json::json;
 
+use crate::command::apply::tint;
 use crate::config::ApiConfig;
 use crate::github::{self, ApiError, Client, Download, origin};
 use crate::progress::{self, Progress};
+use crate::style::{bold, dim, green};
+use crate::update::display::readable_path;
 use crate::update::release::{REPO, Release, is_trusted};
 use crate::update::target::{self, CHECKSUMS_ASSET};
 use crate::update::{UpdateError, Version, archive, checksum, replace};
@@ -166,6 +169,43 @@ fn install(
     })
 }
 
+const SHORT_SHA: usize = 12;
+
+#[derive(Clone, Copy)]
+struct Look {
+    color: bool,
+    verbose: bool,
+}
+
+fn installed_text(current: &str, version: &str, done: &Installed, look: Look) -> String {
+    let headline = format!(
+        "{} {}",
+        tint(look.color, bold, &format!("pipetrain {current} ->")),
+        tint(look.color, green, version)
+    );
+    let label = |name: &str| tint(look.color, dim, &format!("{name:<8}"));
+    let mut lines = vec![headline, format!("{} {}", label("asset"), done.asset)];
+    if let Some(sha256) = &done.sha256 {
+        let shown = if look.verbose {
+            sha256.as_str()
+        } else {
+            sha256.get(..SHORT_SHA).unwrap_or(sha256)
+        };
+        lines.push(format!("{} {shown}", label("sha256")));
+    }
+    lines.push(format!(
+        "{} {}",
+        label("location"),
+        readable_path(&done.executable)
+    ));
+    lines.push(tint(look.color, green, "ok"));
+    lines.join("\n")
+}
+
+fn up_to_date_text(current: &str, color: bool) -> String {
+    tint(color, green, &format!("pipetrain {current} is up to date"))
+}
+
 fn print_report(
     json: bool,
     current: &str,
@@ -173,6 +213,7 @@ fn print_report(
     newer: bool,
     dry_run: bool,
     installed: Option<&Installed>,
+    look: Look,
 ) -> Result<()> {
     if json {
         let report = json!({
@@ -191,19 +232,15 @@ fn print_report(
     } else if let Some(done) = installed.filter(|_| dry_run) {
         println!("dry run: pipetrain {current} -> {}", release.version);
         println!("asset {}", done.asset);
-        println!("would replace {}", done.executable.display());
+        println!("would replace {}", readable_path(&done.executable));
         println!("nothing was downloaded or written");
     } else if let Some(done) = installed {
-        println!("updated pipetrain {current} -> {}", release.version);
-        if let Some(sha256) = &done.sha256 {
-            println!("verified {} (sha256 {sha256})", done.asset);
-        }
-        println!("replaced {}", done.executable.display());
+        anstream::println!("{}", installed_text(current, &release.version, done, look));
     } else if newer {
         println!("update available: {current} -> {}", release.version);
         println!("run `pipetrain update` to install it");
     } else {
-        println!("pipetrain {current} is up to date");
+        anstream::println!("{}", up_to_date_text(current, look.color));
     }
     Ok(())
 }
@@ -240,6 +277,79 @@ pub fn run(opts: UpdateOptions) -> Result<i32> {
         newer,
         opts.dry_run,
         installed.as_ref(),
+        Look {
+            color: !opts.check,
+            verbose: opts.verbose,
+        },
     )?;
     Ok(if newer && opts.check { NEWER } else { 0 })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FULL: &str = "0a48e125abcdef0123456789abcdef0123456789abcdef0123456789abcdef01";
+
+    fn installed() -> Installed {
+        Installed {
+            asset: "pipetrain-v0.10.0-x86_64-pc-windows-msvc.zip".to_string(),
+            sha256: Some(FULL.to_string()),
+            executable: PathBuf::from(r"\\?\D:\Portable\pipetrain\pipetrain.exe"),
+        }
+    }
+
+    fn plain(verbose: bool) -> Look {
+        Look {
+            color: false,
+            verbose,
+        }
+    }
+
+    #[test]
+    fn the_plain_report_is_short_aligned_and_has_no_escapes() {
+        let text = installed_text("0.9.2", "0.10.0", &installed(), plain(false));
+        assert_eq!(
+            text,
+            "pipetrain 0.9.2 -> 0.10.0\n\
+             asset    pipetrain-v0.10.0-x86_64-pc-windows-msvc.zip\n\
+             sha256   0a48e125abcd\n\
+             location D:\\Portable\\pipetrain\\pipetrain.exe\n\
+             ok"
+        );
+        assert!(!text.contains('\x1b'));
+    }
+
+    #[test]
+    fn verbose_prints_the_full_hash() {
+        let text = installed_text("0.9.2", "0.10.0", &installed(), plain(true));
+        assert!(text.contains(&format!("sha256   {FULL}")), "{text}");
+    }
+
+    #[test]
+    fn the_colored_report_bolds_the_headline_and_greens_the_new_version() {
+        let look = Look {
+            color: true,
+            verbose: false,
+        };
+        let text = installed_text("0.9.2", "0.10.0", &installed(), look);
+        let first = text.lines().next().unwrap();
+        assert_eq!(
+            first,
+            "\x1b[1mpipetrain 0.9.2 ->\x1b[0m \x1b[32m0.10.0\x1b[0m"
+        );
+        assert!(text.ends_with("\x1b[32mok\x1b[0m"), "{text}");
+    }
+
+    #[test]
+    fn up_to_date_is_one_green_line_only_when_colored() {
+        assert_eq!(
+            up_to_date_text("0.10.0", false),
+            "pipetrain 0.10.0 is up to date"
+        );
+        assert_eq!(
+            up_to_date_text("0.10.0", true),
+            "\x1b[32mpipetrain 0.10.0 is up to date\x1b[0m"
+        );
+    }
 }

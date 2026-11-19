@@ -47,6 +47,8 @@ The causes come from the preflight and merge causes that already exist, worded f
 
 A cause that has no wording keeps its original text. Only the first cause is shown on the line; `(+N more, see --verbose)` says there are others.
 
+A repo that reports no checks at all stays blocked by default. With `allow_missing_checks = true` (also per profile) or a match in `checks_optional_repos`, an approved and mergeable PR is accepted, and the exception is visible: the compact dry run adds `no checks reported (allowed by config)` to its row, `--verbose` prints an `exception:` line in the preflight and `--json` adds `exceptions` to the matching `preflight` entry (see [plan-json.md](plan-json.md#readiness)). Pending or failing checks, and a branch rule that requires a check (`mergeStateStatus` BLOCKED), still block.
+
 **During `--apply`.** On a terminal there is one live line per active PR, as before. Each PR that finishes becomes one final line: green `merged + deploy ok`, red `merged, deploy failed` or yellow `stopped`. Off a terminal (CI, a redirect, `--no-progress`) there is no spinner and each event is one line.
 
 **Final report.** The first line is bold and counts the run, for example `4 merged · 3 deploys ok · 2 failed · 1 stopped`. The PRs that went well are one line with their names. Each failed PR gets a block:

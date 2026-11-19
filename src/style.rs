@@ -14,6 +14,10 @@ pub(crate) fn red(text: &str) -> String {
     paint("1;31", text)
 }
 
+pub fn error_label() -> String {
+    red("error")
+}
+
 pub(crate) fn green(text: &str) -> String {
     paint("32", text)
 }
