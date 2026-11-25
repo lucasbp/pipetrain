@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.14.0
 
 - The version preflight now matches the deploy gate. The `max-behind` limit is also read from reusable workflows the deploy workflow calls (`uses:` in `owner/repo/path@ref` or `./path` form, up to 5 levels), the gate fails when the pin is at or beyond the limit (`behind >= limit`, not only above it) and pre-releases are not counted. A PR held for it says `needs a bump of <package> to <version> (package <package> behind: installed A, latest stable B, limit N)`.
 - `plan` and `merge` simulate the queue of PRs that share a repo and base: each is merged in memory (`git merge-tree`, partial clone in the cache, no checkout) on top of the earlier ones, and one that conflicts after them goes to SKIPPED with `conflicts with <repo#n> after it merges: <files>`. The others keep going. Without enough data the selection is kept as before. No API requests are spent. See [docs/merge.md](docs/merge.md#simulating-the-queue).
