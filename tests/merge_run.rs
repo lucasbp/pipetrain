@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 mod common;
-use common::{Server, pr, serve_requests};
+use common::{Server, pr, serve_requests, serve_with_headers};
 use pipetrain::command::merge::{Hooks, Outcome, Settings, merge_plan, render, render_final};
 use pipetrain::config::{ApiConfig, Config, Rules};
 use pipetrain::emit;
@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 const TRAIN: &str = "deploy/05-11-2026";
 
 struct Script {
+    headers: Vec<(String, String)>,
     http_elapsed: BTreeMap<String, Duration>,
     run_errors: std::collections::VecDeque<u16>,
     run_delays: std::collections::VecDeque<Duration>,
@@ -383,6 +384,7 @@ fn green() -> Vec<Value> {
 impl Script {
     fn new() -> Self {
         Self {
+            headers: Vec::new(),
             http_elapsed: BTreeMap::new(),
             run_errors: Default::default(),
             run_delays: Default::default(),
@@ -662,7 +664,7 @@ impl Rig {
         let shared = Arc::clone(&script);
         let clock = Arc::new(Mutex::new(Instant::now()));
         let server_clock = Arc::clone(&clock);
-        let server = serve_requests(move |line, payload| {
+        let server = serve_with_headers(move |line, payload, _| {
             let elapsed = shared
                 .lock()
                 .unwrap()
@@ -683,7 +685,9 @@ impl Rig {
                 Duration::ZERO
             };
             std::thread::sleep(delay);
-            respond(&shared, line, payload)
+            let headers = shared.lock().unwrap().headers.clone();
+            let (status, body) = respond(&shared, line, payload);
+            (status, headers, body)
         });
         let mut cfg = Config::parse(&format!(
             "orgs = [\"acme\"]\n{top}[merge]\npoll_seconds = 1\ntimeout_minutes = 1\nno_run_grace_seconds = 3\n{extra}"
@@ -715,6 +719,8 @@ impl Rig {
             max_requests: 50,
             max_per_minute: 1000,
             min_remaining: 0,
+            max_per_second: 1000,
+            ..ApiConfig::default()
         };
         let mut client = Client::with_timeout(
             "ghp_FAKE0123456789".to_string(),
@@ -5500,4 +5506,20 @@ fn an_uncertain_outcome_still_stops_everything() {
     assert_eq!(step_of(&run, "acme/sync#4").detail, STOPPED);
     assert_eq!(run.outcome.code, EXIT_STOPPED);
     assert!(rig.puts().is_empty());
+}
+
+#[test]
+fn crossing_the_reserve_mid_merge_stops_before_the_next_merge_and_keeps_the_state() {
+    let mut rig = Rig::new("");
+    rig.script().headers = vec![
+        ("x-ratelimit-limit".to_string(), "1000".to_string()),
+        ("x-ratelimit-remaining".to_string(), "150".to_string()),
+        ("x-ratelimit-reset".to_string(), "4000000000".to_string()),
+        ("x-ratelimit-resource".to_string(), "core".to_string()),
+    ];
+    let run = rig.go(&plan_on(&[1, 2]));
+    assert_eq!(run.outcome.code, 5, "{}", run.said(0));
+    assert_eq!(run.step(0).status, Status::Stopped);
+    assert!(run.said(0).contains("merged"), "{}", run.said(0));
+    assert_eq!(rig.puts().len(), 1);
 }

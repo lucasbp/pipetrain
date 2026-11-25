@@ -411,7 +411,8 @@ A ready PR that depends on a PR left out as `waiting` or `blocked` is also left 
 | `1` | A step failed, or you did not confirm. |
 | `3` | The plan has open questions and `--allow-questions` was not given. |
 | `4` | Only with `--strict`: no visible selected PR is eligible, or a dry run contains no merge step. Existing errors, open-question apply refusal and resumable failures retain their codes. |
-| `5` | Stopped and resumable: a deploy timed out or has no run, a gate was not confirmed, or a state could not be read from GitHub. Run the same command again. |
+| `5` | Stopped and resumable: a deploy timed out or has no run, a gate was not confirmed, or a state could not be read from GitHub. Run the same command again. A merge also stops this way when the API quota crosses `api.reserve`: no new merge starts, the state is kept, and the command can be run again after the reset. |
+| `6` | Not enough API quota to start, counting the `api.reserve`. Nothing was merged or written. See [api-quota.md](api-quota.md). |
 
 ## JSON
 
@@ -429,6 +430,7 @@ A ready PR that depends on a PR left out as `waiting` or `blocked` is also left 
 | `preflight` | Readiness[] | Additive readiness snapshot for every visible selected PR, including blocked PRs, using the same shape as [plan-json.md](plan-json.md#readiness). |
 | `state` | StatePreview | Additive snapshot of local state before execution, also present in dry runs. |
 | `api_estimate` | ApiEstimate | Additive advisory request estimate before execution; also present in dry runs and declined confirmations. |
+| `api_usage` | object | Additive requests spent by the invocation: `core`, `graphql`, `search`, `cache_hits` and `not_modified`, all integers. A 304 is refunded, so it is not in the spent counts. See [api-quota.md](api-quota.md#counters). |
 | `max_parallel` | integer | Additive configured concurrency upper bound, also present in dry runs. The existing exclusion is one worker per repository, including different bases. |
 | `summary` | MergeSummary | Additive invocation result counts, all zero before execution, including dry runs and declined confirmations. |
 

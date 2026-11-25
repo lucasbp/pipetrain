@@ -109,6 +109,8 @@ fn permissive(orgs: usize) -> ApiConfig {
         max_requests: u32::try_from(10 + 2 * orgs).unwrap_or(u32::MAX),
         max_per_minute: 1000,
         min_remaining: 0,
+        max_per_second: 1000,
+        ..ApiConfig::default()
     }
 }
 

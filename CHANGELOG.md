@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- GitHub API quota guard. `api.reserve` (default `"20%"`, a percentage or a number, per resource) is the part of the rate limit pipetrain never spends. `plan` and `merge` read `/rate_limit` (free) before starting and refuse with the new exit code `6` when the estimate does not fit above the reserve, saying how much is missing per resource and when it resets (UTC and local). `merge` stops before any new merge when a response shows a resource below the reserve (exit `5`, resumable), and deploys already being followed slow down with a backoff that does not pass the reset. `PIPETRAIN_QUOTA_CHECK` turns the start check on for loopback test servers. See [docs/api-quota.md](docs/api-quota.md).
+- Cheaper reads: a persistent HTTP cache in the user cache directory, shared by every command, keyed by URL (and query plus variables for GraphQL), validated with `ETag` and `Last-Modified`, fresh for 60 seconds while a plan is built, immutable for objects by SHA, never holding the token. A `304` is refunded and does not count as spent. Deploy polling reads only unfinished runs by id. A second `plan` over unchanged data makes at most a tenth of the requests of the first.
+- `api.max_per_second` (default 10): a token bucket with a burst, next to `max_per_minute`.
+- Per-resource counters: `plan` `stats` gains `core_requests`, `graphql_requests`, `search_requests` and `not_modified`, and the `merge` JSON gains `api_usage`; both text summaries print them. Additive, schema stays `1`.
+
 ## 0.13.0
 
 - `--author <login>` (repeatable) and `--mine` now select, not only hide: on `plan`, `merge` and `bundle` they add every open, non-draft PR of those logins in the orgs of the profile, with origin `author`, to the train, shared branches, `--all` and named PRs, without duplicates. The org-wide open PR list that discovery already reads is reused, so there is no extra search. Not ready PRs go to `SKIPPED` with their cause. Only logins given on the command line select; `authors` in the config still only hides. `scope` gains `author` (additive, schema stays `1`).

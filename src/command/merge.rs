@@ -386,13 +386,20 @@ fn wait_for_deploy(
     let mut settled: Option<usize> = None;
     let mut last = "no workflow run yet".to_string();
     let mut auxiliary_failures = std::collections::BTreeSet::new();
+    let mut known: Vec<crate::github::Run> = Vec::new();
     let outcome = loop {
         if (hooks.now)().saturating_duration_since(started) >= limits.timeout {
             break Deploy::TimedOut(last);
         }
-        let (runs, complete) = match client.workflow_runs(slug, sha, expected.is_none()) {
+        let reading = if follow_by_id(expected, &known) {
+            client.refresh_runs(slug, &known).map(|runs| (runs, true))
+        } else {
+            client.workflow_runs(slug, sha, expected.is_none())
+        };
+        let (runs, complete) = match reading {
             Ok(reading) => {
                 consecutive_errors = 0;
+                known = reading.0.clone();
                 reading
             }
             Err(error) if transient_read(&error) => {
@@ -500,10 +507,42 @@ fn wait_for_deploy(
         } else {
             remaining
         };
-        (hooks.sleep)(crate::merge::poll_delay(poll, limits.poll_ceiling, sleeps).min(remaining));
+        let delay = crate::merge::poll_delay(poll, limits.poll_ceiling, sleeps);
+        let delay = match client.below_reserve() {
+            Some(below) => {
+                let slow = crate::quota::backoff(delay, limits.poll_ceiling, &below, sleeps);
+                emit(&format!(
+                    "GitHub {} quota is below the reserve ({} left of {}): following the deploy every {}s",
+                    below.resource,
+                    below.left,
+                    below.floor,
+                    slow.as_secs()
+                ));
+                slow
+            }
+            None => delay,
+        };
+        (hooks.sleep)(delay.min(remaining));
         sleeps += 1;
     };
     (outcome, auxiliary_failures.into_iter().collect())
+}
+
+fn follow_by_id(expected: Option<&PushRuns>, known: &[crate::github::Run]) -> bool {
+    let Some(PushRuns::Expected {
+        workflows,
+        chained_workflows,
+        ..
+    }) = expected
+    else {
+        return false;
+    };
+    chained_workflows.is_empty()
+        && workflows
+            .iter()
+            .all(|path| known.iter().any(|run| &run.path == path))
+        && known.iter().all(|run| run.id != 0)
+        && known.iter().any(|run| run.status != "completed")
 }
 
 fn transient_read(error: &crate::github::ApiError) -> bool {
@@ -641,6 +680,9 @@ fn merge_one(
 ) {
     let key = PrKey::new(&item.org, &item.repo, item.number);
     let slug = key.slug();
+    if let Some(below) = client.below_reserve() {
+        return stop(report, crate::quota::stop_message(&below));
+    }
     settle::wait(env, &slug, &item.base, &item.id, hooks);
     (hooks.progress)(&format!("checking merge readiness of {}", item.id));
     let started = (hooks.now)();
@@ -1429,6 +1471,7 @@ fn merge_plan_prepared(
     let requests = client.requests();
     let mut report = Report {
         api_estimate: estimate(plan, cfg, settings, store, requests, &[]),
+        api_usage: client.usage(),
         max_parallel: cfg.max_parallel,
         summary: Summary::default(),
         preflight: plan
@@ -1479,10 +1522,26 @@ fn merge_plan_prepared(
         settle::annotate(&mut report.steps, plan, cfg, &store.state);
         report.api_estimate = estimate(plan, cfg, settings, store, requests, &report.steps);
         report.steps.splice(0..0, bump_steps(plan));
+        report.api_usage = client.usage();
         return Ok(Outcome {
             report,
             aborted: false,
             code: 0,
+        });
+    }
+    let need = crate::quota::Need {
+        core: report
+            .api_estimate
+            .total
+            .saturating_sub(u64::from(plan.stats.requests)),
+        ..crate::quota::Need::default()
+    };
+    if let Err(refused) = crate::quota::refuse(client, &cfg.api, &need) {
+        report.stopped = Some(refused.to_string());
+        return Ok(Outcome {
+            report,
+            aborted: false,
+            code: crate::quota::EXIT_QUOTA,
         });
     }
     if !report.questions.is_empty() && !settings.allow_questions {
@@ -1717,6 +1776,7 @@ fn merge_plan_prepared(
     }
     report.steps.splice(0..0, behind_steps);
     report.summary = Summary::from_steps(&report.steps);
+    report.api_usage = client.usage();
     let code = report.exit_code();
     Ok(Outcome {
         report,
@@ -1865,6 +1925,16 @@ pub fn render(report: &Report, color: bool) -> String {
     render_with_steps(report, color, true)
 }
 
+fn usage_line(usage: &crate::github::Usage) -> String {
+    if usage.spent() == 0 && usage.cache_hits == 0 && usage.not_modified == 0 {
+        return String::new();
+    }
+    format!(
+        "API used: core {}, graphql {}, search {}; {} from cache, {} not modified\n",
+        usage.core, usage.graphql, usage.search, usage.cache_hits, usage.not_modified
+    )
+}
+
 pub fn render_final(report: &Report, color: bool) -> String {
     render_with_steps(report, color, !report.applied)
 }
@@ -1902,6 +1972,7 @@ fn render_with_steps(report: &Report, color: bool, include_steps: bool) -> Strin
         }
         out.push('\n');
     }
+    out.push_str(&usage_line(&report.api_usage));
     if report.steps.is_empty() {
         out.push_str(&format!("{}\n", tint(color, dim, "nothing to merge")));
     }

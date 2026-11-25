@@ -810,6 +810,7 @@ fn rendered(report: &Value, sandbox: &Sandbox) -> String {
     let steps: Vec<StepReport> = serde_json::from_value(report["steps"].clone()).unwrap();
     let number = |key: &str| report["api_estimate"][key].as_u64().unwrap();
     let report = Report {
+        api_usage: Default::default(),
         api_estimate: ApiEstimate {
             discovery: number("discovery"),
             checks: number("checks"),

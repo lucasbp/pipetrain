@@ -740,6 +740,23 @@ impl Client {
         Ok((runs, complete))
     }
 
+    pub fn refresh_runs(&mut self, slug: &str, known: &[Run]) -> Result<Vec<Run>, ApiError> {
+        known
+            .iter()
+            .map(|run| {
+                if run.status == "completed" {
+                    return Ok(run.clone());
+                }
+                let path = format!("/repos/{slug}/actions/runs/{}", run.id);
+                let body = self
+                    .get(&path)?
+                    .into_body(&path)
+                    .map_err(|error| self.redact(error))?;
+                Ok(parse_run(&body))
+            })
+            .collect()
+    }
+
     pub fn tree(&mut self, slug: &str, sha: &str) -> Result<(Vec<String>, bool)> {
         if let Some(found) = self
             .cache

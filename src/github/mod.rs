@@ -8,9 +8,10 @@ mod reply;
 mod retry;
 mod token;
 
-pub use client::{Client, Download, origin};
+pub use client::{Client, Download, Window, origin};
 pub use endpoints::{BranchRequirements, BranchWrite, LivePr, PrWrite, Run};
 pub use error::{ApiError, describe_reset};
+pub use guard::{Below, Usage};
 pub use parse::{parse_files, parse_pr, parse_search};
 pub use reply::{Rate, Reply};
 pub use retry::{Cause, Retry};

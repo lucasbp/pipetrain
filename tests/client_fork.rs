@@ -11,6 +11,8 @@ fn fork_keeps_transport_and_shares_global_request_limit() {
         max_requests: 1,
         max_per_minute: 1000,
         min_remaining: 0,
+        max_per_second: 1000,
+        ..ApiConfig::default()
     };
     let mut original = Client::with_base_url("ghp_FAKE0123456789".to_string(), &cfg, false, &base);
     let mut worker = original.fork();

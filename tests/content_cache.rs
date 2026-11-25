@@ -23,6 +23,8 @@ fn client(base: &str, dir: &Path, mode: CacheMode) -> Client {
         max_requests: 50,
         max_per_minute: 1000,
         min_remaining: 0,
+        max_per_second: 1000,
+        ..ApiConfig::default()
     };
     Client::with_base_url(FAKE.to_string(), &cfg, false, base)
         .with_cache(Cache::open(mode, Some(dir.to_path_buf())))

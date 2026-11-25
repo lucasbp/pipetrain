@@ -188,6 +188,8 @@ impl Rig {
             max_requests: 100,
             max_per_minute: 1000,
             min_remaining: 0,
+            max_per_second: 1000,
+            ..ApiConfig::default()
         };
         Client::with_timeout(
             "ghp_FAKE0123456789".to_string(),

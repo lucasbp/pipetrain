@@ -600,6 +600,10 @@ A run spends GitHub API requests: a search per org, a few per PR, one batched co
 | `max_requests` | 300 | The run stops with an error when it reaches this many requests. |
 | `max_per_minute` | 100 | The run slows down to stay under this rate. It waits, it does not fail. |
 | `min_remaining` | 200 | The run stops with an error when GitHub reports fewer requests left than this. |
+| `reserve` | `"20%"` | Part of each rate-limit window (per resource) the run never spends, a percentage or a number. `plan` and `merge` refuse to start with exit code 6 when their estimate does not fit above it, and a merge stops (exit 5, resumable) when it crosses it. |
+| `max_per_second` | 10 | Requests per second, with a burst of the same size. It waits, it does not fail. |
+
+The reserve, the persistent cache that answers repeated reads, the 304 handling and the per-resource counters are in [docs/api-quota.md](docs/api-quota.md).
 
 GitHub counts the REST API (`core`) and GraphQL separately, and the guard follows that. `max_requests` and `max_per_minute` count every request of the run, REST and GraphQL together. `min_remaining` is checked per resource, using the `x-ratelimit-resource` header of each response, so a low GraphQL budget stops the run even when `core` is full. The `api` line of the output shows the lowest remaining value seen across resources.
 
@@ -786,7 +790,8 @@ The text report prints one line per repo (`opened`, `skipped` or `failed`, with 
 | 1 | An error: no token, bad config, bad `--date`, a PR not found, budget reached, GitHub failure. The message goes to stderr as `error: ...`. For `bundle` it also means the prompt was declined or a write failed. |
 | 3 | Queue output has open questions; also used when questions block `merge --apply` and by `order suggest` for a dependency cycle. |
 | 4 | With `--strict`, no visible selected PR is eligible; merge dry runs can also use it when no merge step exists. Precedence and exceptions are in [Common flows](docs/flows.md#use-by-agents). |
-| 5 | Only `merge --apply`: stopped and resumable (deploy timeout or no run, gate not confirmed). Run the same command again. See [docs/merge.md](docs/merge.md). |
+| 5 | Only `merge --apply`: stopped and resumable (deploy timeout or no run, gate not confirmed). Run the same command again. See [docs/merge.md](docs/merge.md). Also used when a merge stops because the API quota crossed `api.reserve`. |
+| 6 | Not enough GitHub API quota to start `plan` or `merge`, counting the `api.reserve` that is kept free. Nothing was changed; the message says how much is missing and when the quota resets. See [docs/api-quota.md](docs/api-quota.md). |
 
 `pipetrain update --check` also uses 10: a newer release exists.
 
@@ -821,7 +826,7 @@ Inspect inherited work and its age with `pipetrain state show` or `pipetrain sta
 
 `pipetrain merge --bump` can prepare draft dependency bump PRs only after proving a new publication from a publisher merged by the recorded queue execution. It is off by default; `--no-bump` explicitly disables it. `--apply` and confirmation are required for writes. It uses local Git and .NET restore in isolated workspaces. Consumers stay blocked for CI and review, while independent items can continue. Skipped or duplicate publication does not create a bump PR or skip the consumer. See [publication-backed preparation](docs/publication-bump.md).
 
-Exit code `5` means stopped and resumable. Everything else, the checks, the JSON and the design questions that were left open on purpose: [docs/merge.md](docs/merge.md).
+Exit code `6` means the API quota did not allow starting. Exit code `5` means stopped and resumable. Everything else, the checks, the JSON and the design questions that were left open on purpose: [docs/merge.md](docs/merge.md).
 
 ## MCP server for AI agents
 
@@ -858,6 +863,7 @@ pipetrain does not approve, comment, label or re-run checks, and it does not exe
 - [docs/github-action.md](docs/github-action.md): the GitHub Action, its inputs, outputs and exit codes.
 - [docs/log.md](docs/log.md): the opt-in local usage log, what a line holds and what never enters it.
 - [docs/mcp.md](docs/mcp.md): the MCP server, its five read-only tools, results, errors and the protocol choice.
+- [docs/api-quota.md](docs/api-quota.md): the API reserve, exit code 6, cheap polling, the persistent cache and the request counters.
 - [docs/merge.md](docs/merge.md): the contract of `pipetrain merge`: what it checks, what it waits for, resuming, exit codes, JSON and the open design questions.
 - [docs/e2e-sandbox.md](docs/e2e-sandbox.md): manually activated integration tests against disposable GitHub repositories, isolated state and cleanup.
 - [docs/releasing.md](docs/releasing.md): how a release is cut, what the workflow builds and the optional crates.io step.
