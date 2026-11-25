@@ -60,6 +60,8 @@ fn scope_code(scope: &str) -> &'static str {
         "into-train" => "34",
         "shared-branch" => "35",
         "released" => "36",
+        "author" => "33",
+        "stack-parent" => "34",
         _ => "37",
     }
 }
@@ -67,6 +69,7 @@ fn scope_code(scope: &str) -> &'static str {
 fn scope_label(scope: &str) -> &str {
     match scope {
         "shared-branch" => "shared",
+        "stack-parent" => "stack parent",
         other => other,
     }
 }
@@ -115,6 +118,8 @@ fn criterion(scope: &str, deploy_branch: &str) -> String {
         "into-train" => format!("PR targets {deploy_branch}"),
         "shared-branch" => "same head branch in 2 or more repos".to_string(),
         "released" => "approved PR on any branch (--all)".to_string(),
+        "author" => "open PR by a chosen author (--author, --mine)".to_string(),
+        "stack-parent" => "head branch is the base of a selected PR".to_string(),
         "explicit" => "named on the command line".to_string(),
         other => other.to_string(),
     }
@@ -229,6 +234,8 @@ fn origin_section(out: &mut String, plan: &Plan, names: &Names) {
         "into-train",
         "shared-branch",
         "released",
+        "author",
+        "stack-parent",
         "explicit",
     ];
     let present: Vec<&str> = scopes
@@ -246,6 +253,12 @@ fn origin_section(out: &mut String, plan: &Plan, names: &Names) {
         "\n{}",
         heading("36", "WHERE IT CAME FROM", "how each PR got into the queue")
     );
+    let label_width = present
+        .iter()
+        .map(|s| scope_label(s).chars().count())
+        .max()
+        .unwrap_or(6)
+        .max(6);
     for scope in present {
         let ready: Vec<&Item> = plan
             .items
@@ -270,7 +283,7 @@ fn origin_section(out: &mut String, plan: &Plan, names: &Names) {
             out,
             "  {} {}  {}  {}",
             scope_paint(scope, "●"),
-            scope_paint(scope, &pad(scope_label(scope), 6)),
+            scope_paint(scope, &pad(scope_label(scope), label_width)),
             counts,
             dim(&criterion(scope, &plan.deploy_branch))
         );

@@ -150,7 +150,7 @@ Plan notes and merge previews show the selected chain. Children merge into their
 
 ### What can go wrong and the right way out
 
-An unrelated push still fails the head guard. A parent that loses approval or awaits checks stops before its merge; complete the required review or checks and rerun. Already merged children stay merged. An unselected parent leaves the feature-base preflight warning; select it or verify that destination deliberately. Evidence from this invocation does not authorize arbitrary head changes after restarting.
+An unrelated push still fails the head guard. A parent that loses approval or awaits checks stops before its merge; complete the required review or checks and rerun. Already merged children stay merged. A parent that is an open PR of the same repository is added to the selection by itself (origin `stack-parent`), and so are its own parents, up to the PR that lands on the default or a train branch; a cycle of bases stops at the first repeated PR. The order is unchanged: children first, parent revalidated after. A parent that is not ready (draft, no approval, checks, behind) goes to `SKIPPED` with its own cause and its children go to `SKIPPED` with `stack parent <org/repo#n> not ready`. A base with no open PR, or with several, keeps the feature-base preflight warning; select the parent or verify that destination deliberately. Evidence from this invocation does not authorize arbitrary head changes after restarting.
 
 ### Tests
 

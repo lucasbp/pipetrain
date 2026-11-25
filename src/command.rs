@@ -96,30 +96,50 @@ fn discover(
     explicit: &[PrKey],
     train: &str,
     released: bool,
+    authors: &[String],
 ) -> Result<Discovered> {
-    if explicit.is_empty() {
-        let mut all = Vec::new();
+    let mut pool = Vec::new();
+    if explicit.is_empty() || !authors.is_empty() {
         for org in &cfg.orgs {
-            all.extend(client.open_prs(org)?);
+            pool.extend(client.open_prs(org)?);
         }
-        if released {
-            return Ok(discovery::released(all, cfg, train));
-        }
-        return Ok(discovery::discover(all, cfg, train));
     }
-    let mut prs = Vec::new();
-    for key in explicit {
-        match client.pr(key)? {
-            Some(pr) => prs.push(pr),
-            None => {
-                return Err(ApiError::NotFound {
-                    what: key.to_string(),
+    let mut out = if explicit.is_empty() {
+        if released {
+            discovery::released(pool.clone(), cfg, train)
+        } else {
+            discovery::discover_authored(pool.clone(), cfg, train, authors)
+        }
+    } else {
+        let mut prs = Vec::new();
+        for key in explicit {
+            match client.pr(key)? {
+                Some(pr) => prs.push(pr),
+                None => {
+                    return Err(ApiError::NotFound {
+                        what: key.to_string(),
+                    }
+                    .into());
                 }
-                .into());
             }
         }
-    }
-    Ok(discovery::explicit(prs, cfg))
+        let mut found = discovery::explicit(prs, cfg);
+        discovery::add_authored(&mut found, &pool, cfg, authors);
+        found
+    };
+    let have_pool = !pool.is_empty();
+    discovery::add_stack_parents(&mut out, cfg, |child| {
+        if have_pool {
+            Ok(pool
+                .iter()
+                .filter(|p| p.head_ref == child.base_ref)
+                .cloned()
+                .collect())
+        } else {
+            client.open_prs_with_head(&child.key, &child.base_ref)
+        }
+    })?;
+    Ok(out)
 }
 
 fn load_files(client: &mut Client, ready: &mut [(Pr, Scope)]) -> Result<()> {
@@ -445,8 +465,16 @@ fn build_plan_with_prepare(
         progress::phase("resolving repo names");
     }
     let explicit = names::resolve(&mut client, explicit, &cfg.orgs)?;
+    let selecting = author_filter::resolve(&opts.authors.selecting(), &mut client)?;
     progress::phase("discovering pull requests");
-    let mut discovered = discover(&mut client, &cfg, &explicit, &deploy_branch, opts.all)?;
+    let mut discovered = discover(
+        &mut client,
+        &cfg,
+        &explicit,
+        &deploy_branch,
+        opts.all,
+        &selecting,
+    )?;
     prepare(&mut client, &cfg, &mut discovered, &deploy_branch)?;
     let Discovered {
         ready,
@@ -496,7 +524,10 @@ fn build_plan_with_prepare(
     release::annotate(&mut built, &release_context);
     built.bumps = bumps;
     built.profile = Some(profile);
-    let logins = author_filter::resolve(&opts.authors.effective(&cfg), &mut client)?;
+    let logins = match &opts.authors {
+        AuthorFilter::Only(_) => selecting,
+        other => author_filter::resolve(&other.effective(&cfg), &mut client)?,
+    };
     if !logins.is_empty() {
         plan::hide_other_authors(&mut built, &logins);
     }

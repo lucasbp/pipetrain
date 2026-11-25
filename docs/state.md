@@ -49,6 +49,7 @@ Optional fields can be added without changing existing meanings.
 | `pending` | PendingInspection[] | All pending records, including inherited ones outside the current selection. |
 | `deploy_prs` | DeployPr[] | Saved deploy PR preparation records. |
 | `active_jobs` | string[] | Saved scheduler IDs, always present, including when empty. |
+| `archived` | ArchivedState[] | Files this command archived beside the state file (see [archiving](merge.md#archiving-a-stale-state-of-another-queue)), oldest name first; always present, empty when none. Each has `path`, `archived_at` (UTC RFC3339 read from the file name) and `pending` (number of pending records in it). Additive, the state schema stays `2`. |
 | `audit` | AuditEntry[] | Discard and later-deploy resolution history, always present, including when empty. |
 | `admin_overrides` | AdminOverrideRecord[], optional | Durable successful admin override history; omitted when empty. |
 | `bump` | object, optional | Existing publication/consumer bump journal, unchanged. |

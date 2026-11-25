@@ -332,6 +332,16 @@ state_file = 'queues/acme.json'
 
 Without a path override, unfinished work in the legacy global state blocks a named profile before any GitHub writes, even if a profile state already exists. Choose that legacy file explicitly with `--state` or `merge.state_file`, reconcile it, and then deliberately choose how to continue. Pending deploys, queued deploy PRs, active jobs and dependency bump journals are checked. State is never automatically migrated, deleted or combined. An empty legacy state is left in place. An unreadable or invalid state file is an error, never a reset.
 
+### Archiving a stale state of another queue
+
+Passing `--state` by hand was the only way past pending records left by a different queue. Now `merge` archives the file by itself, when all of these hold:
+
+- the selection shares no PR id with the pending records of the state (the identity of a state is the set of its pending PR ids, the identity of a selection is the set of PRs in the plan, ready or skipped);
+- every pending record is stale by `merge.stale_pending_hours`; a record with unknown age is not stale;
+- there is no active job, saved deploy PR, bump behind or bump journal work, and the state lock is not held.
+
+With `--apply` the file is renamed intact to `<stem>.<UTC date>T<HHMMSS>Z.<ext>` in the same directory (`merge-state.2026-11-25T103000Z.json`; a second archive in the same second gets `-1`, `-2` and so on, so no name collides and no archive is overwritten) and a new state starts empty. A warning on stderr lists the archived pending records and the new path. Nothing is discarded, nothing is marked as deployed and the archived file is never edited; to undo, rename it back. Without `--apply` nothing is renamed and the warning says that `--apply` would archive. If any pending is fresh, the identity is the same, a lock or job exists, or other work is saved, nothing changes and the state is used as before. The rename happens before the confirmation prompt, so declining the prompt leaves the archive in place. `state show` lists the archived files ([contract](state.md)).
+
 ### State identity, locking and age
 
 The local state file uses schema `2`, independently of the merge report's schema `1`. Reading accepts an absent schema (schema `0`), `0`, `1` and `2`, normalizing to `2` in memory. Reading alone does not rewrite a file. The next normal save writes schema `2` in the same location and preserves pending work. A schema above `2` fails with `written by a newer pipetrain` before writing the state or acquiring its lock. A future schema detected on the locked re-read also fails without rewriting the state.

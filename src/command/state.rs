@@ -6,7 +6,9 @@ use anyhow::{Result, anyhow, bail};
 use serde_json::{Value, json};
 
 use super::apply::{Gate, gate};
-use crate::merge::{AuditAction, AuditEntry, Store, resolve_state_path};
+use crate::merge::{
+    ArchivedState, AuditAction, AuditEntry, Store, archived_beside, resolve_state_path,
+};
 
 #[derive(clap::Args)]
 pub struct StateArgs {
@@ -37,7 +39,12 @@ enum StateAction {
     },
 }
 
-pub fn show(store: &Store, profile: &str, stale_pending_hours: u64) -> Result<Value> {
+pub fn show(
+    store: &Store,
+    profile: &str,
+    stale_pending_hours: u64,
+    archived: &[ArchivedState],
+) -> Result<Value> {
     let preview = store.preview(Some(profile), stale_pending_hours);
     let mut value = serde_json::to_value(&store.state)?;
     let metadata = serde_json::to_value(&preview)?;
@@ -47,6 +54,7 @@ pub fn show(store: &Store, profile: &str, stale_pending_hours: u64) -> Result<Va
         }
     }
     value["active_jobs"] = json!(store.state.active_jobs);
+    value["archived"] = json!(archived);
     for (pending, age) in value["pending"]
         .as_array_mut()
         .expect("pending is an array")
@@ -60,7 +68,12 @@ pub fn show(store: &Store, profile: &str, stale_pending_hours: u64) -> Result<Va
     Ok(value)
 }
 
-fn render(store: &Store, profile: &str, stale_pending_hours: u64) -> Result<String> {
+fn render(
+    store: &Store,
+    profile: &str,
+    stale_pending_hours: u64,
+    archived: &[ArchivedState],
+) -> Result<String> {
     let mut out = store.preview(Some(profile), stale_pending_hours).render();
     writeln!(out, "schema: {}", store.state.schema)?;
     writeln!(
@@ -98,6 +111,15 @@ fn render(store: &Store, profile: &str, stale_pending_hours: u64) -> Result<Stri
         "audit: {}",
         serde_json::to_string_pretty(&store.state.audit)?
     )?;
+    for old in archived {
+        writeln!(
+            out,
+            "archived state: {} at {} ({} pending)",
+            old.path,
+            old.archived_at.as_deref().unwrap_or("unknown"),
+            old.pending
+        )?;
+    }
     for record in &store.state.admin_overrides {
         writeln!(
             out,
@@ -129,6 +151,7 @@ pub fn run(args: StateArgs) -> Result<i32> {
         Some(&resolved.info.name),
     )?;
     let mut store = Store::open(Some(path.clone()))?;
+    let archived = archived_beside(&path);
     match args.action {
         StateAction::Show { json } => {
             if json {
@@ -137,7 +160,8 @@ pub fn run(args: StateArgs) -> Result<i32> {
                     serde_json::to_string_pretty(&show(
                         &store,
                         &resolved.info.name,
-                        resolved.cfg.merge.stale_pending_hours
+                        resolved.cfg.merge.stale_pending_hours,
+                        &archived
                     )?)?
                 );
             } else {
@@ -146,7 +170,8 @@ pub fn run(args: StateArgs) -> Result<i32> {
                     render(
                         &store,
                         &resolved.info.name,
-                        resolved.cfg.merge.stale_pending_hours
+                        resolved.cfg.merge.stale_pending_hours,
+                        &archived
                     )?
                 );
             }
