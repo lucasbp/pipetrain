@@ -151,7 +151,18 @@ pub fn serve_handler(handler: impl Fn(&str) -> (u16, Value) + Send + 'static) ->
     serve_requests(move |line, _| handler(line))
 }
 
+pub type Headers = Vec<(String, String)>;
+
 pub fn serve_requests(handler: impl Fn(&str, &str) -> (u16, Value) + Send + 'static) -> Server {
+    serve_with_headers(move |line, payload, _| {
+        let (status, body) = handler(line, payload);
+        (status, Vec::new(), body)
+    })
+}
+
+pub fn serve_with_headers(
+    handler: impl Fn(&str, &str, &str) -> (u16, Headers, Value) + Send + 'static,
+) -> Server {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -167,13 +178,22 @@ pub fn serve_requests(handler: impl Fn(&str, &str) -> (u16, Value) + Send + 'sta
                 .trim_end_matches(" HTTP/1.1")
                 .to_string();
             let payload = request.split_once("\r\n\r\n").map_or("", |(_, rest)| rest);
-            let (status, body) = handler(&line, payload);
+            let (status, headers, body) = handler(&line, payload, &request);
             record.lock().unwrap().push(request.clone());
-            let body = body.to_string();
-            let reply = format!(
-                "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            let body = if status == 304 {
+                String::new()
+            } else {
+                body.to_string()
+            };
+            let mut reply = format!(
+                "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
                 body.len()
             );
+            for (name, value) in headers {
+                reply.push_str(&format!("{name}: {value}\r\n"));
+            }
+            reply.push_str("\r\n");
+            reply.push_str(&body);
             stream.write_all(reply.as_bytes()).unwrap();
         }
     });

@@ -179,6 +179,8 @@ impl Fixture {
             max_requests: 300,
             max_per_minute: 10000,
             min_remaining: 0,
+            max_per_second: 1000,
+            ..ApiConfig::default()
         };
         let mut client =
             Client::with_base_url("ghp_FAKE0123456789".into(), &api, false, &self.server.base);

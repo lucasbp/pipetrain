@@ -1214,6 +1214,10 @@ fn dispatch(result: &Result<i32>) -> ExitCode {
         Ok(0) => ExitCode::SUCCESS,
         Ok(code) => ExitCode::from(u8::try_from(*code).unwrap_or(1)),
         Err(err) => {
+            if let Some(refused) = err.downcast_ref::<pipetrain::quota::QuotaRefused>() {
+                anstream::eprintln!("{}: {refused}", pipetrain::style::error_label());
+                return ExitCode::from(pipetrain::quota::EXIT_QUOTA as u8);
+            }
             anstream::eprintln!("{}: {err:#}", pipetrain::style::error_label());
             ExitCode::FAILURE
         }

@@ -226,6 +226,64 @@ pub struct ApiConfig {
     pub max_requests: u32,
     pub max_per_minute: u32,
     pub min_remaining: u64,
+    pub max_per_second: u32,
+    pub reserve: Reserve,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Reserve {
+    Percent(f64),
+    Absolute(u64),
+}
+
+impl Reserve {
+    pub fn floor(self, limit: u64) -> u64 {
+        match self {
+            Self::Percent(percent) => (limit as f64 * percent / 100.0).ceil() as u64,
+            Self::Absolute(count) => count.min(limit),
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.trim();
+        match text.strip_suffix('%') {
+            Some(percent) => percent
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|value| (0.0..=100.0).contains(value))
+                .map(Self::Percent),
+            None => text.parse::<u64>().ok().map(Self::Absolute),
+        }
+    }
+}
+
+impl std::fmt::Display for Reserve {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Percent(percent) => write!(f, "{percent}%"),
+            Self::Absolute(count) => write!(f, "{count}"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Reserve {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Count(u64),
+            Text(String),
+        }
+        match Raw::deserialize(deserializer)? {
+            Raw::Count(count) => Ok(Self::Absolute(count)),
+            Raw::Text(text) => Self::parse(&text).ok_or_else(|| {
+                serde::de::Error::custom(format!(
+                    "api.reserve must be a count like 200 or a percentage like \"20%\", not {text:?}"
+                ))
+            }),
+        }
+    }
 }
 
 impl Default for Config {
@@ -274,6 +332,8 @@ impl Default for ApiConfig {
             max_requests: 300,
             max_per_minute: 100,
             min_remaining: 200,
+            max_per_second: 10,
+            reserve: Reserve::Percent(20.0),
         }
     }
 }

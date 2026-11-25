@@ -762,6 +762,7 @@ pub fn estimated_polls(timeout: Duration, base: Duration, ceiling: Duration) -> 
 #[derive(Debug, Serialize)]
 pub struct Report {
     pub api_estimate: ApiEstimate,
+    pub api_usage: crate::github::Usage,
     pub max_parallel: usize,
     pub summary: Summary,
     pub preflight: Vec<crate::model::Readiness>,

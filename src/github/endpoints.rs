@@ -103,6 +103,12 @@ struct OpenSearch {
 
 impl Client {
     pub fn open_prs(&mut self, org: &str) -> Result<Vec<Pr>> {
+        let result = self.open_prs_retrying(org);
+        self.bypass_http(false);
+        result
+    }
+
+    fn open_prs_retrying(&mut self, org: &str) -> Result<Vec<Pr>> {
         let mut retried = 0;
         loop {
             let found = self.search_open_prs(org)?;
@@ -116,6 +122,7 @@ impl Client {
                 ));
             }
             retried += 1;
+            self.bypass_http(true);
             crate::progress::line(&format!(
                 "GitHub returned {} of {total} open PRs in {org}: searching again (retry {retried} of {SEARCH_RETRIES})",
                 found.received
@@ -738,6 +745,23 @@ impl Client {
                 .and_then(Value::as_u64)
                 .map_or(runs.len() < 100, |total| total == runs.len() as u64);
         Ok((runs, complete))
+    }
+
+    pub fn refresh_runs(&mut self, slug: &str, known: &[Run]) -> Result<Vec<Run>, ApiError> {
+        known
+            .iter()
+            .map(|run| {
+                if run.status == "completed" {
+                    return Ok(run.clone());
+                }
+                let path = format!("/repos/{slug}/actions/runs/{}", run.id);
+                let body = self
+                    .get(&path)?
+                    .into_body(&path)
+                    .map_err(|error| self.redact(error))?;
+                Ok(parse_run(&body))
+            })
+            .collect()
     }
 
     pub fn tree(&mut self, slug: &str, sha: &str) -> Result<(Vec<String>, bool)> {

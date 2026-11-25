@@ -1,3 +1,4 @@
+mod http;
 mod key;
 mod prune;
 mod store;
@@ -7,6 +8,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+pub use http::{Freshness, HttpCache, PR_TTL, Stored, freshness_of, key as http_key, now};
 pub use prune::prune;
 
 const MAX_AGE: Duration = Duration::from_secs(14 * 24 * 60 * 60);
@@ -92,6 +94,10 @@ impl Cache {
         if let Some(path) = self.entry_path(slug, endpoint, parts) {
             store::write(&path, data);
         }
+    }
+
+    pub fn http(&self) -> HttpCache {
+        HttpCache::at(self.dir.clone(), self.mode == CacheMode::Refresh)
     }
 
     pub fn hits(&self) -> u32 {

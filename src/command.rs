@@ -511,7 +511,13 @@ fn build_plan_with_prepare(
     let train = train_label(&explicit, opts.all, &deploy_branch);
 
     let mut client = Client::new(github::token()?, &cfg.api, opts.verbose)
-        .with_cache(Cache::at_default(opts.cache));
+        .with_cache(Cache::at_default(opts.cache))
+        .with_http_cache();
+    crate::quota::refuse(
+        &mut client,
+        &cfg.api,
+        &crate::quota::plan_need(cfg.orgs.len(), explicit.len()),
+    )?;
     let progress = Progress::start(opts.progress);
     if names::has_bare(&explicit) {
         progress::phase("resolving repo names");
@@ -595,8 +601,15 @@ fn build_plan_with_prepare(
     if opts.check_feeds {
         built.stats.feed_checks = feed::annotate(&mut built, &mut feed::Checker::new());
     }
+    let usage = client.usage();
+    built.stats.requests = client.requests();
+    built.stats.core_requests = usage.core;
+    built.stats.graphql_requests = usage.graphql;
+    built.stats.search_requests = usage.search;
+    built.stats.not_modified = usage.not_modified;
     built.stats.cache_hits = client.cache_hits();
     built.stats.cache_misses = client.cache_misses();
+    client.set_live(true);
     built.stats.elapsed_ms = elapsed::millis(started.elapsed());
     drop(progress);
     Ok((built, client, cfg))

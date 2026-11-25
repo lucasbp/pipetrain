@@ -299,6 +299,8 @@ fn the_search_query_asks_for_labels_and_the_reply_fills_them() {
         max_requests: 50,
         max_per_minute: 1000,
         min_remaining: 0,
+        max_per_second: 1000,
+        ..ApiConfig::default()
     };
     let mut client = Client::with_base_url(FAKE.to_string(), &cfg, false, &base);
     let prs = client.open_prs("acme").unwrap();
