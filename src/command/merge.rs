@@ -31,6 +31,7 @@ pub mod behind;
 pub mod bump;
 pub mod compact;
 mod failure;
+mod gates;
 mod package;
 mod parallel;
 mod recovery;
@@ -101,6 +102,7 @@ struct Env<'a> {
     readings: RefCell<BTreeMap<PushReadingKey, PushRuns>>,
     stacked: stacked::Evidence,
     landings: settle::Landings,
+    gates: gates::Answers,
 }
 
 impl Env<'_> {
@@ -1108,7 +1110,24 @@ fn gate_step(env: &Env, hooks: &mut Hooks, report: &mut StepReport) {
     if report.kind == Kind::Wait && package::check(env, hooks, report) {
         return;
     }
-    if env.settings.gates_confirmed {
+    let answered = if report.kind == Kind::Gate {
+        env.gates.verdict(&report.target)
+    } else {
+        None
+    };
+    if answered == Some(gates::Verdict::Confirmed) {
+        report.status = Status::Done;
+        report.detail = if env.gates.by_flag() {
+            "confirmed with --gates-confirmed".to_string()
+        } else {
+            "confirmed before the first merge".to_string()
+        };
+    } else if answered == Some(gates::Verdict::Refused) {
+        stop(
+            report,
+            "not confirmed: do it, then run again (in a terminal, or with --gates-confirmed)",
+        );
+    } else if env.settings.gates_confirmed {
         report.status = Status::Done;
         report.detail = "confirmed with --gates-confirmed".to_string();
     } else if (hooks.gate)(&report.target) {
@@ -1417,7 +1436,7 @@ fn merge_plan_prepared(
             .as_ref()
             .map_or(crate::profile::IMPLICIT, |profile| profile.name.as_str()),
     );
-    let env = Env {
+    let mut env = Env {
         plan,
         cfg,
         settings,
@@ -1425,6 +1444,7 @@ fn merge_plan_prepared(
         readings: RefCell::new(BTreeMap::new()),
         stacked: stacked::Evidence::default(),
         landings: settle::Landings::default(),
+        gates: gates::Answers::default(),
     };
     let requests = client.requests();
     let mut report = Report {
@@ -1478,6 +1498,9 @@ fn merge_plan_prepared(
         set_aside_inherited(&mut report, plan, &bundles, store, client);
         settle::annotate(&mut report.steps, plan, cfg, &store.state);
         report.api_estimate = estimate(plan, cfg, settings, store, requests, &report.steps);
+        if let Some(notice) = gates::preview(plan, &report.steps, settings.gates_confirmed) {
+            report.notices.push(notice);
+        }
         report.steps.splice(0..0, bump_steps(plan));
         return Ok(Outcome {
             report,
@@ -1525,6 +1548,12 @@ fn merge_plan_prepared(
     if store.state.profile.is_none() {
         store.state.profile = profile.map(str::to_string);
     }
+    env.gates = gates::ask(
+        plan,
+        &report.steps,
+        settings.gates_confirmed,
+        &mut *hooks.gate,
+    );
     let mut behind_steps = Vec::new();
     let mut behind_halt: Option<String> = None;
     if let Some(options) = &settings.bump_behind {
@@ -1593,6 +1622,7 @@ fn merge_plan_prepared(
     let mut progress_state = crate::progress::merge::MergeProgress::new(report.steps.len());
     let mut halted: Option<String> = None;
     let mut failures = failure::DeployFailures::default();
+    env.gates.hold(plan, &mut failures);
     for pending in &report.held {
         let has_consumers = failures.record(pending, plan, true);
         if has_consumers
@@ -1703,7 +1733,9 @@ fn merge_plan_prepared(
                 if let Some(item) = plan.items.iter().find(|item| item.id == step.target) {
                     failures.record_unmerged(item, plan);
                 }
-            } else if matches!(step.status, Status::Failed | Status::Stopped) {
+            } else if matches!(step.status, Status::Failed | Status::Stopped)
+                && !(step.kind == Kind::Gate && env.gates.verdict(&step.target).is_some())
+            {
                 halted = Some(step.target.clone());
             }
         }
@@ -2130,10 +2162,22 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
         if !interactive {
             return false;
         }
-        let answer = ask(
-            &format!("Gate: {text}"),
-            "Type yes once that is done, anything else stops here: ",
-        );
+        let answer = if text.starts_with(gates::BATCH) {
+            ask(
+                text,
+                "Type yes to confirm all of them, anything else to answer one by one: ",
+            )
+        } else if text.starts_with(gates::ITEM) {
+            ask(
+                text,
+                "Type yes once that is done, anything else holds this PR and what depends on it: ",
+            )
+        } else {
+            ask(
+                &format!("Gate: {text}"),
+                "Type yes once that is done, anything else stops here: ",
+            )
+        };
         let proceed = answer.trim() == "yes";
         if proceed {
             let started = *execution_started

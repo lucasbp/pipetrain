@@ -46,7 +46,7 @@ pipetrain merge 'acme/api#12' 'acme/web#3' --apply --yes
 
 ### What happens in each phase
 
-The dry run builds the plan, previews local state and predicts workflows without polling deployments or writing merge state. Apply locks and reloads state and asks for `yes`; `--yes` skips this initial confirmation and is required without an interactive terminal. Execution resumes pending work, revalidates each PR, saves intent before the merge request, records the merge SHA and waits for the deploy verdict. Independent repositories can run concurrently up to `max_parallel`, with one active PR per repository. Gates retain their own confirmations. See [merge phases, confirmation and deploy tracking](merge.md).
+The dry run builds the plan, previews local state and predicts workflows without polling deployments or writing merge state. Apply locks and reloads state and asks for `yes`; `--yes` skips this initial confirmation and is required without an interactive terminal. Execution resumes pending work, revalidates each PR, saves intent before the merge request, records the merge SHA and waits for the deploy verdict. Independent repositories can run concurrently up to `max_parallel`, with one active PR per repository. DDL and infra gates are all asked at the start, before any merge; a confirmed gate PR runs in parallel with the PRs that do not depend on it, and a refused one holds only its own branch. See [merge phases, confirmation and deploy tracking](merge.md).
 
 ### What can go wrong and the right way out
 
@@ -55,6 +55,7 @@ A changed head or base, lost approval, failing checks or non-clean REST mergeabi
 ### Tests
 
 - `tests/merge_run.rs`: `a_dry_run_lists_the_steps_in_queue_order_and_writes_nothing`, `declining_the_confirmation_merges_nothing`, `two_ready_prs_merge_one_at_a_time_and_each_deploy_ends_before_the_next_merge`, `parallel_real_workers_merge_independent_repositories_with_coordinated_state`, `a_pr_that_lost_its_approval_is_not_merged_and_the_rest_are_skipped`, `unknown_mergeability_is_retried_for_a_minute_and_then_stops_without_merging`.
+- `tests/merge_run.rs`: `gates_are_asked_together_before_any_merge_and_a_refusal_holds_only_its_branch`, `a_batch_confirmation_of_all_gates_asks_once_and_lets_every_branch_go`, `without_a_terminal_every_gate_holds_its_own_branch_and_the_rest_goes_on`, `gates_confirmed_answers_every_gate_without_asking`, `a_dry_run_lists_the_gates_it_would_ask_and_asks_nothing`.
 - `tests/merge_cli.rs`: `yes_without_apply_is_a_usage_error`.
 - `tests/bundle_apply.rs`: `the_gate_follows_its_truth_table` covers the shared initial-confirmation gate.
 - `tests/e2e_sandbox.rs`: `e2e_api_expected_deploy`, `e2e_parallel_web_and_static` (opt-in).

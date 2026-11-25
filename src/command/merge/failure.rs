@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::Bundled;
-use crate::merge::{Continuation, Kind, Pending, State, Status, StepReport};
+use crate::merge::{Continuation, Kind, Pending, STOPPED, State, Status, StepReport};
 use crate::plan::Plan;
 use crate::planner::{Item, Rule};
 
@@ -61,6 +61,7 @@ struct FailedDeploy {
     dependents: BTreeSet<String>,
     inherited: bool,
     unmerged: bool,
+    gate: bool,
 }
 
 pub(super) fn isolable(plan: &Plan, step: &StepReport) -> bool {
@@ -83,6 +84,12 @@ pub(super) struct Blocked {
 
 impl FailedDeploy {
     fn blocked(&self, reason: String) -> Blocked {
+        if self.gate {
+            return Blocked {
+                id: self.id.clone(),
+                detail: STOPPED.to_string(),
+            };
+        }
         let what = if self.unmerged { "merge" } else { "deploy" };
         Blocked {
             id: self.id.clone(),
@@ -95,6 +102,9 @@ impl FailedDeploy {
     }
 
     fn item(&self, item: &Item) -> Option<Blocked> {
+        if self.gate && self.id == item.id && !item.gate_late {
+            return None;
+        }
         if self.dependents.contains(&item.id) || self.id == item.id {
             return Some(self.blocked(format!("{} depends on it", item.id)));
         }
@@ -137,6 +147,7 @@ impl DeployFailures {
             dependents,
             inherited,
             unmerged: false,
+            gate: false,
         });
         has_consumers
     }
@@ -150,7 +161,27 @@ impl DeployFailures {
             dependents: downstream(plan, &item.id),
             inherited: false,
             unmerged: true,
+            gate: false,
         });
+    }
+
+    pub fn record_gate(&mut self, item: &Item, plan: &Plan) {
+        self.failures.push(FailedDeploy {
+            id: item.id.clone(),
+            repo: format!("{}/{}", item.org, item.repo),
+            base: item.base.clone(),
+            continuation: None,
+            dependents: downstream(plan, &item.id),
+            inherited: false,
+            unmerged: true,
+            gate: true,
+        });
+    }
+
+    pub fn holds_gate(&self, id: &str) -> bool {
+        self.failures
+            .iter()
+            .any(|failed| failed.gate && failed.id == id)
     }
 
     pub fn blocker(
@@ -178,6 +209,12 @@ impl DeployFailures {
             _ => None,
         };
         for failed in &self.failures {
+            if failed.gate
+                && step.kind == Kind::Gate
+                && item.is_some_and(|item| item.id == failed.id)
+            {
+                continue;
+            }
             if let Some(item) = item {
                 if let Some(blocked) = failed.item(item) {
                     return Some(blocked);
