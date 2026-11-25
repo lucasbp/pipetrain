@@ -103,6 +103,12 @@ struct OpenSearch {
 
 impl Client {
     pub fn open_prs(&mut self, org: &str) -> Result<Vec<Pr>> {
+        let result = self.open_prs_retrying(org);
+        self.bypass_http(false);
+        result
+    }
+
+    fn open_prs_retrying(&mut self, org: &str) -> Result<Vec<Pr>> {
         let mut retried = 0;
         loop {
             let found = self.search_open_prs(org)?;
@@ -116,6 +122,7 @@ impl Client {
                 ));
             }
             retried += 1;
+            self.bypass_http(true);
             crate::progress::line(&format!(
                 "GitHub returned {} of {total} open PRs in {org}: searching again (retry {retried} of {SEARCH_RETRIES})",
                 found.received

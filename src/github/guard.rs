@@ -93,7 +93,13 @@ impl Guard {
     }
 
     pub(super) fn remaining(&self) -> Option<u64> {
-        self.lock().remaining.values().map(|(left, _)| *left).min()
+        let budget = self.lock();
+        budget
+            .remaining
+            .iter()
+            .filter(|(resource, _)| budget.watches(resource))
+            .map(|(_, (left, _))| *left)
+            .min()
     }
 
     pub(super) fn observe(
@@ -103,6 +109,9 @@ impl Guard {
         reset: Option<i64>,
         limit: Option<u64>,
     ) {
+        if !matches!(resource, "core" | "graphql" | "search") {
+            return;
+        }
         let mut budget = self.lock();
         if let Some(limit) = limit {
             budget.limits.insert(resource.to_string(), limit);
@@ -123,6 +132,7 @@ impl Guard {
         budget
             .remaining
             .iter()
+            .filter(|(resource, _)| budget.watches(resource))
             .filter_map(|(resource, &(left, reset))| {
                 let limit = *budget.limits.get(resource)?;
                 let floor = budget.reserve.floor(limit);
@@ -207,6 +217,14 @@ impl Usage {
 }
 
 impl Budget {
+    fn watches(&self, resource: &str) -> bool {
+        match resource {
+            "core" | "graphql" => true,
+            "search" => self.usage.search > 0,
+            _ => false,
+        }
+    }
+
     fn refill(&mut self) {
         let now = Instant::now();
         let gained = now.duration_since(self.refilled).as_secs_f64() * f64::from(self.per_second);
@@ -330,6 +348,33 @@ mod tests {
         guard.observe("core", 4000, Some(10), Some(5000));
         guard.observe("graphql", 100, Some(10), Some(5000));
         assert_eq!(guard.below_reserve().unwrap().resource, "graphql");
+    }
+
+    #[test]
+    fn an_unused_search_window_with_a_small_limit_never_trips_the_reserve() {
+        let guard = Guard::new(
+            &ApiConfig {
+                reserve: Reserve::Absolute(200),
+                ..ApiConfig::default()
+            },
+            false,
+        );
+        guard.observe("core", 4000, Some(10), Some(5000));
+        guard.observe("graphql", 4000, Some(10), Some(5000));
+        guard.observe("search", 30, Some(10), Some(30));
+        guard.observe("code_search", 5, Some(10), Some(10));
+        assert_eq!(guard.below_reserve(), None);
+        assert_eq!(guard.remaining(), Some(4000));
+        assert_eq!(Reserve::Absolute(200).floor(30), 30);
+    }
+
+    #[test]
+    fn a_used_search_window_counts_against_its_own_limit() {
+        let guard = guard(50);
+        guard.observe("core", 4000, Some(10), Some(5000));
+        guard.before("search", "s").unwrap();
+        guard.observe("search", 3, Some(10), Some(30));
+        assert_eq!(guard.below_reserve().unwrap().resource, "search");
     }
 
     #[test]

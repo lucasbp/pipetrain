@@ -5523,7 +5523,7 @@ fn an_uncertain_outcome_still_stops_everything() {
 }
 
 #[test]
-fn crossing_the_reserve_mid_merge_stops_before_the_next_merge_and_keeps_the_state() {
+fn crossing_the_reserve_stops_before_the_merge_request_and_keeps_the_exit_code_5() {
     let mut rig = Rig::new("");
     rig.script().headers = vec![
         ("x-ratelimit-limit".to_string(), "1000".to_string()),
@@ -5534,8 +5534,11 @@ fn crossing_the_reserve_mid_merge_stops_before_the_next_merge_and_keeps_the_stat
     let run = rig.go(&plan_on(&[1, 2]));
     assert_eq!(run.outcome.code, 5, "{}", run.said(0));
     assert_eq!(run.step(0).status, Status::Stopped);
-    assert!(run.said(0).contains("merged"), "{}", run.said(0));
-    assert_eq!(rig.puts().len(), 1);
+    assert!(run.said(0).contains("api.reserve"), "{}", run.said(0));
+    assert!(
+        rig.puts().is_empty(),
+        "nothing may be merged below the reserve"
+    );
 }
 
 fn with_ddl(mut item: Pr) -> Pr {
@@ -5687,4 +5690,17 @@ fn a_dry_run_lists_the_gates_it_would_ask_and_asks_nothing() {
         "{notice}"
     );
     assert!(notice.contains("--apply asks"), "{notice}");
+}
+
+#[test]
+fn the_report_counts_the_requests_of_a_parallel_run() {
+    let mut rig = Rig::new("");
+    rig.cfg.max_parallel = 2;
+    let run = rig.go(&plan_on(&[1, 2]));
+    let usage = run.outcome.report.api_usage;
+    assert!(usage.core > 0, "{usage:?}");
+    assert!(
+        render_final(&run.outcome.report, false).contains("API used: core"),
+        "usage line missing"
+    );
 }

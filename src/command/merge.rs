@@ -682,10 +682,10 @@ fn merge_one(
 ) {
     let key = PrKey::new(&item.org, &item.repo, item.number);
     let slug = key.slug();
+    settle::wait(env, &slug, &item.base, &item.id, hooks);
     if let Some(below) = client.below_reserve() {
         return stop(report, crate::quota::stop_message(&below));
     }
-    settle::wait(env, &slug, &item.base, &item.id, hooks);
     (hooks.progress)(&format!("checking merge readiness of {}", item.id));
     let started = (hooks.now)();
     let mut tries = 0;
@@ -857,6 +857,9 @@ fn merge_one(
         }
     } else {
         report.admin_override = None;
+    }
+    if let Some(below) = client.below_reserve() {
+        return stop(report, crate::quota::stop_message(&below));
     }
     let pending = Pending {
         recorded_at: Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)),
@@ -1460,6 +1463,24 @@ pub fn merge_plan(
 
 #[allow(clippy::too_many_arguments)]
 fn merge_plan_prepared(
+    plan: &Plan,
+    cfg: &Config,
+    client: &mut Client,
+    settings: &Settings,
+    store: &mut Store,
+    hooks: &mut Hooks,
+    overrides: &BTreeMap<String, AdminOverride>,
+    compact: bool,
+) -> Result<Outcome> {
+    let mut outcome = merge_plan_inner(
+        plan, cfg, client, settings, store, hooks, overrides, compact,
+    )?;
+    outcome.report.api_usage = client.usage();
+    Ok(outcome)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn merge_plan_inner(
     plan: &Plan,
     cfg: &Config,
     client: &mut Client,
@@ -2328,6 +2349,10 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
             "{}",
             requests_line(client.requests(), client.cache_hits(), started.elapsed())
         );
+        let usage = usage_line(&outcome.report.api_usage);
+        if !usage.is_empty() {
+            eprint!("{usage}");
+        }
         if outcome.code == crate::merge::EXIT_STOPPED {
             eprintln!("stopped, nothing is lost: run the same command again to resume");
         }

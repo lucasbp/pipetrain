@@ -16,6 +16,22 @@ use crate::config::{ApiConfig, Reserve};
 
 type Sent = Result<Response<Body>, ureq::Error>;
 
+fn cut_short_search(body: &Value) -> bool {
+    let Some(search) = body.pointer("/data/search") else {
+        return false;
+    };
+    let total = search.get("issueCount").and_then(Value::as_u64);
+    let nodes = search
+        .get("nodes")
+        .and_then(Value::as_array)
+        .map_or(0, |nodes| nodes.len() as u64);
+    let more = search
+        .pointer("/pageInfo/hasNextPage")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    !more && total.is_some_and(|total| nodes < total)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Window {
     pub limit: u64,
@@ -78,6 +94,7 @@ pub struct Client {
     validators: Validators,
     http: HttpCache,
     live: bool,
+    bypass_http: bool,
     pub(super) cache: Cache,
 }
 
@@ -130,6 +147,7 @@ impl Client {
             validators: Validators::default(),
             http: self.http.clone(),
             live: self.live,
+            bypass_http: self.bypass_http,
             cache: Cache::disabled(),
         }
     }
@@ -167,6 +185,7 @@ impl Client {
             validators: Validators::default(),
             http: HttpCache::off(),
             live: false,
+            bypass_http: false,
             cache: Cache::disabled(),
         }
     }
@@ -179,6 +198,10 @@ impl Client {
     pub fn with_http_cache(mut self) -> Self {
         self.http = self.cache.http();
         self
+    }
+
+    pub(super) fn bypass_http(&mut self, bypass: bool) {
+        self.bypass_http = bypass;
     }
 
     pub fn set_live(&mut self, live: bool) {
@@ -323,6 +346,7 @@ impl Client {
     ) -> Result<Reply, ApiError> {
         let stored = key
             .as_ref()
+            .filter(|_| !self.bypass_http)
             .and_then(|(key, _)| self.http.load(key))
             .filter(|stored| stored.body != Value::Null);
         if let (Some(stored), Some((_, freshness))) = (&stored, &key)
@@ -352,6 +376,7 @@ impl Client {
         } else if let Some((key, freshness)) = &key
             && (200..300).contains(&reply.status)
             && reply.body.get("errors").is_none()
+            && !cut_short_search(&reply.body)
             && (*freshness != Freshness::Revalidate
                 || self.validators.etag.is_some()
                 || self.validators.last_modified.is_some())

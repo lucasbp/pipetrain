@@ -232,7 +232,7 @@ impl Reserve {
     pub fn floor(self, limit: u64) -> u64 {
         match self {
             Self::Percent(percent) => (limit as f64 * percent / 100.0).ceil() as u64,
-            Self::Absolute(count) => count,
+            Self::Absolute(count) => count.min(limit),
         }
     }
 

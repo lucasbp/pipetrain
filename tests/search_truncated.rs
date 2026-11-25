@@ -111,3 +111,22 @@ fn nodes_are_summed_across_pages_before_the_count_is_checked() {
     assert_eq!(prs.len(), 3);
     assert_eq!(seen.len(), 2);
 }
+
+#[test]
+fn a_cut_short_reply_is_never_kept_by_the_http_cache() {
+    use pipetrain::cache::{Cache, CacheMode};
+    let dir = std::env::temp_dir().join(format!("pipetrain-cut-short-{}", std::process::id()));
+    let (base, server) = serve_bodies(vec![
+        reply(Some(3), &[1], None),
+        reply(Some(3), &[1, 2, 3], None),
+    ]);
+    let cached = |base: &str| {
+        client(base)
+            .with_cache(Cache::open(CacheMode::Use, Some(dir.clone())))
+            .with_http_cache()
+    };
+    assert_eq!(cached(&base).open_prs("acme").unwrap().len(), 3);
+    assert_eq!(cached(&base).open_prs("acme").unwrap().len(), 3);
+    assert_eq!(server.join().unwrap().len(), 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}

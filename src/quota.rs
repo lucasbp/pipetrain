@@ -189,6 +189,20 @@ mod tests {
     }
 
     #[test]
+    fn an_absolute_reserve_above_a_small_limit_does_not_refuse_an_unused_resource() {
+        let mut all = windows(4900);
+        all.insert(
+            "search".to_string(),
+            Window {
+                limit: 30,
+                remaining: 30,
+                reset: Some(1_800_000_000),
+            },
+        );
+        assert!(shortfalls(&all, Reserve::Absolute(200), &Need::default()).is_empty());
+    }
+
+    #[test]
     fn the_message_names_the_gap_and_both_clocks() {
         let need = Need {
             core: 300,
