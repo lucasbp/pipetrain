@@ -218,3 +218,47 @@ fn json_only_adds_fields_and_keeps_the_peak_coherent() {
     assert!(stats["peak_parallel"].is_u64());
     assert!(stats["max_parallel"].is_u64());
 }
+
+#[test]
+fn a_gate_pr_is_listed_in_its_stage_apart_and_counted_only_if_confirmed() {
+    let plan = build();
+    let gate = plan
+        .items
+        .iter()
+        .find(|i| i.id == "acme/svc-billing#21")
+        .unwrap();
+    let view = plan.stages.iter().find(|v| v.stage == gate.stage).unwrap();
+    let note = view
+        .gates
+        .iter()
+        .find(|g| g.id == gate.id)
+        .expect("gate note");
+    assert_eq!(note.kind, "DDL");
+    assert_eq!(
+        note.note,
+        "runs with this stage once confirmed at --apply start"
+    );
+    assert!(plan.stages.iter().all(|v| !v.together.contains(&gate.id)));
+
+    let widest = plan.stages.iter().map(|v| v.together.len()).max().unwrap();
+    assert_eq!(
+        plan.stats.effective_parallel,
+        widest.min(plan.stats.max_parallel)
+    );
+    let with_gates = plan
+        .stages
+        .iter()
+        .map(|v| v.together.len() + v.gates.len())
+        .max()
+        .unwrap();
+    assert_eq!(
+        plan.stats.effective_parallel_if_gates_confirmed,
+        with_gates.min(plan.stats.max_parallel)
+    );
+    assert!(plan.stats.effective_parallel_if_gates_confirmed >= plan.stats.effective_parallel);
+
+    let value = serde_json::to_value(&plan).unwrap();
+    assert!(value["stats"]["effective_parallel_if_gates_confirmed"].is_u64());
+    let text = pipetrain::render::text(&plan);
+    assert!(text.contains("gate DDL: "), "{text}");
+}

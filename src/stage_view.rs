@@ -21,11 +21,19 @@ pub struct Wait {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GateNote {
+    pub id: String,
+    pub kind: String,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct StageView {
     pub stage: usize,
     pub together: Vec<String>,
     pub waits: Vec<Wait>,
     pub held: Vec<Wait>,
+    pub gates: Vec<GateNote>,
 }
 
 fn reason_of(rule: Rule) -> &'static str {
@@ -45,14 +53,63 @@ fn detail_of(item: &Item, dep: &crate::planner::Dependency) -> String {
     }
 }
 
+pub const GATE_NOTE: &str = "runs with this stage once confirmed at --apply start";
+
+fn gate_kind(item: &Item) -> &'static str {
+    match item.gate {
+        Some(crate::config::GateKind::Ddl) => "DDL",
+        _ => "infra",
+    }
+}
+
 pub fn compute(
     items: &[Item],
     detected: &BTreeMap<String, Vec<String>>,
     configured: &BTreeMap<String, usize>,
 ) -> Vec<StageView> {
+    let mut views = place(items, detected, configured, false);
+    for item in items
+        .iter()
+        .filter(|item| !item.hidden && item.gate.is_some())
+    {
+        let note = GateNote {
+            id: item.id.clone(),
+            kind: gate_kind(item).to_string(),
+            note: GATE_NOTE.to_string(),
+        };
+        match views.iter_mut().find(|view| view.stage == item.stage) {
+            Some(view) => view.gates.push(note),
+            None => views.push(StageView {
+                stage: item.stage,
+                together: Vec::new(),
+                waits: Vec::new(),
+                held: Vec::new(),
+                gates: vec![note],
+            }),
+        }
+    }
+    views.sort_by_key(|view| view.stage);
+    views
+}
+
+pub fn effective_peak_if_gates_confirmed(
+    items: &[Item],
+    detected: &BTreeMap<String, Vec<String>>,
+    configured: &BTreeMap<String, usize>,
+    max_parallel: usize,
+) -> usize {
+    effective_peak(&place(items, detected, configured, true), max_parallel)
+}
+
+fn place(
+    items: &[Item],
+    detected: &BTreeMap<String, Vec<String>>,
+    configured: &BTreeMap<String, usize>,
+    include_gates: bool,
+) -> Vec<StageView> {
     let running: Vec<&Item> = items
         .iter()
-        .filter(|item| !item.hidden && item.gate.is_none())
+        .filter(|item| !item.hidden && (include_gates || item.gate.is_none()))
         .collect();
     let jobs: Vec<(String, String)> = running
         .iter()
@@ -125,6 +182,7 @@ pub fn compute(
             together,
             waits,
             held,
+            gates: Vec::new(),
         });
     }
     views
@@ -190,6 +248,14 @@ pub fn lines(views: &[StageView], short: &dyn Fn(&str) -> String) -> Vec<String>
         out.push(line);
         for wait in view.held.iter().chain(view.waits.iter()) {
             out.push(format!("  serial: {}", explain(wait, short)));
+        }
+        for gate in &view.gates {
+            out.push(format!(
+                "  gate {}: {} {}",
+                gate.kind,
+                short(&gate.id),
+                gate.note
+            ));
         }
     }
     out

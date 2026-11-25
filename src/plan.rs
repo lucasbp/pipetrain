@@ -41,6 +41,7 @@ pub struct Stats {
     pub rate_remaining: Option<u64>,
     pub peak_parallel: usize,
     pub effective_parallel: usize,
+    pub effective_parallel_if_gates_confirmed: usize,
     pub max_parallel: usize,
     pub deploys_saved: usize,
     pub deploys_now: usize,
@@ -358,6 +359,7 @@ pub fn build(rules: &Rules, mut gathered: Gathered) -> Plan {
             rate_remaining: gathered.rate_remaining,
             peak_parallel: planned.peak_parallel,
             effective_parallel: 0,
+            effective_parallel_if_gates_confirmed: 0,
             max_parallel: gathered.max_parallel,
             deploys_saved,
             deploys_now,
@@ -378,6 +380,13 @@ impl Plan {
         self.stages = stage_view::compute(&self.items, &self.deploy_resources, configured);
         self.stats.effective_parallel =
             stage_view::effective_peak(&self.stages, self.stats.max_parallel);
+        self.stats.effective_parallel_if_gates_confirmed =
+            stage_view::effective_peak_if_gates_confirmed(
+                &self.items,
+                &self.deploy_resources,
+                configured,
+                self.stats.max_parallel,
+            );
     }
 
     pub fn has_eligible(&self) -> bool {
