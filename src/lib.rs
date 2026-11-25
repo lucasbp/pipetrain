@@ -7,6 +7,8 @@ pub mod conflicts;
 pub mod consumer_bump;
 pub mod contained;
 pub mod content;
+pub mod deploy_resources;
+pub mod deploy_wait;
 pub mod detect;
 pub mod discovery;
 pub mod doctor;
