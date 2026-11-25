@@ -11,6 +11,7 @@ use crate::model::{Pr, Question, Readiness};
 use crate::planner::{self, DepState, Item, PlanInput, Rule, behind};
 use crate::profile::ProfileSource;
 use crate::publishers::{Publishers, References};
+use crate::stage_view::{self, StageView};
 
 pub const SCHEMA: u32 = 1;
 pub const WAITING_NEXT_STEP: &str =
@@ -39,6 +40,7 @@ pub struct Stats {
     pub requests: u32,
     pub rate_remaining: Option<u64>,
     pub peak_parallel: usize,
+    pub effective_parallel: usize,
     pub max_parallel: usize,
     pub deploys_saved: usize,
     pub deploys_now: usize,
@@ -82,6 +84,7 @@ pub struct Plan {
     pub bumps: Vec<behind::Need>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub deploy_resources: BTreeMap<String, Vec<String>>,
+    pub stages: Vec<StageView>,
     pub stats: Stats,
 }
 
@@ -330,7 +333,7 @@ pub fn build(rules: &Rules, mut gathered: Gathered) -> Plan {
     let conflicts = conflicts::find(&snapshots, &stacked_pairs(&planned.items));
     let (deploys_saved, deploys_now) =
         deploy_counts(&planned.items, &bundles, &gathered.train_prefix);
-    Plan {
+    let mut plan = Plan {
         schema: SCHEMA,
         generated_at: gathered.generated_at,
         train: gathered.train,
@@ -349,10 +352,12 @@ pub fn build(rules: &Rules, mut gathered: Gathered) -> Plan {
         notes: planned.notes,
         bumps: Vec::new(),
         deploy_resources: BTreeMap::new(),
+        stages: Vec::new(),
         stats: Stats {
             requests: gathered.requests,
             rate_remaining: gathered.rate_remaining,
             peak_parallel: planned.peak_parallel,
+            effective_parallel: 0,
             max_parallel: gathered.max_parallel,
             deploys_saved,
             deploys_now,
@@ -363,10 +368,18 @@ pub fn build(rules: &Rules, mut gathered: Gathered) -> Plan {
             hidden_by_author: 0,
             feed_checks: 0,
         },
-    }
+    };
+    plan.refresh_stages(&BTreeMap::new());
+    plan
 }
 
 impl Plan {
+    pub fn refresh_stages(&mut self, configured: &BTreeMap<String, usize>) {
+        self.stages = stage_view::compute(&self.items, &self.deploy_resources, configured);
+        self.stats.effective_parallel =
+            stage_view::effective_peak(&self.stages, self.stats.max_parallel);
+    }
+
     pub fn has_eligible(&self) -> bool {
         self.preflight
             .iter()

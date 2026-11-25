@@ -8,6 +8,7 @@ use crate::elapsed;
 use crate::model::Question;
 use crate::plan::{Plan, SkippedOut, Stats};
 use crate::planner::{Item, Rule, is_late_rule};
+use crate::stage_view;
 use crate::style::{bold, dim, green, paint, red, yellow};
 
 fn api_summary(stats: &Stats) -> String {
@@ -437,6 +438,17 @@ pub fn text(plan: &Plan) -> String {
         plan.stats.peak_parallel,
         plan.stats.max_parallel
     );
+    if plan.stats.effective_parallel != plan.stats.peak_parallel {
+        let _ = writeln!(
+            out,
+            "  {} {} at once after the serial rules below",
+            dim("effective "),
+            plan.stats.effective_parallel
+        );
+    }
+    for line in stage_view::lines(&plan.stages, &|id| names.short(id)) {
+        let _ = writeln!(out, "  {} {}", dim("stages   "), line);
+    }
     let saved = if plan.stats.deploys_saved > 0 {
         green(&format!("{} after bundling", plan.stats.deploys_after))
     } else {

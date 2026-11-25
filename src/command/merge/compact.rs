@@ -382,6 +382,9 @@ pub fn preview(report: &Report, plan: &Plan, color: bool) -> String {
                 )
             ));
         }
+        for line in crate::stage_view::lines(&plan.stages, &short) {
+            out.push_str(&format!("  {}\n", tint(color, dim, &line)));
+        }
     }
     for question in &report.questions {
         out.push_str(&format!(

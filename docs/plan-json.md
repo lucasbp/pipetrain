@@ -32,6 +32,7 @@ The structs live in `src/plan.rs` (`Plan`, `SkippedOut`, `Stats`), `src/bundle.r
 | `notes` | string[] | Informational lines. Today only `X depends on Y, already merged`. |
 | `deploy_resources` | map (optional) | Repo (`org/repo`, lowercase) to the resources its deploy needs: `runner:<label>`, `runner-group:<name>`, `group:<repo>#<name>` or `dynamic`. A repo with an empty list needs none. Omitted when nothing was detected, additive. See `merge.md`. |
 | `bumps` | Bump[] (optional) | Bumps a PR needs before the version gate lets it merge: `{id, package, from, to?, behind, limit, queue_published}`. `to` is the newest stable version in the pin's major and is absent when only the queue's own release can satisfy the gate. Filled only by `merge` internally, so `plan --json` does not emit it today; omitted when empty, additive. See `bump-in-merge.md`. |
+| `stages` | array | Added field. One entry per stage of non-gate PRs, in order: `stage`, `together` (ids that start at once, before the `max_parallel` cap), `waits` and `held`. A `wait` is `{id, reason, detail, behind}` where `behind` are the ids it waits for. `waits` explain why a PR sits after earlier stages: `gate` (the PR of the same branch with the DDL or infra gate), `package` (`detail` is the package), `same-repo` (`detail` is `org/repo`: same target branch or stacked) or `dependency` (any other rule, `detail` is the rule). `held` are PRs of the stage that do not start with the others because they share a deploy resource: `reason` is `deploy-resource`, `detail` is the resource from `deploy_resources` (for example `runner:self-hosted` or `dynamic`) and `behind` the PRs using the slots. A resource has one slot unless `[merge.deploy_slots]` says otherwise. |
 | `stats` | Stats | Request budget and parallelism figures. |
 | `shown_authors` | string[] (optional) | Lowercase logins the author filter keeps visible. Present only when a filter is on. |
 
@@ -138,6 +139,7 @@ Consumers should switch on `code`, never on `message` or `hint`.
 | `requests` | integer | GitHub requests made by this run. |
 | `rate_remaining` | integer or null | Last `x-ratelimit-remaining` value seen. `null` when no response carried it. |
 | `peak_parallel` | integer | Largest number of non-gate PRs in one stage. |
+| `effective_parallel` | integer | Added field. Largest number of PRs that start together in one stage once shared deploy resources are applied, capped by `max_parallel`. Never above `peak_parallel`, which stays the graph-only width. |
 | `max_parallel` | integer | The configured `max_parallel`. It is a cap shown for reference: the planner does not split stages to respect it. |
 | `deploys_now` | integer | Items in the plan whose base is not a train branch: the deploys if nothing is bundled. |
 | `deploys_saved` | integer | Sum of `saved` over `bundles`. `0` when there are no bundles. |

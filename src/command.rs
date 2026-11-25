@@ -551,6 +551,7 @@ fn build_plan_with_prepare(
     if opts.check_feeds {
         built.stats.feed_checks = feed::annotate(&mut built, &mut feed::Checker::new());
     }
+    built.refresh_stages(&cfg.merge.deploy_slots);
     built.stats.cache_hits = client.cache_hits();
     built.stats.cache_misses = client.cache_misses();
     built.stats.elapsed_ms = elapsed::millis(started.elapsed());

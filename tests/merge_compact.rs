@@ -594,3 +594,21 @@ fn samples_for_the_pull_request_body() {
         strip(&final_report(&five_pr_report(), true, &context))
     );
 }
+
+#[test]
+fn the_dry_run_preview_says_what_runs_together_by_stage() {
+    let mut plan = build_plan();
+    plan.deploy_resources
+        .insert("acme/web".to_string(), vec!["runner:shared".to_string()]);
+    plan.deploy_resources
+        .insert("acme/lib".to_string(), vec!["runner:shared".to_string()]);
+    plan.refresh_stages(&std::collections::BTreeMap::new());
+    let report = report(vec![merge_step("acme/api#2")], Vec::new());
+    let text = strip(&preview(&report, &plan, false));
+    assert!(text.contains("stage 1: together"), "{text}");
+    assert!(
+        text.contains("waits for the shared deploy resource runner:shared"),
+        "{text}"
+    );
+    assert!(!text.contains("acme/"), "{text}");
+}

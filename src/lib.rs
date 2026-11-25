@@ -33,6 +33,7 @@ pub mod publication;
 pub mod publishers;
 pub mod pyproject;
 pub mod render;
+pub mod stage_view;
 pub mod style;
 pub mod update;
 pub mod workflows;

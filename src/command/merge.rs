@@ -1558,6 +1558,12 @@ fn merge_plan_prepared(
         if let Some(notice) = gates::preview(plan, &report.steps, settings.gates_confirmed) {
             report.notices.push(notice);
         }
+        let stages = crate::stage_view::lines(&plan.stages, &|id| id.to_string());
+        if !stages.is_empty() {
+            report
+                .notices
+                .push(format!("Parallelism by stage:\n{}", stages.join("\n")));
+        }
         report.steps.splice(0..0, bump_steps(plan));
         return Ok(Outcome {
             report,

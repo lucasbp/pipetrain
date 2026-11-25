@@ -537,6 +537,8 @@ GitHub-hosted labels (`ubuntu-*`, `windows-*`, `macos-*`) are not resources. Reu
 
 Concurrency group scope: GitHub documents that concurrency applies to runs "using the same concurrency group in the repository", so the group is scoped to the repository and the same name in two repos does not serialize them. The key is therefore `(repo, group)`, case-insensitive. Pipetrain already runs one job per repo at a time, so a group resource never delays anything by itself today; it is listed for visibility and for the day that rule is relaxed.
 
+The plan text and the merge dry run print this per stage (stage N: together ..., then serial: ... lines that name the resource and who holds it). Within a stage the PRs are taken in id order and a PR whose resource has no free slot is listed as held; the same view is in stages of the plan JSON.
+
 A job holds all its resources from the start of its step until the step ends. A job whose resource is full waits in queue order and does not take a `max_parallel` slot while it waits for a runner (see below). `merge.deploy_slots` raises the limit of a resource; the key can be the bare label, group or `dynamic`, or the full id. When the plan could not detect anything (empty `deploy_resources`, for example a state resumed without a plan), nothing is serialized beyond the existing rules; for a repo missing from a non-empty detection, the job needs `dynamic`.
 
 ### Queued deploys
