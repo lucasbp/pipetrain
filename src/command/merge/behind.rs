@@ -522,6 +522,7 @@ mod tests {
             to: to.map(str::to_string),
             behind: 3,
             limit: 2,
+            latest: None,
             queue_published: to.is_none(),
         }
     }

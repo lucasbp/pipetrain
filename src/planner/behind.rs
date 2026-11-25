@@ -21,15 +21,26 @@ pub struct Need {
     pub to: Option<String>,
     pub behind: usize,
     pub limit: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest: Option<String>,
     pub queue_published: bool,
 }
 
 impl Need {
     pub fn cause(&self) -> String {
+        let latest = self
+            .latest
+            .as_deref()
+            .map(|version| format!(", latest stable {version}"))
+            .unwrap_or_default();
+        let detail = format!(
+            "package {} behind: installed {}{latest}, limit {}",
+            self.package, self.from, self.limit
+        );
         match &self.to {
-            Some(version) => format!("{PREFIX}{} to {version}", self.package),
+            Some(version) => format!("{PREFIX}{} to {version} ({detail})", self.package),
             None => format!(
-                "{PREFIX}{} to the version the queue publishes",
+                "{PREFIX}{} to the version the queue publishes ({detail})",
                 self.package
             ),
         }
@@ -41,7 +52,7 @@ impl Need {
             .as_deref()
             .unwrap_or("the version the queue publishes");
         format!(
-            "bump {} from {} to {target} in {}, the repo allows {} behind and would be {} behind",
+            "bump {} from {} to {target} in {}, the repo check fails at {} behind and this would be {} behind",
             self.package,
             self.from,
             repo_of(&self.id),
@@ -77,7 +88,7 @@ pub fn stable_in_major(current: &str, versions: &[String]) -> Option<String> {
 pub fn versions_behind(current: &str, versions: &[String]) -> usize {
     feed::newest_first(versions)
         .iter()
-        .filter(|version| feed::compare(version, current).is_gt())
+        .filter(|version| !feed::is_prerelease(version) && feed::compare(version, current).is_gt())
         .count()
 }
 
@@ -181,10 +192,13 @@ pub fn find(context: &Context, ready: &[(Pr, Scope)], feeds: &Feeds) -> Vec<Need
                 context.releases.get(&package).map_or(0, BTreeSet::len)
             };
             let behind = versions_behind(&pin, published) + queued;
-            if u32::try_from(behind).is_ok_and(|count| count <= limit) {
+            if limit == 0 || u32::try_from(behind).is_ok_and(|count| count < limit) {
                 continue;
             }
             let to = stable_in_major(&pin, published);
+            let latest = feed::newest_first(published).into_iter().find(|version| {
+                !feed::is_prerelease(version) && feed::compare(version, &pin).is_gt()
+            });
             if to.is_none() && queued == 0 {
                 continue;
             }
@@ -195,6 +209,7 @@ pub fn find(context: &Context, ready: &[(Pr, Scope)], feeds: &Feeds) -> Vec<Need
                 to,
                 behind,
                 limit,
+                latest,
                 queue_published: queued > 0,
             });
         }

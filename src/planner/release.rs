@@ -205,9 +205,9 @@ pub fn annotate(plan: &mut Plan, context: &Context) {
                 },
             };
             match limit {
-                Some(max) if u32::try_from(count).map_or(true, |behind| behind > max) => {
+                Some(max) if u32::try_from(count).map_or(true, |behind| behind >= max) => {
                     let message = format!(
-                        "references {package} {referenced}; the queue publishes {count} new version{} of it ({releasing_ids}), so this PR will be {count} behind and the repo check allows {max} ({origin})",
+                        "references {package} {referenced}; the queue publishes {count} new version{} of it ({releasing_ids}), so this PR will be {count} behind and the repo check fails at {max} behind ({origin})",
                         plural(count)
                     );
                     questions.push(Question::new(

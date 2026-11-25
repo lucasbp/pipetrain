@@ -263,6 +263,84 @@ impl<S: Source> Walk<'_, S> {
     }
 }
 
+pub fn with_reusables(
+    source: &mut impl Source,
+    slug: &str,
+    git_ref: &str,
+    files: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    let mut all = files.clone();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut pending: Vec<(String, String, String, usize)> = files
+        .into_iter()
+        .map(|(_, text)| (text, slug.to_string(), git_ref.to_string(), 0))
+        .collect();
+    while let Some((text, home, reference, depth)) = pending.pop() {
+        if depth >= MAX_DEPTH {
+            continue;
+        }
+        for uses in job_uses(&text) {
+            let Some((target_slug, target_ref, path)) = locate(&uses, &home, &reference) else {
+                continue;
+            };
+            let label = format!("{target_slug}/{path}@{target_ref}");
+            if !seen.insert(label.to_lowercase()) {
+                continue;
+            }
+            if target_slug.eq_ignore_ascii_case(slug)
+                && target_ref == git_ref
+                && all.iter().any(|(name, _)| *name == path)
+            {
+                continue;
+            }
+            if let Ok(Some(found)) = source.file(&target_slug, &target_ref, &path) {
+                all.push((label, found.clone()));
+                pending.push((found, target_slug, target_ref, depth + 1));
+            }
+        }
+    }
+    all
+}
+
+fn job_uses(text: &str) -> Vec<String> {
+    let Some(document) = YamlLoader::load_from_str(text)
+        .ok()
+        .and_then(|mut documents| (!documents.is_empty()).then(|| documents.remove(0)))
+    else {
+        return Vec::new();
+    };
+    let Some(jobs) = document
+        .as_hash()
+        .and_then(|map| field(map, "jobs"))
+        .and_then(Yaml::as_hash)
+    else {
+        return Vec::new();
+    };
+    jobs.iter()
+        .filter_map(|(_, job)| job.as_hash())
+        .filter_map(|job| field(job, "uses"))
+        .filter_map(Yaml::as_str)
+        .filter(|uses| !uses.contains("${{"))
+        .map(str::to_string)
+        .collect()
+}
+
+fn locate(uses: &str, home: &str, git_ref: &str) -> Option<(String, String, String)> {
+    if let Some(path) = uses.strip_prefix("./") {
+        return Some((home.to_string(), git_ref.to_string(), path.to_string()));
+    }
+    let (location, target) = uses.split_once('@')?;
+    let parts: Vec<&str> = location.splitn(3, '/').collect();
+    let [owner, repo, path] = parts[..] else {
+        return None;
+    };
+    Some((
+        format!("{owner}/{repo}"),
+        target.to_string(),
+        path.to_string(),
+    ))
+}
+
 fn field<'a>(map: &'a yaml_rust2::yaml::Hash, name: &str) -> Option<&'a Yaml> {
     map.iter()
         .find(|(key, _)| matches!(key, Yaml::String(text) if text == name))
@@ -506,5 +584,70 @@ mod tests {
                 .resources
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn the_limit_in_a_called_reusable_workflow_is_reachable_from_the_deploy_workflow() {
+        let caller = (
+            ".github/workflows/deploy.yml".to_string(),
+            "name: deploy
+jobs:
+  check:
+    uses: acme/shared/.github/workflows/versions.yml@main
+  local:
+    uses: ./.github/workflows/own.yml
+"
+            .to_string(),
+        );
+        let mut source = Fake {
+            repos: BTreeMap::new(),
+            remote: BTreeMap::from([
+                (
+                    "acme/shared/.github/workflows/versions.yml@main".to_string(),
+                    "name: versions
+jobs:
+  verify:
+    steps:
+      - run: check-versions --max-behind 1
+"
+                    .to_string(),
+                ),
+                (
+                    "acme/send/.github/workflows/own.yml@abc".to_string(),
+                    "name: own
+jobs:
+  x:
+    steps:
+      - run: echo
+"
+                    .to_string(),
+                ),
+            ]),
+        };
+        let files = with_reusables(&mut source, "acme/send", "abc", vec![caller]);
+        assert_eq!(files.len(), 3);
+        assert!(matches!(
+            workflows::max_behind(&files),
+            workflows::MaxBehind::Found { max: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn a_reusable_workflow_that_cannot_be_read_leaves_the_files_untouched() {
+        let caller = (
+            ".github/workflows/deploy.yml".to_string(),
+            "name: deploy
+jobs:
+  check:
+    uses: acme/shared/.github/workflows/versions.yml@main
+"
+            .to_string(),
+        );
+        let mut source = Fake {
+            repos: BTreeMap::new(),
+            remote: BTreeMap::new(),
+        };
+        let files = with_reusables(&mut source, "acme/send", "abc", vec![caller.clone()]);
+        assert_eq!(files, vec![caller]);
     }
 }
