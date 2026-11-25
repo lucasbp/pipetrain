@@ -5,7 +5,7 @@ use chrono::NaiveDate;
 
 use crate::bundle::is_train_branch;
 use crate::config::{Config, DEFAULT_TRAIN_DATE_FORMAT, render_date};
-use crate::model::{Pr, PrKey, PrState, Question};
+use crate::model::{Pr, PrState, Question};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
@@ -197,6 +197,7 @@ pub fn discover_authored(
     train: &str,
     authors: &[String],
 ) -> Discovered {
+    let all = unique(all);
     let shared = shared_branches(&all, cfg, train);
     let mut out = Discovered::default();
     for pr in all {
@@ -217,9 +218,16 @@ pub fn discover_authored(
     out
 }
 
+pub fn unique(prs: Vec<Pr>) -> Vec<Pr> {
+    let mut seen = HashSet::new();
+    prs.into_iter()
+        .filter(|pr| seen.insert(pr.key.lookup_id()))
+        .collect()
+}
+
 pub fn released(all: Vec<Pr>, cfg: &Config, train: &str) -> Discovered {
     let mut out = Discovered::default();
-    for pr in all {
+    for pr in unique(all) {
         let scope = if is_train_branch(&pr.head_ref, train) || labelled(&pr, cfg) {
             Scope::Train
         } else if is_train_branch(&pr.base_ref, train) {
@@ -239,7 +247,7 @@ pub fn released(all: Vec<Pr>, cfg: &Config, train: &str) -> Discovered {
 
 pub fn explicit(prs: Vec<Pr>, cfg: &Config) -> Discovered {
     let mut out = Discovered::default();
-    for pr in prs {
+    for pr in unique(prs) {
         let reasons = cfg.blockers(&pr);
         if reasons.is_empty() {
             out.ready.push((pr, Scope::Explicit));
@@ -255,14 +263,14 @@ pub fn explicit(prs: Vec<Pr>, cfg: &Config) -> Discovered {
 }
 
 pub fn add_authored(out: &mut Discovered, pool: &[Pr], cfg: &Config, authors: &[String]) {
-    let mut seen: HashSet<PrKey> = out
+    let mut seen: HashSet<String> = out
         .ready
         .iter()
-        .map(|(pr, _)| pr.key.clone())
-        .chain(out.skipped.iter().map(|s| s.pr.key.clone()))
+        .map(|(pr, _)| pr.key.lookup_id())
+        .chain(out.skipped.iter().map(|s| s.pr.key.lookup_id()))
         .collect();
     for pr in pool {
-        if !is_author(pr, authors) || !seen.insert(pr.key.clone()) {
+        if !is_author(pr, authors) || !seen.insert(pr.key.lookup_id()) {
             continue;
         }
         push_classified(out, pr.clone(), Scope::Author, cfg);
@@ -295,11 +303,11 @@ pub fn add_stack_parents(
     cfg: &Config,
     mut find: impl FnMut(&Pr) -> Result<Vec<Pr>>,
 ) -> Result<()> {
-    let mut seen: HashSet<PrKey> = out
+    let mut seen: HashSet<String> = out
         .ready
         .iter()
-        .map(|(pr, _)| pr.key.clone())
-        .chain(out.skipped.iter().map(|s| s.pr.key.clone()))
+        .map(|(pr, _)| pr.key.lookup_id())
+        .chain(out.skipped.iter().map(|s| s.pr.key.lookup_id()))
         .collect();
     let mut queue: VecDeque<Pr> = out
         .ready
@@ -323,7 +331,7 @@ pub fn add_stack_parents(
         let [parent] = parents.as_slice() else {
             continue;
         };
-        if !seen.insert(parent.key.clone()) {
+        if !seen.insert(parent.key.lookup_id()) {
             continue;
         }
         push_classified(out, parent.clone(), Scope::StackParent, cfg);

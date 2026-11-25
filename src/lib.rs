@@ -34,6 +34,7 @@ pub mod publishers;
 pub mod pyproject;
 pub mod quota;
 pub mod render;
+pub mod stage_view;
 pub mod style;
 pub mod update;
 pub mod workflows;
