@@ -417,6 +417,17 @@ pub(super) fn execute(
         DependencyFailure::Stop => scheduler::FailurePolicy::StopOnPublisher,
         DependencyFailure::Skip => scheduler::FailurePolicy::SkipDescendants,
     };
+    let needing: Vec<(String, String)> = jobs
+        .iter()
+        .zip(initial_steps.iter())
+        .filter(|(_, step)| step.kind == Kind::Merge)
+        .map(|(job, _)| (job.id.clone(), job.repo.clone()))
+        .collect();
+    let capacity = crate::deploy_resources::capacity(
+        &needing,
+        &env.plan.deploy_resources,
+        &env.cfg.merge.deploy_slots,
+    );
     let total = steps.len();
     let now = hooks.now;
     let mut coordinator = Coordinator {
@@ -438,10 +449,11 @@ pub(super) fn execute(
     let stacked = env.stacked.clone();
     let landings = env.landings.clone();
     let answers = env.gates.clone();
-    let result = scheduler::run(
+    let result = scheduler::run_with(
         &jobs,
         states,
         cfg.max_parallel,
+        &capacity,
         policy,
         &mut coordinator,
         |job, _, progress| {
@@ -484,6 +496,9 @@ pub(super) fn execute(
             let mut emit = |message: &str| {
                 let _ = progress.send(message);
             };
+            let mut hold = |waiting: bool| {
+                let _ = progress.waiting_for_runner(waiting);
+            };
             let mut hooks = Hooks {
                 confirm: &mut confirm,
                 gate: &mut gate,
@@ -491,6 +506,7 @@ pub(super) fn execute(
                 sleep: &mut sleep,
                 now,
                 progress: &mut emit,
+                runner: Some(&mut hold),
             };
             (hooks.progress)("starting");
             match step.kind {

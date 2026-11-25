@@ -625,6 +625,7 @@ struct Run {
     gate_texts: Vec<String>,
     slept: Duration,
     observed: usize,
+    runner_events: Vec<bool>,
 }
 
 impl Run {
@@ -746,6 +747,7 @@ impl Rig {
         let mut gate_texts = Vec::new();
         let mut slept = Duration::ZERO;
         let mut observed = 0;
+        let mut runner_events: Vec<bool> = Vec::new();
         let mut phases = Vec::new();
         let outcome = {
             let mut confirm_hook = |text: &str| {
@@ -767,6 +769,7 @@ impl Rig {
             };
             let mut observe_hook = |_: &StepReport| observed += 1;
             let mut progress_hook = |text: &str| phases.push(text.to_string());
+            let mut runner_hook = |waiting: bool| runner_events.push(waiting);
             let run_started = Instant::now();
             let now = || {
                 *self.clock.lock().unwrap()
@@ -783,6 +786,7 @@ impl Rig {
                 now: &now,
                 observe: &mut observe_hook,
                 progress: &mut progress_hook,
+                runner: Some(&mut runner_hook),
             };
             merge_plan(
                 plan,
@@ -802,6 +806,7 @@ impl Rig {
             gate_texts,
             slept,
             observed,
+            runner_events,
         })
     }
 
@@ -2616,6 +2621,7 @@ fn parallel_http_merges_overlap_and_pending_state_is_durable_before_put() {
             sleep: &mut sleep,
             now: &Instant::now,
             observe: &mut observe,
+            runner: None,
             progress: &mut progress,
         },
     );
@@ -5539,6 +5545,81 @@ fn crossing_the_reserve_stops_before_the_merge_request_and_keeps_the_exit_code_5
         rig.puts().is_empty(),
         "nothing may be merged below the reserve"
     );
+}
+
+#[test]
+fn a_queued_deploy_does_not_consume_the_timeout_and_reports_the_runner_wait() {
+    let mut rig = Rig::new("");
+    let plan = plan_on(&[1]);
+    let queued = run_json("deploy", "queued", None);
+    let mut readings: Vec<Vec<Value>> = (0..12).map(|_| vec![queued.clone()]).collect();
+    readings.push(vec![run_json("deploy", "in_progress", None)]);
+    readings.push(green());
+    readings.push(green());
+    rig.script().run_readings = readings.into();
+    let settings = Settings {
+        timeout: Some(Duration::from_secs(300)),
+        open_pr: false,
+        ..applied()
+    };
+
+    let run = rig.run(&plan, settings, true, true).unwrap();
+
+    assert_eq!(run.statuses(), vec![Status::Done], "{}", run.said(0));
+    assert!(run.slept > Duration::from_secs(300));
+    assert_eq!(run.runner_events, vec![true, false]);
+    assert!(
+        run.phases
+            .iter()
+            .any(|phase| phase.contains("queued, waiting for a runner"))
+    );
+}
+
+#[test]
+fn a_deploy_queued_past_the_ceiling_stops_and_can_be_resumed() {
+    let mut rig = Rig::new("");
+    let plan = plan_on(&[1]);
+    rig.cfg.merge.queued_timeout_minutes = 2;
+    rig.script().runs = vec![run_json("deploy", "queued", None)];
+    let settings = Settings {
+        timeout: Some(Duration::from_secs(5)),
+        open_pr: false,
+        ..applied()
+    };
+
+    let run = rig.run(&plan, settings, true, true).unwrap();
+
+    assert_eq!(run.statuses(), vec![Status::Stopped]);
+    assert!(run.slept >= Duration::from_secs(120));
+    assert!(
+        run.said(0)
+            .contains("still queued for a runner after 2 minutes"),
+        "{}",
+        run.said(0)
+    );
+    assert_eq!(run.runner_events, vec![true, false]);
+    assert_eq!(rig.store.state.pending.len(), 1);
+}
+
+#[test]
+fn an_in_progress_deploy_still_times_out() {
+    let mut rig = Rig::new("");
+    let plan = plan_on(&[1]);
+    rig.script().runs = vec![
+        run_json("deploy", "queued", None),
+        run_json("lint", "in_progress", None),
+    ];
+    let settings = Settings {
+        timeout: Some(Duration::from_secs(5)),
+        open_pr: false,
+        ..applied()
+    };
+
+    let run = rig.run(&plan, settings, true, true).unwrap();
+
+    assert_eq!(run.statuses(), vec![Status::Stopped]);
+    assert!(run.said(0).contains("still deploying"), "{}", run.said(0));
+    assert!(run.runner_events.is_empty());
 }
 
 fn with_ddl(mut item: Pr) -> Pr {

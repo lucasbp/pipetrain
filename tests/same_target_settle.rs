@@ -221,6 +221,7 @@ impl Rig {
                 now: &now,
                 observe: &mut observe,
                 progress: &mut progress,
+                runner: None,
             };
             merge_plan(
                 plan,

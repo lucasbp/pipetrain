@@ -215,6 +215,7 @@ impl Fixture {
                 now: &|| *clock.lock().unwrap(),
                 observe: &mut |_| {},
                 progress: &mut |_| {},
+                runner: None,
             },
         )
         .unwrap()

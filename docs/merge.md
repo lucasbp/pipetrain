@@ -258,6 +258,8 @@ Among those questions is `package-release-behind`: before the run, the plan and 
 | `merge.package_poll_seconds` | `10` | Seconds between package feed checks; values below 1 use 1 second. |
 | `merge.package_wait_seconds` | `600` | Package wait timeout in seconds, independently of deploy timeouts. `0` checks once without sleeping. |
 | `merge.package_max_behind` | none | Version limit used by the `package-release-behind` preflight when the consumer repo workflows do not state one. Without it and without a readable workflow limit, the preflight only warns `(not confirmed)`. |
+| `merge.queued_timeout_minutes` | `180` | Ceiling of the time a deploy may sit `queued` waiting for a runner. Queued time does not count toward `merge.timeout_minutes`; past this ceiling the step stops resumably. |
+| `merge.deploy_slots` | none | Table of `"<runner label, runner group, concurrency group or dynamic>" = N`: how many deploys may use that resource together. Default 1. See [Deploy resources](#deploy-resources). |
 | `merge.no_run_grace_seconds` | `120` | How long to wait for the first workflow run to appear. |
 | `merge.no_deploy_repos` | `[]` | Globs of repos that have no deploy workflow on push. |
 | `merge.same_target_settle_seconds` | `0` | Seconds to wait after a confirmed deploy before merging the next PR on the same repo and base. `0` turns it off. See [Same-target settle](#same-target-settle). |
@@ -521,6 +523,27 @@ The coordinator owns confirmations, progress and the state file. Workers send ty
 A publisher failure stops new dispatches by default. The skip policy blocks its descendants and continues independent work. A leaf deployment failure continues proven independent work. Readiness failures, uncertain outcomes and coordinator persistence failures stop new dispatches. Workers already running are drained and their results recorded; the executor does not cancel deployment workflows.
 
 The scheduler exposes a coordinator preparation callback after prerequisite completion and before dispatch. A blocked preparation result affects only that consumer and its descendants. Preparation errors stop new dispatches before mutation. This callback does not change package versions or create publication PRs by itself.
+
+## Deploy resources
+
+Before the run, the plan reads the workflows each repo runs on push to its base (the same expected list used to judge the deploy) and extracts what a deploy needs. `plan --json` shows it as `deploy_resources` (repo to resource ids).
+
+| Resource id | Comes from | Shared with |
+|---|---|---|
+| `runner:<label>` | `runs-on` with `self-hosted`; every label other than `self-hosted` and the generic `linux`, `windows`, `macos`, `x64`, `x86`, `arm`, `arm64` (those only when nothing else is left) | any repo using that label |
+| `runner-group:<name>` | `runs-on: { group: ... }` | any repo using that group |
+| `group:<repo>#<name>` | `concurrency.group` of the workflow or a job (`#*` when it has an expression) | the same repo only |
+| `dynamic` | anything that does not resolve: `${{ }}` in `runs-on`, a label or a reusable reference, an unreadable workflow, repo or reusable file, more than 5 nested reusables, or a base branch that does not exist yet | every repo with the same doubt |
+
+GitHub-hosted labels (`ubuntu-*`, `windows-*`, `macos-*`) are not resources. Reusable workflows are followed (`./.github/workflows/x.yml` and `org/repo/.github/workflows/x.yml@ref`, through the API with the cache) and their jobs count as the caller's. A repo with no workflow on push needs nothing.
+
+Concurrency group scope: GitHub documents that concurrency applies to runs "using the same concurrency group in the repository", so the group is scoped to the repository and the same name in two repos does not serialize them. The key is therefore `(repo, group)`, case-insensitive. Pipetrain already runs one job per repo at a time, so a group resource never delays anything by itself today; it is listed for visibility and for the day that rule is relaxed.
+
+A job holds all its resources from the start of its step until the step ends. A job whose resource is full waits in queue order and does not take a `max_parallel` slot while it waits for a runner (see below). `merge.deploy_slots` raises the limit of a resource; the key can be the bare label, group or `dynamic`, or the full id. When the plan could not detect anything (empty `deploy_resources`, for example a state resumed without a plan), nothing is serialized beyond the existing rules; for a repo missing from a non-empty detection, the job needs `dynamic`.
+
+### Queued deploys
+
+When the expected runs of the deploy are `queued` and none of them is `in_progress`, the deploy is waiting for a runner, not running. The step shows `waiting for a runner`, `merge.timeout_minutes` stops counting (it counts only the time the deploy is not queued), and the `max_parallel` slot is given to another repo that does not need the same resource. The step keeps its resources, so a repo needing the same runner still waits. When a run starts, the step takes a slot again before it goes on. The wait has a safety ceiling, `merge.queued_timeout_minutes` (default `180` minutes, summed over the whole wait): past it the step stops with `deploy still queued for a runner` and the next run resumes it. Sequential runs (`max_parallel = 1`) behave the same way for the clock and the ceiling.
 
 ## Optional reviewed consumer bumps
 

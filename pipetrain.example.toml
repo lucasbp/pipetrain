@@ -141,6 +141,8 @@ no_run_grace_seconds = 120
 no_deploy_repos = []
 # Seconds to wait after a confirmed deploy before the next merge on the same repo and base. 0 is off.
 same_target_settle_seconds = 0
+# How long a deploy may sit queued waiting for a runner before the merge stops. Queued time does not count toward timeout_minutes.
+queued_timeout_minutes = 180
 
 [merge.repo_timeout_minutes]
 "acme/orders-api" = 60
@@ -148,3 +150,8 @@ same_target_settle_seconds = 0
 # Override per repo ("org/repo") or per target ("org/repo@base"), for example a blue/green deploy.
 [merge.repo_same_target_settle_seconds]
 "acme/orders-api@main" = 120
+
+# Deploys that compete for the same resource run in queue order, one at a time, unless you raise it here.
+# Keys are a self-hosted runner label, a runner group, a concurrency group, or "dynamic" (a runs-on or group that cannot be resolved).
+[merge.deploy_slots]
+"nuria-deploy" = 2

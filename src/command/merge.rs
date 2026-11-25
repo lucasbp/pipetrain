@@ -12,6 +12,7 @@ use super::order::requests_line;
 use crate::bundle::{base_suffix, is_stacked, is_train_branch};
 use crate::command::PlanOptions;
 use crate::config::Config;
+use crate::deploy_wait::{DeployClock, waiting_for_runner};
 use crate::emit;
 use crate::github::{Client, LivePr, PrWrite};
 use crate::merge::category;
@@ -83,6 +84,7 @@ pub struct Hooks<'a> {
     pub now: &'a (dyn Fn() -> Instant + Sync),
     pub observe: &'a mut dyn FnMut(&StepReport),
     pub progress: &'a mut dyn FnMut(&str),
+    pub runner: Option<&'a mut dyn FnMut(bool)>,
 }
 
 #[derive(Debug)]
@@ -147,6 +149,7 @@ impl Env<'_> {
 
 struct Limits {
     timeout: Duration,
+    queued_ceiling: Duration,
     poll: Duration,
     poll_ceiling: Duration,
     grace: Duration,
@@ -157,6 +160,7 @@ enum Deploy {
     Skipped(usize),
     Failed(String),
     TimedOut(String),
+    QueuedTooLong(String),
     NoRun(Duration),
     Unreadable(String),
 }
@@ -382,7 +386,7 @@ fn wait_for_deploy(
     let mut emit =
         |message: &str| (hooks.progress)(&format!("waiting for deploy: {workflows}; {message}"));
     let poll = limits.poll.max(Duration::from_millis(1));
-    let started = (hooks.now)();
+    let mut clock = DeployClock::new((hooks.now)(), limits.timeout, limits.queued_ceiling);
     let mut sleeps = 0u64;
     let mut consecutive_errors = 0;
     let mut settled: Option<usize> = None;
@@ -390,7 +394,11 @@ fn wait_for_deploy(
     let mut auxiliary_failures = std::collections::BTreeSet::new();
     let mut known: Vec<crate::github::Run> = Vec::new();
     let outcome = loop {
-        if (hooks.now)().saturating_duration_since(started) >= limits.timeout {
+        let now = (hooks.now)();
+        if clock.ceiling_hit(now) {
+            break Deploy::QueuedTooLong(last);
+        }
+        if clock.timed_out(now) {
             break Deploy::TimedOut(last);
         }
         let reading = if follow_by_id(expected, &known) {
@@ -408,11 +416,13 @@ fn wait_for_deploy(
                 consecutive_errors += 1;
                 settled = None;
                 last = format!("transient workflow read error: {error}");
-                let remaining = limits
-                    .timeout
-                    .saturating_sub((hooks.now)().saturating_duration_since(started));
+                let remaining = clock.remaining((hooks.now)());
                 if remaining.is_zero() {
-                    break Deploy::TimedOut(last);
+                    break if clock.queued() {
+                        Deploy::QueuedTooLong(last)
+                    } else {
+                        Deploy::TimedOut(last)
+                    };
                 }
                 if consecutive_errors > 3 {
                     break Deploy::Unreadable(format!("{error}; exhausted 3 consecutive retries"));
@@ -423,10 +433,45 @@ fn wait_for_deploy(
             }
             Err(error) => break Deploy::Unreadable(error.to_string()),
         };
-        let elapsed = (hooks.now)().saturating_duration_since(started);
-        if elapsed >= limits.timeout {
+        let now = (hooks.now)();
+        let waiting = {
+            let tracked: Vec<&crate::github::Run> = match expected {
+                Some(PushRuns::Expected {
+                    workflows,
+                    chained_workflows,
+                    ..
+                }) => runs
+                    .iter()
+                    .filter(|run| {
+                        workflows.contains(&run.path) || chained_workflows.contains(&run.path)
+                    })
+                    .collect(),
+                _ => runs.iter().collect(),
+            };
+            waiting_for_runner(&tracked)
+        };
+        if waiting != clock.queued() {
+            if waiting {
+                clock.observe(now, true);
+                if let Some(runner) = hooks.runner.as_mut() {
+                    runner(true);
+                }
+                emit("deploy is queued, waiting for a runner");
+            } else {
+                if let Some(runner) = hooks.runner.as_mut() {
+                    runner(false);
+                }
+                clock.observe((hooks.now)(), false);
+            }
+        }
+        let now = (hooks.now)();
+        if clock.ceiling_hit(now) {
+            break Deploy::QueuedTooLong(last);
+        }
+        if clock.timed_out(now) {
             break Deploy::TimedOut(last);
         }
+        let elapsed = clock.elapsed(now);
         let observed = runs
             .iter()
             .map(|run| format!("{}: {}", run.name, run.url))
@@ -501,9 +546,7 @@ fn wait_for_deploy(
                 }
             }
         }
-        let remaining = limits
-            .timeout
-            .saturating_sub((hooks.now)().saturating_duration_since(started));
+        let remaining = clock.remaining((hooks.now)());
         let remaining = if no_runs {
             remaining.min(limits.grace.saturating_sub(elapsed))
         } else {
@@ -527,6 +570,12 @@ fn wait_for_deploy(
         (hooks.sleep)(delay.min(remaining));
         sleeps += 1;
     };
+    if clock.queued() {
+        clock.observe((hooks.now)(), false);
+        if let Some(runner) = hooks.runner.as_mut() {
+            runner(false);
+        }
+    }
     (outcome, auxiliary_failures.into_iter().collect())
 }
 
@@ -601,6 +650,7 @@ fn deploy_phase(
         .unwrap_or_else(|| env.cfg.merge.timeout_for(slug));
     let limits = Limits {
         timeout,
+        queued_ceiling: env.cfg.merge.queued_ceiling(),
         poll: Duration::from_secs(env.cfg.merge.poll_seconds.max(1)),
         poll_ceiling: Duration::from_secs(env.cfg.merge.poll_max_seconds),
         grace: Duration::from_secs(env.cfg.merge.no_run_grace_seconds),
@@ -645,6 +695,13 @@ fn deploy_phase(
             said(format!(
                 "still deploying after {} minutes ({last}); run again to keep waiting",
                 timeout.as_secs() / 60
+            )),
+        ),
+        Deploy::QueuedTooLong(last) => (
+            Status::Stopped,
+            said(format!(
+                "deploy still queued for a runner after {} minutes ({last}); run again to keep waiting",
+                limits.queued_ceiling.as_secs() / 60
             )),
         ),
         Deploy::NoRun(grace) => (
@@ -1734,6 +1791,12 @@ fn merge_plan_inner(
                 progress_state.update(index, text);
                 (hooks.progress)(&progress_state.frame());
             };
+            let has_runner = hooks.runner.is_some();
+            let mut forward = |waiting: bool| {
+                if let Some(runner) = hooks.runner.as_mut() {
+                    runner(waiting);
+                }
+            };
             let mut step_hooks = Hooks {
                 confirm: &mut *hooks.confirm,
                 gate: &mut *hooks.gate,
@@ -1741,6 +1804,7 @@ fn merge_plan_inner(
                 now: hooks.now,
                 observe: &mut *hooks.observe,
                 progress: &mut progress,
+                runner: has_runner.then_some(&mut forward as &mut dyn FnMut(bool)),
             };
             (step_hooks.progress)("starting");
             match step.kind {
@@ -2299,6 +2363,7 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
         now: &Instant::now,
         observe: &mut observe,
         progress: &mut progress,
+        runner: None,
     };
     let mut outcome = merge_plan_prepared(
         &built,

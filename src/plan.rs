@@ -84,6 +84,8 @@ pub struct Plan {
     pub notes: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub bumps: Vec<behind::Need>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub deploy_resources: BTreeMap<String, Vec<String>>,
     pub stats: Stats,
 }
 
@@ -350,6 +352,7 @@ pub fn build(rules: &Rules, mut gathered: Gathered) -> Plan {
         questions,
         notes: planned.notes,
         bumps: Vec::new(),
+        deploy_resources: BTreeMap::new(),
         stats: Stats {
             requests: gathered.requests,
             rate_remaining: gathered.rate_remaining,

@@ -437,6 +437,22 @@ pub(crate) fn build_plan_with_config(opts: &PlanOptions) -> Result<(Plan, Client
     build_plan_with_prepare(opts, |_, _, _, _| Ok(()))
 }
 
+fn detect_deploy_resources(
+    client: &mut Client,
+    plan: &Plan,
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    let targets: std::collections::BTreeSet<(String, String)> = plan
+        .items
+        .iter()
+        .map(|item| (format!("{}/{}", item.org, item.repo), item.base.clone()))
+        .collect();
+    if targets.is_empty() {
+        return std::collections::BTreeMap::new();
+    }
+    progress::phase("detecting deploy resources");
+    crate::deploy_resources::detect_all(client, &targets)
+}
+
 fn build_plan_with_prepare(
     opts: &PlanOptions,
     prepare: impl FnOnce(&mut Client, &Config, &mut Discovered, &str) -> Result<()>,
@@ -529,6 +545,7 @@ fn build_plan_with_prepare(
     let mut built = plan::build(&rules, gathered);
     release::annotate(&mut built, &release_context);
     built.bumps = bumps;
+    built.deploy_resources = detect_deploy_resources(&mut client, &built);
     built.profile = Some(profile);
     let logins = match &opts.authors {
         AuthorFilter::Only(_) => selecting,
