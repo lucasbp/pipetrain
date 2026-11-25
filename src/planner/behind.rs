@@ -10,7 +10,7 @@ use crate::workflows::MaxBehind;
 
 pub const PREFIX: &str = "needs a bump of ";
 
-pub type Feeds = BTreeMap<String, Vec<String>>;
+pub use crate::publishers::Feeds;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Need {
@@ -55,7 +55,7 @@ fn repo_of(id: &str) -> &str {
     id.split_once('#').map_or(id, |(repo, _)| repo)
 }
 
-fn is_pin(spec: &str) -> bool {
+pub fn is_pin(spec: &str) -> bool {
     spec.chars().next().is_some_and(|c| c.is_ascii_digit())
         && !spec.contains(['*', '[', '(', ',', '^', '~', '>', '<', ' '])
 }

@@ -18,6 +18,13 @@ pub enum Archival {
 }
 
 impl Archival {
+    pub fn fresh_view(&self, store: Store) -> Store {
+        match self {
+            Archival::WouldArchive { .. } => Store::in_memory(),
+            _ => store,
+        }
+    }
+
     pub fn notice(&self, from: &Path) -> Option<String> {
         let (verb, pending, to) = match self {
             Archival::Kept => return None,
