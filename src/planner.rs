@@ -20,6 +20,7 @@ pub enum Rule {
     Stacked,
     Order,
     Dependency,
+    PackageBeforePublisher,
     Target,
     Layer,
     Gate,
@@ -33,6 +34,7 @@ impl Rule {
             Rule::Stacked => "stacked",
             Rule::Order => "order",
             Rule::Dependency => "dependency",
+            Rule::PackageBeforePublisher => "package-before-publisher",
             Rule::Target => "target",
             Rule::Layer => "layer",
             Rule::Gate => "gate",
@@ -592,7 +594,11 @@ impl<'a> Builder<'a> {
 pub fn is_late_rule(rule: Rule) -> bool {
     matches!(
         rule,
-        Rule::Package | Rule::Dependency | Rule::Target | Rule::Stacked
+        Rule::Package
+            | Rule::Dependency
+            | Rule::PackageBeforePublisher
+            | Rule::Target
+            | Rule::Stacked
     )
 }
 

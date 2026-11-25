@@ -70,7 +70,7 @@ One edge "the PR in `id` goes before this item".
 | Field | Type | Meaning |
 |---|---|---|
 | `id` | string | The PR that goes first. |
-| `rule` | string | `depends-on`, `package`, `stacked`, `order`, `dependency`, `target`, `layer` or `gate`. |
+| `rule` | string | `depends-on`, `package`, `stacked`, `order`, `dependency`, `package-before-publisher`, `target`, `layer` or `gate`. |
 | `reason` | string | Human sentence naming the cause. Free text: do not parse it. |
 | `implied` | boolean | `true` when another predecessor of this item already reaches `id`, so the edge adds no constraint. A viewer can hide it. |
 | `package` | string | Only on `package` and `dependency` edges: the package name that `id` publishes and this item consumes, as the manifests spell it. Omitted on every other edge. Added after schema 1 shipped, and additive only. |
@@ -117,6 +117,7 @@ A file-overlap report between two ready PRs of the same repo: a hint that they m
 | `scope` | string | `train`, `shared-branch`, `into-train`, `explicit`, `released`, `author` or `stack-parent`. |
 | `head` | string | The head branch of the skipped PR, so a `shared-branch` skip can be traced to the branch name that matched. |
 | `reasons` | string[] | One or more of: `already merged`, `closed`, `draft`, `changes requested`, `review required`, `not approved`, `checks pending`, `checks failing`, `checks failing: <names>`, `no checks reported`, `merge conflict`, `branch behind its base, update it`, `already in <ref>`, `already in <ref> (same content)`. `branch behind its base, update it` is read from GitHub's `mergeStateStatus` and appears only when it is `BEHIND`, which GitHub reports when branch protection requires the branch to be up to date; a PR with a merge conflict carries `merge conflict` instead. A merged or closed PR carries only that one reason. `already in <ref>` also stands alone, where `<ref>` is the branch that already contains the PR head: its base branch, or `deploy_branch`. `already in <ref> (same content)` stands alone too: every file the PR changes has identical content in `<ref>`, though the commits differ (for example after a squash merge). `checks failing: <names>` lists the failing checks, for example `checks failing: build, test`: sorted, at most 5 names and then `, +N more`; the plain `checks failing` stays when GitHub gives no name. Full merge-state blockers can also add `branch protection blocks merge (BLOCKED)`, `merge conflict (DIRTY)`, `checks are not passing (UNSTABLE)` and `draft (DRAFT)`. UNKNOWN mergeability is a preflight warning rather than a skipped reason. The `already in ` and `checks failing` reasons have a variable part, so match them by the `already in ` and `checks failing` prefixes; the `(same content)` suffix tells the two `already in` forms apart. |
+| `blocked_by` | Blocker[] (optional) | Additive, omitted when empty. Present on a PR that was ready but is held because a PR it waits for is not: one `{id, rule, reason}` per held edge, with the `id` of the PR it waits for, the `rule` of the edge (`depends-on`, `package`, `stacked` or `dependency`) and the `reason` the planner gave for it. `reasons` keeps the human text; read `blocked_by` instead of parsing it. |
 
 ## Question
 

@@ -8,6 +8,16 @@ pub type References = BTreeMap<String, BTreeSet<String>>;
 
 pub type Pairs = BTreeMap<(String, String), String>;
 
+pub type Pins = BTreeMap<(String, String), BTreeSet<String>>;
+
+pub type Feeds = BTreeMap<String, Vec<String>>;
+
+#[derive(Debug, Clone, Default)]
+pub struct Evidence {
+    pub pins: Pins,
+    pub feeds: Feeds,
+}
+
 pub const MAX_MANIFESTS_PER_REPO: usize = 40;
 
 pub fn dependency_pairs(
