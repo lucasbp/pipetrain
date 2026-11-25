@@ -574,7 +574,7 @@ impl<'a> Builder<'a> {
                 continue;
             }
             for p in 0..self.prs.len() {
-                if self.gates[p].is_some() {
+                if self.gates[p].is_some() || self.prs[p].head_ref != self.prs[g].head_ref {
                     continue;
                 }
                 self.link(

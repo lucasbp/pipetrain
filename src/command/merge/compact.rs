@@ -360,6 +360,29 @@ pub fn preview(report: &Report, plan: &Plan, color: bool) -> String {
         ));
     }
     out.push_str(&format!("{}\n", parts.join(" · ")));
+    if !report.applied && !report.requested {
+        let gates = super::gates::listed(plan, &report.steps);
+        for gate in &gates {
+            out.push_str(&format!(
+                "  {}\n",
+                tint(
+                    color,
+                    dim,
+                    &format!("gate {} ({}): {}", short(&gate.id), gate.kind, gate.reason)
+                )
+            ));
+        }
+        if !gates.is_empty() {
+            out.push_str(&format!(
+                "  {}\n",
+                tint(
+                    color,
+                    dim,
+                    "--apply asks about these gates before any merge; --gates-confirmed answers all"
+                )
+            ));
+        }
+    }
     for question in &report.questions {
         out.push_str(&format!(
             "  {}\n",

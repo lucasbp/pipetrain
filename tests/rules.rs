@@ -197,7 +197,7 @@ fn infra_repo_is_a_gate_and_waits_for_nothing_else() {
     let cfg = config("[deploy]\ninfra_repos = [\"acme/infra\"]\n");
     let planned = run(&cfg, vec![infra, api], BTreeMap::new(), Publishers::new());
     assert_eq!(planned.gate, vec!["acme/infra#1".to_string()]);
-    assert!(edge(&planned, "acme/infra#1", "acme/api-core#2", "gate"));
+    assert!(!edge(&planned, "acme/infra#1", "acme/api-core#2", "gate"));
 }
 
 #[test]

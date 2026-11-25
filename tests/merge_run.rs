@@ -622,6 +622,7 @@ struct Run {
     confirms: usize,
     confirmation_text: Vec<String>,
     gates: usize,
+    gate_texts: Vec<String>,
     slept: Duration,
     observed: usize,
 }
@@ -715,6 +716,16 @@ impl Rig {
         confirm: bool,
         gate: bool,
     ) -> anyhow::Result<Run> {
+        self.run_answering(plan, settings, confirm, &mut |_| gate)
+    }
+
+    fn run_answering(
+        &mut self,
+        plan: &Plan,
+        settings: Settings,
+        confirm: bool,
+        answer: &mut dyn FnMut(&str) -> bool,
+    ) -> anyhow::Result<Run> {
         let api = ApiConfig {
             max_requests: 50,
             max_per_minute: 1000,
@@ -732,6 +743,7 @@ impl Rig {
         let mut confirms = 0;
         let mut confirmation_text = Vec::new();
         let mut gates = 0;
+        let mut gate_texts = Vec::new();
         let mut slept = Duration::ZERO;
         let mut observed = 0;
         let mut phases = Vec::new();
@@ -741,9 +753,10 @@ impl Rig {
                 confirmation_text.push(text.to_string());
                 confirm
             };
-            let mut gate_hook = |_: &str| {
+            let mut gate_hook = |text: &str| {
                 gates += 1;
-                gate
+                gate_texts.push(text.to_string());
+                answer(text)
             };
             let mut sleep_hook = |pause: Duration| {
                 slept += pause;
@@ -786,6 +799,7 @@ impl Rig {
             confirms,
             confirmation_text,
             gates,
+            gate_texts,
             slept,
             observed,
         })
@@ -5522,4 +5536,155 @@ fn crossing_the_reserve_mid_merge_stops_before_the_next_merge_and_keeps_the_stat
     assert_eq!(run.step(0).status, Status::Stopped);
     assert!(run.said(0).contains("merged"), "{}", run.said(0));
     assert_eq!(rig.puts().len(), 1);
+}
+
+fn with_ddl(mut item: Pr) -> Pr {
+    item.files = vec![ChangedFile {
+        path: "db/migrations/001_add.sql".to_string(),
+        patch: None,
+    }];
+    item
+}
+
+fn two_gates_plan() -> Plan {
+    plan_of(
+        vec![
+            with_ddl(pr("acme/api", 1, "feat/1", "main")),
+            with_ddl(pr("acme/web", 5, "feat/5", "main")),
+            pr("acme/web", 6, "feat/6", "main"),
+            pr("acme/mail", 8, "feat/8", "main"),
+        ],
+        Vec::new(),
+    )
+}
+
+const BATCH: &str = "Gates to confirm before any merge";
+
+#[test]
+fn gates_are_asked_together_before_any_merge_and_a_refusal_holds_only_its_branch() {
+    for parallelism in [1, 3] {
+        let mut rig = Rig::new("");
+        rig.cfg.max_parallel = parallelism;
+        let plan = two_gates_plan();
+
+        let run = rig
+            .run_answering(&plan, applied(), true, &mut |text| {
+                !text.starts_with(BATCH) && !text.contains("acme/web#5")
+            })
+            .unwrap();
+
+        assert_eq!(run.gate_texts.len(), 3, "{:?}", run.gate_texts);
+        let batch = &run.gate_texts[0];
+        assert!(batch.starts_with(BATCH), "{batch}");
+        assert!(batch.contains("acme/api#1 (DDL): db/migrations/001_add.sql"));
+        assert!(batch.contains("acme/web#5 (DDL): db/migrations/001_add.sql"));
+        assert!(run.gate_texts[1].contains("acme/api#1"));
+        assert!(run.gate_texts[2].contains("acme/web#5"));
+        assert_eq!(step_of(&run, "acme/api#1").status, Status::Done);
+        assert_eq!(step_of(&run, "acme/mail#8").status, Status::Done);
+        let held = step_of(&run, "acme/web#6");
+        assert_eq!(held.status, Status::Skipped);
+        assert_eq!(held.detail, STOPPED);
+        let pause = run
+            .outcome
+            .report
+            .steps
+            .iter()
+            .find(|step| step.kind == Kind::Gate)
+            .unwrap();
+        assert_eq!(pause.status, Status::Stopped);
+        assert_eq!(run.outcome.code, EXIT_STOPPED);
+        assert_eq!(rig.puts().len(), 3);
+    }
+}
+
+#[test]
+fn a_batch_confirmation_of_all_gates_asks_once_and_lets_every_branch_go() {
+    for parallelism in [1, 3] {
+        let mut rig = Rig::new("");
+        rig.cfg.max_parallel = parallelism;
+        let plan = two_gates_plan();
+
+        let run = rig.run(&plan, applied(), true, true).unwrap();
+
+        assert_eq!(run.gates, 1);
+        assert!(run.gate_texts[0].starts_with(BATCH));
+        assert!(run.statuses().iter().all(|status| *status == Status::Done));
+        let pause = run
+            .outcome
+            .report
+            .steps
+            .iter()
+            .find(|step| step.kind == Kind::Gate)
+            .unwrap();
+        assert_eq!(pause.detail, "confirmed before the first merge");
+        assert_eq!(run.outcome.code, 0);
+        assert_eq!(rig.puts().len(), 4);
+    }
+}
+
+#[test]
+fn without_a_terminal_every_gate_holds_its_own_branch_and_the_rest_goes_on() {
+    for parallelism in [1, 3] {
+        let mut rig = Rig::new("");
+        rig.cfg.max_parallel = parallelism;
+        let plan = two_gates_plan();
+
+        let run = rig.run(&plan, applied(), true, false).unwrap();
+
+        assert_eq!(run.gates, 3);
+        assert_eq!(step_of(&run, "acme/api#1").status, Status::Done);
+        assert_eq!(step_of(&run, "acme/web#5").status, Status::Done);
+        assert_eq!(step_of(&run, "acme/web#6").status, Status::Skipped);
+        assert_eq!(step_of(&run, "acme/mail#8").status, Status::Done);
+        assert_eq!(run.outcome.code, EXIT_STOPPED);
+    }
+}
+
+#[test]
+fn gates_confirmed_answers_every_gate_without_asking() {
+    for parallelism in [1, 3] {
+        let mut rig = Rig::new("");
+        rig.cfg.max_parallel = parallelism;
+        let plan = two_gates_plan();
+        let settings = Settings {
+            gates_confirmed: true,
+            ..applied()
+        };
+
+        let run = rig.run(&plan, settings, true, false).unwrap();
+
+        assert_eq!(run.gates, 0);
+        assert!(run.statuses().iter().all(|status| *status == Status::Done));
+        let pause = run
+            .outcome
+            .report
+            .steps
+            .iter()
+            .find(|step| step.kind == Kind::Gate)
+            .unwrap();
+        assert!(pause.detail.contains("--gates-confirmed"));
+        assert_eq!(run.outcome.code, 0);
+    }
+}
+
+#[test]
+fn a_dry_run_lists_the_gates_it_would_ask_and_asks_nothing() {
+    let mut rig = Rig::new("");
+    let plan = two_gates_plan();
+
+    let run = rig.run(&plan, dry(), true, false).unwrap();
+
+    assert_eq!(run.gates, 0);
+    assert!(rig.puts().is_empty());
+    let notice = run.outcome.report.notices.join("\n");
+    assert!(
+        notice.contains("acme/api#1 (DDL): db/migrations/001_add.sql"),
+        "{notice}"
+    );
+    assert!(
+        notice.contains("acme/web#5 (DDL): db/migrations/001_add.sql"),
+        "{notice}"
+    );
+    assert!(notice.contains("--apply asks"), "{notice}");
 }

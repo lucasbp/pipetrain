@@ -59,7 +59,11 @@ impl scheduler::Coordinator for Coordinator<'_, '_> {
             scheduler::Status::Blocked(cause) => {
                 step.status = Status::Skipped;
                 step.blocked_by = blocked_by;
-                step.detail = format!("blocked by {}", step.blocked_by.as_deref().unwrap_or(cause));
+                step.detail = if self.failures.holds_gate(cause) {
+                    STOPPED.to_string()
+                } else {
+                    format!("blocked by {}", step.blocked_by.as_deref().unwrap_or(cause))
+                };
             }
             scheduler::Status::Done
             | scheduler::Status::NormalSkipped
@@ -67,7 +71,17 @@ impl scheduler::Coordinator for Coordinator<'_, '_> {
                 if let scheduler::Status::Failed { message, .. } = status
                     && step.status == Status::Planned
                 {
-                    fail(step, message);
+                    if step.kind == Kind::Gate {
+                        gate_step(self.env, self.hooks, step);
+                    } else {
+                        fail(step, message);
+                    }
+                }
+                if *status == scheduler::Status::Done
+                    && step.kind == Kind::Gate
+                    && step.status == Status::Planned
+                {
+                    gate_step(self.env, self.hooks, step);
                 }
                 self.store.state.active_jobs.retain(|active| active != id);
             }
@@ -328,6 +342,19 @@ fn jobs(
                 }
             }
         }
+        let answered = step.kind == Kind::Gate && env.gates.verdict(&step.target).is_some();
+        if answered && let Some(covered) = env.gates.covers(&step.target) {
+            for gate in covered {
+                let early = env
+                    .plan
+                    .items
+                    .iter()
+                    .any(|item| item.id == *gate && !item.gate_late);
+                if early && let Some(target) = targets.get(gate) {
+                    after.push(target.clone());
+                }
+            }
+        }
         let id = format!("step:{index}");
         if matches!(step.kind, Kind::Merge | Kind::Resume | Kind::OpenPr)
             && let Some(prior) = previous.insert((repo.to_lowercase(), base.clone()), id.clone())
@@ -357,7 +384,7 @@ fn jobs(
             barrier: matches!(
                 step.kind,
                 Kind::Resume | Kind::Gate | Kind::Wait | Kind::OpenPr
-            ),
+            ) && !answered,
         });
     }
     (jobs, external)
@@ -365,6 +392,7 @@ fn jobs(
 
 fn held_failures(env: &Env, held: &[Pending]) -> failure::DeployFailures {
     let mut failures = failure::DeployFailures::default();
+    env.gates.hold(env.plan, &mut failures);
     for pending in held {
         failures.record(pending, env.plan, true);
     }
@@ -409,6 +437,7 @@ pub(super) fn execute(
     let method = env.method;
     let stacked = env.stacked.clone();
     let landings = env.landings.clone();
+    let answers = env.gates.clone();
     let result = scheduler::run(
         &jobs,
         states,
@@ -421,6 +450,14 @@ pub(super) fn execute(
                 fatal: true,
             })?;
             let mut step = initial_steps[index].clone();
+            if step.kind == Kind::Gate
+                && answers.verdict(&step.target) == Some(gates::Verdict::Refused)
+            {
+                return Err(Failure {
+                    message: step.target.clone(),
+                    fatal: false,
+                });
+            }
             if matches!(step.kind, Kind::Gate | Kind::Wait) {
                 return Ok(Completion::Done);
             }
@@ -438,6 +475,7 @@ pub(super) fn execute(
                 readings: RefCell::new(BTreeMap::new()),
                 stacked: stacked.clone(),
                 landings: landings.clone(),
+                gates: gates::Answers::default(),
             };
             let mut confirm = |_: &str| false;
             let mut gate = |_: &str| false;
