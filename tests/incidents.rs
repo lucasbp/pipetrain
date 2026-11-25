@@ -261,6 +261,7 @@ impl Fixture {
                 now: &|| *clock.lock().unwrap(),
                 observe: &mut |_| {},
                 progress: &mut |phase| phases.push(phase.to_string()),
+                runner: None,
             },
         )
         .unwrap();

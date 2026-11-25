@@ -46,7 +46,7 @@ pipetrain merge 'acme/api#12' 'acme/web#3' --apply --yes
 
 ### What happens in each phase
 
-The dry run builds the plan, previews local state and predicts workflows without polling deployments or writing merge state. Apply locks and reloads state and asks for `yes`; `--yes` skips this initial confirmation and is required without an interactive terminal. Execution resumes pending work, revalidates each PR, saves intent before the merge request, records the merge SHA and waits for the deploy verdict. Independent repositories can run concurrently up to `max_parallel`, with one active PR per repository. Gates retain their own confirmations. See [merge phases, confirmation and deploy tracking](merge.md).
+The dry run builds the plan, previews local state and predicts workflows without polling deployments or writing merge state. Apply locks and reloads state and asks for `yes`; `--yes` skips this initial confirmation and is required without an interactive terminal. Execution resumes pending work, revalidates each PR, saves intent before the merge request, records the merge SHA and waits for the deploy verdict. Independent repositories can run concurrently up to `max_parallel`, with one active PR per repository, and deploys that need the same self-hosted runner or group run one at a time (see [deploy resources](merge.md#deploy-resources)); a deploy `queued` for a runner does not use its slot or its timeout. Gates retain their own confirmations. See [merge phases, confirmation and deploy tracking](merge.md).
 
 ### What can go wrong and the right way out
 

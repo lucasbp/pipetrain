@@ -131,6 +131,8 @@ pub struct MergeConfig {
     pub repo_timeout_minutes: BTreeMap<String, u64>,
     pub same_target_settle_seconds: u64,
     pub repo_same_target_settle_seconds: BTreeMap<String, u64>,
+    pub deploy_slots: BTreeMap<String, usize>,
+    pub queued_timeout_minutes: u64,
 }
 
 impl Default for MergeConfig {
@@ -150,6 +152,8 @@ impl Default for MergeConfig {
             repo_timeout_minutes: BTreeMap::new(),
             same_target_settle_seconds: 0,
             repo_same_target_settle_seconds: BTreeMap::new(),
+            deploy_slots: BTreeMap::new(),
+            queued_timeout_minutes: crate::deploy_wait::DEFAULT_QUEUED_TIMEOUT_MINUTES,
         }
     }
 }
@@ -184,6 +188,10 @@ impl MergeConfig {
             .find(|(repo, _)| repo.eq_ignore_ascii_case(slug))
             .map_or(self.timeout_minutes, |(_, minutes)| *minutes);
         std::time::Duration::from_secs(minutes.saturating_mul(60))
+    }
+
+    pub fn queued_ceiling(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.queued_timeout_minutes.saturating_mul(60))
     }
 
     pub fn waits_for_deploy(&self, slug: &str) -> bool {
