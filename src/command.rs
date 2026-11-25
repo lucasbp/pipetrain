@@ -282,6 +282,7 @@ fn release_context(
     for (index, repo) in candidates.iter().enumerate() {
         if let Some((slug, sha)) = repos.get(repo) {
             let files = workflows::read(client, slug, sha)?;
+            let files = crate::deploy_resources::with_reusables(client, slug, sha, files);
             context
                 .limits
                 .insert(repo.clone(), workflows::max_behind(&files));

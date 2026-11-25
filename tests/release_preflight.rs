@@ -153,10 +153,10 @@ fn consumer_referencing_old_version_is_flagged_when_queue_publishes_more_than_th
     assert!(question.message.to_lowercase().contains("acme.util"));
     assert!(question.message.contains("1.0.0"));
     assert!(question.message.contains("3 new versions"));
-    assert!(question.message.contains("allows 1"));
+    assert!(question.message.contains("fails at 1 behind"));
     let ready = readiness(&plan, "acme/sdk#10");
     assert_eq!(ready.status, "waiting");
-    assert!(ready.causes.iter().any(|c| c.contains("allows 1")));
+    assert!(ready.causes.iter().any(|c| c.contains("fails at 1 behind")));
     assert_eq!(plan.schema, 1);
 }
 
@@ -164,12 +164,12 @@ fn consumer_referencing_old_version_is_flagged_when_queue_publishes_more_than_th
 fn consumer_is_not_flagged_when_the_limit_covers_the_releases() {
     let plan = plan_for(Scenario {
         prs: three_releases_and(consumer()),
-        limit: found(3),
+        limit: found(4),
         default_max: None,
     });
     assert!(flagged(&plan).is_empty());
     let ready = readiness(&plan, "acme/sdk#10");
-    assert!(ready.causes.iter().all(|c| !c.contains("allows")));
+    assert!(ready.causes.iter().all(|c| !c.contains("limit")));
     assert!(ready.warnings.is_empty());
 }
 
@@ -182,7 +182,7 @@ fn unreadable_limit_warns_as_not_confirmed_and_does_not_block() {
     });
     assert!(flagged(&plan).is_empty());
     let ready = readiness(&plan, "acme/sdk#10");
-    assert!(ready.causes.iter().all(|c| !c.contains("allows")));
+    assert!(ready.causes.iter().all(|c| !c.contains("limit")));
     assert!(
         ready.warnings.iter().any(|w| {
             w.starts_with("(not confirmed)") && w.to_lowercase().contains("acme.util")
@@ -218,7 +218,7 @@ fn releases_count_only_publisher_prs_that_touch_the_package() {
     let docs_only = touching(pr("acme/util", 4, "docs", "main"), "README.md", None);
     let plan = plan_for(Scenario {
         prs: vec![util_release(1), docs_only, consumer()],
-        limit: found(1),
+        limit: found(2),
         default_max: None,
     });
     assert!(flagged(&plan).is_empty());

@@ -217,6 +217,7 @@ impl Fixture {
             to: Some("1.4.0".into()),
             behind: 3,
             limit: 2,
+            latest: None,
             queue_published: false,
         }];
         plan

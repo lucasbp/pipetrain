@@ -4,7 +4,7 @@ Part of issue 54. This page covers the prediction in `merge` and its execution u
 
 ## What it does
 
-For each PR in the queue, `merge` looks at the packages its repo consumes from another repo and that are pinned to an exact version. If the number of published versions newer than the pin, plus the releases the queue itself will publish, is above the repo's limit, the PR would fail the version gate. The limit comes from `max-behind` in the workflows or `merge.package_max_behind`; an unreadable limit never holds a PR.
+For each PR in the queue, `merge` looks at the packages its repo consumes from another repo and that are pinned to an exact version. If the number of published versions newer than the pin, plus the releases the queue itself will publish, reaches the repo's limit (the gate fails at `behind >= limit`; pre-releases are not counted), the PR would fail the version gate. The limit comes from `max-behind` in the repo workflows, including the reusable workflows they call, or `merge.package_max_behind`; an unreadable limit never holds a PR.
 
 The PR is then left out as `waiting: needs a bump of <package> to <version>` and `merge` shows a `bump` step before it. `plan` and `bundle` do not query feeds for this and are unchanged.
 

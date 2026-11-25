@@ -124,7 +124,10 @@ fn a_pin_further_behind_the_feed_than_the_limit_needs_the_newest_stable_in_its_m
     assert_eq!(need.behind, 5);
     assert_eq!(need.limit, 1);
     assert!(!need.queue_published);
-    assert_eq!(need.cause(), "needs a bump of acme.util to 1.4.0");
+    assert_eq!(
+        need.cause(),
+        "needs a bump of acme.util to 1.4.0 (package acme.util behind: installed 1.0.0, latest stable 2.0.0, limit 1)"
+    );
 }
 
 #[test]
@@ -144,7 +147,7 @@ fn only_a_newer_major_or_prereleases_leaves_nothing_to_propose() {
 #[test]
 fn a_pin_within_the_limit_is_left_alone() {
     let feeds = feed(&["1.0.0", "1.1.0", "1.2.0"]);
-    assert!(needs("1.0.0", &feeds, limit(2), vec![consumer()]).is_empty());
+    assert!(needs("1.0.0", &feeds, limit(3), vec![consumer()]).is_empty());
 }
 
 #[test]
@@ -191,7 +194,7 @@ fn queue_releases_count_as_versions_the_pin_will_fall_behind() {
     assert_eq!(need.behind, 3);
     assert_eq!(
         need.cause(),
-        "needs a bump of acme.util to the version the queue publishes"
+        "needs a bump of acme.util to the version the queue publishes (package acme.util behind: installed 1.0.0, limit 1)"
     );
 }
 
@@ -227,7 +230,9 @@ fn hold_moves_the_pr_out_of_the_queue_with_a_waiting_cause() {
     assert_eq!(skipped.len(), 1);
     assert_eq!(
         skipped[0].reasons,
-        vec!["needs a bump of acme.util to 1.3.0"]
+        vec![
+            "needs a bump of acme.util to 1.3.0 (package acme.util behind: installed 1.0.0, latest stable 1.3.0, limit 1)"
+        ]
     );
     assert_eq!(classify(&skipped[0].reasons), Category::Waiting);
 }
@@ -305,7 +310,7 @@ fn stable_in_major_and_versions_behind_use_the_feed_ordering() {
         Some("1.10.0")
     );
     assert_eq!(behind::stable_in_major("1.10.0", &versions), None);
-    assert_eq!(behind::versions_behind("1.9.0", &versions), 3);
+    assert_eq!(behind::versions_behind("1.9.0", &versions), 2);
 }
 
 #[test]
@@ -314,5 +319,23 @@ fn the_step_detail_names_the_package_versions_repo_and_limit() {
     let found = needs("1.0.0", &feeds, limit(1), vec![consumer()]);
     let detail = found[0].step_detail();
     assert!(detail.starts_with("bump acme.util from 1.0.0 to 1.3.0 in acme/sdk"));
-    assert!(detail.contains("allows 1 behind"));
+    assert!(detail.contains("fails at 1 behind"));
+}
+
+#[test]
+fn a_pin_exactly_at_the_limit_is_held_because_the_deploy_check_fails_there() {
+    let feeds = feed(&["1.2611.2420.6", "1.2611.2512.42"]);
+    let found = needs("1.2611.2420.6", &feeds, limit(1), vec![consumer()]);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].behind, 1);
+    assert_eq!(
+        found[0].cause(),
+        "needs a bump of acme.util to 1.2611.2512.42 (package acme.util behind: installed 1.2611.2420.6, latest stable 1.2611.2512.42, limit 1)"
+    );
+}
+
+#[test]
+fn prereleases_do_not_count_toward_the_limit() {
+    let feeds = feed(&["1.0.0", "1.1.0-develop.1", "1.1.0-develop.2"]);
+    assert!(needs("1.0.0", &feeds, limit(1), vec![consumer()]).is_empty());
 }
