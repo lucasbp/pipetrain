@@ -220,6 +220,10 @@ impl Client {
         self.guard.reserve()
     }
 
+    pub fn sequence_remote(&self) -> Option<crate::sequence::Remote> {
+        crate::sequence::Remote::resolve(&self.token, is_loopback(&self.base))
+    }
+
     pub fn quota_probe(&mut self) -> Option<BTreeMap<String, Window>> {
         if is_loopback(&self.base) && std::env::var_os(QUOTA_CHECK_ENV).is_none() {
             return None;
