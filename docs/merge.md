@@ -241,6 +241,10 @@ Phases include readiness, merging, waiting for deploy (with expected workflow pa
 
 `--gates-confirmed` retains its meaning for manual DDL/infra gates and package confirmation after an absence timeout. It does not suppress the new feed check or recover an authentication failure. Dry runs do not poll package feeds. Sequential and parallel execution use the same package wait check. Package checks only read feeds and never publish a package.
 
+## Simulating the queue
+
+PRs of the same repo and base are checked in the order the queue merges them (by PR number). `plan` and `merge` fetch the base branch and the `refs/pull/<n>/head` of each PR into a partial clone (`--filter=blob:none`, no checkout) under the user cache directory, `sequence/<org>__<repo>.git`, and run `git merge-tree --write-tree` along the sequence, each merge becoming the left side of the next. A PR that conflicts once the earlier ones are in goes to SKIPPED with `conflicts with <repo#n> after it merges: <files>`; the others keep their place and the next PRs are tested without it. This needs `git` 2.38 or newer. When it cannot run (no `git`, fetch refused, a head that moved since the plan read it) the selection is kept whole and only the informational `conflicts:` line shows. It uses git over HTTPS and costs **0** REST, GraphQL or search requests, so the quota estimate does not change. The token reaches git through a credential helper fed by an environment variable, never in the command line. `PIPETRAIL_SEQUENCE_GIT_BASE` replaces `https://github.com` (it also turns the check on for loopback test servers).
+
 ## Open questions in the plan
 
 When the plan has open questions (`? ...` lines, the ones that make `plan --emit queue` exit with 3) `--apply` merges nothing and exits with 3. `--allow-questions` merges anyway. The order of the plan is a guess for what the questions are about, so read them first.

@@ -142,6 +142,15 @@ fn discover(
     Ok(out)
 }
 
+fn collide(client: &Client, ready: Vec<(Pr, Scope)>) -> (Vec<(Pr, Scope)>, Vec<Skipped>) {
+    let (Some(remote), Some(cache)) = (client.sequence_remote(), crate::cache::default_dir())
+    else {
+        return (ready, Vec::new());
+    };
+    progress::phase("simulating the merge order");
+    crate::sequence::filter(&remote, &cache, ready)
+}
+
 fn load_files(client: &mut Client, ready: &mut [(Pr, Scope)]) -> Result<()> {
     let total = ready.len();
     for (index, (pr, _)) in ready.iter_mut().enumerate() {
@@ -549,6 +558,9 @@ fn build_plan_with_prepare(
     progress::phase("checking contents");
     let (ready, same) = content::filter(&mut client, ready, &deploy_branch)?;
     skipped.extend(same);
+
+    let (ready, colliding) = collide(&client, ready);
+    skipped.extend(colliding);
 
     let external = external_states(&mut client, &ready)?;
     let scanned = scan_publishers(&mut client, &rules, &ready, &mut questions)?;
