@@ -317,6 +317,7 @@ pub struct Rules {
     infra_repos: HashSet<String>,
     targets: HashMap<String, String>,
     pub packages: HashMap<String, String>,
+    pub evidence: crate::publishers::Evidence,
 }
 
 fn build_set(patterns: &[String], what: &str) -> Result<GlobSet> {
@@ -366,6 +367,7 @@ impl Rules {
                 .iter()
                 .map(|(k, v)| (k.to_lowercase(), v.to_lowercase()))
                 .collect(),
+            evidence: crate::publishers::Evidence::default(),
         })
     }
 

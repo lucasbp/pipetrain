@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.13.1
+
+- The `dependency` edge no longer assumes the publisher must go first. With the feed of the package, a consumer whose pins are all already published goes before the publisher (new rule `package-before-publisher`, never holds a PR); a pin not published yet keeps the publisher first, and a consumer PR that bumps the package is left to the `package` rule. When the feed cannot be read or the pin is a range, the old edge stays with `(kept by doubt: ...)` in the reason. One feed request per referenced package. See [docs/planner.md](docs/planner.md#5-dependency).
+- `merge` without `--apply` no longer contradicts its own warning: when it says `--apply would archive` a stale state, the dry run is computed on the empty state `--apply` would start with, so the archived pending records are not shown as inherited, resumed or estimated.
+- `plan --json` `skipped[]` gains `blocked_by` (`{id, rule, reason}` per held edge) on a PR held by an earlier one, so the cause no longer has to be parsed from `reasons`. Additive, schema stays `1`. See [docs/plan-json.md](docs/plan-json.md).
+
 ## 0.13.0
 
 - `--author <login>` (repeatable) and `--mine` now select, not only hide: on `plan`, `merge` and `bundle` they add every open, non-draft PR of those logins in the orgs of the profile, with origin `author`, to the train, shared branches, `--all` and named PRs, without duplicates. The org-wide open PR list that discovery already reads is reused, so there is no extra search. Not ready PRs go to `SKIPPED` with their cause. Only logins given on the command line select; `authors` in the config still only hides. `scope` gains `author` (additive, schema stays `1`).
