@@ -199,7 +199,10 @@ fn a_consumer_reference_orders_the_publisher_first_with_the_reason() {
         .iter()
         .find(|d| d.rule.as_str() == "dependency")
         .unwrap();
-    assert_eq!(dep.reason, "sdk references acme.util, published by util");
+    assert_eq!(
+        dep.reason,
+        "sdk references acme.util, published by util (kept by doubt: the feed of acme.util could not be read)"
+    );
     assert!(codes(&planned).is_empty());
 }
 
@@ -321,4 +324,176 @@ fn an_explicit_order_beats_dependency_and_the_conflict_is_asked() {
 fn the_queue_puts_the_publisher_first() {
     let lines = queue(&config(""), util_and_sdk_prs(), &util_and_sdk());
     assert!(position(&lines, "acme/util#2") < position(&lines, "acme/sdk#1"));
+}
+
+fn with_evidence(cfg: &Config, prs: Vec<Pr>, pins: &[&str], feed: Option<&[&str]>) -> Planned {
+    let mut rules = Rules::new(cfg).unwrap();
+    let (publishers, references) = scan(&util_and_sdk());
+    rules.evidence.pins.insert(
+        ("acme/sdk".to_string(), "acme.util".to_string()),
+        pins.iter().map(|pin| pin.to_string()).collect(),
+    );
+    if let Some(versions) = feed {
+        rules.evidence.feeds.insert(
+            "acme.util".to_string(),
+            versions.iter().map(|version| version.to_string()).collect(),
+        );
+    }
+    planner::plan(PlanInput {
+        rules: &rules,
+        prs: prs
+            .into_iter()
+            .map(|p| (p, "explicit".to_string()))
+            .collect(),
+        external: BTreeMap::new(),
+        publishers,
+        references,
+    })
+}
+
+fn reason_of(planned: &Planned, to: &str, rule: &str) -> String {
+    planned
+        .items
+        .iter()
+        .find(|i| i.id == to)
+        .unwrap()
+        .after
+        .iter()
+        .find(|d| d.rule.as_str() == rule)
+        .unwrap()
+        .reason
+        .clone()
+}
+
+fn sdk_bumping_util() -> Pr {
+    let mut sdk = pr("acme/sdk", 1, "feat/a", "master");
+    sdk.files = vec![pipetrain::model::ChangedFile {
+        path: "src/Acme.Sdk.csproj".to_string(),
+        patch: Some(
+            "-<PackageReference Include=\"Acme.Util\" Version=\"1.0.0\" />\n+<PackageReference Include=\"Acme.Util\" Version=\"1.0.1\" />"
+                .to_string(),
+        ),
+    }];
+    sdk
+}
+
+#[test]
+fn a_pin_already_published_puts_the_consumer_before_the_publisher() {
+    let planned = with_evidence(
+        &config(""),
+        util_and_sdk_prs(),
+        &["1.0.0"],
+        Some(&["0.9.0", "1.0.0"]),
+    );
+    assert!(edge(
+        &planned,
+        "acme/sdk#1",
+        "acme/util#2",
+        "package-before-publisher"
+    ));
+    assert_eq!(edges_of(&planned, "dependency"), 0);
+    assert!(codes(&planned).is_empty());
+    assert_eq!(
+        reason_of(&planned, "acme/util#2", "package-before-publisher"),
+        "sdk pins acme.util 1.0.0, already published; merging before util avoids a forced bump"
+    );
+}
+
+#[test]
+fn a_pin_not_yet_published_keeps_the_publisher_first() {
+    let planned = with_evidence(
+        &config(""),
+        util_and_sdk_prs(),
+        &["1.0.5"],
+        Some(&["0.9.0", "1.0.0"]),
+    );
+    assert!(edge(&planned, "acme/util#2", "acme/sdk#1", "dependency"));
+    assert_eq!(edges_of(&planned, "package-before-publisher"), 0);
+    assert_eq!(
+        reason_of(&planned, "acme/sdk#1", "dependency"),
+        "sdk references acme.util 1.0.5, which is not published yet, so it waits for util"
+    );
+}
+
+#[test]
+fn a_consumer_that_bumps_the_package_keeps_the_package_edge_only() {
+    let prs = vec![sdk_bumping_util(), pr("acme/util", 2, "feat/b", "master")];
+    let planned = with_evidence(&config(""), prs, &["1.0.0"], Some(&["1.0.0"]));
+    assert!(edge(&planned, "acme/util#2", "acme/sdk#1", "package"));
+    assert_eq!(edges_of(&planned, "dependency"), 0);
+    assert_eq!(edges_of(&planned, "package-before-publisher"), 0);
+}
+
+#[test]
+fn an_unreadable_feed_keeps_the_old_edge_by_doubt() {
+    let planned = with_evidence(&config(""), util_and_sdk_prs(), &["1.0.0"], None);
+    assert!(edge(&planned, "acme/util#2", "acme/sdk#1", "dependency"));
+    assert!(
+        reason_of(&planned, "acme/sdk#1", "dependency")
+            .ends_with("(kept by doubt: the feed of acme.util could not be read)")
+    );
+}
+
+#[test]
+fn a_range_without_a_pin_keeps_the_old_edge_by_doubt() {
+    let planned = with_evidence(
+        &config(""),
+        util_and_sdk_prs(),
+        &["[1.0,2.0)"],
+        Some(&["1.0.0"]),
+    );
+    assert!(edge(&planned, "acme/util#2", "acme/sdk#1", "dependency"));
+    assert!(
+        reason_of(&planned, "acme/sdk#1", "dependency")
+            .ends_with("(kept by doubt: version not resolved)")
+    );
+}
+
+#[test]
+fn a_held_dependent_names_the_rule_and_reason_in_the_json() {
+    let mut sdk = pr("acme/sdk", 1, "feat/a", "master");
+    sdk.body = "Depends-On: acme/util#2".into();
+    let util = pr("acme/util", 2, "feat/b", "master");
+    let cfg = config("");
+    let rules = Rules::new(&cfg).unwrap();
+    let plan = plan::build(
+        &rules,
+        Gathered {
+            generated_at: "2026-10-30T09:00:00-03:00".to_string(),
+            train: "deploy/30-10-2026".to_string(),
+            deploy_branch: "deploy/30-10-2026".to_string(),
+            train_prefix: "deploy/".to_string(),
+            orgs: vec!["acme".to_string()],
+            ready: vec![(sdk, "explicit".to_string())],
+            skipped: vec![pipetrain::discovery::Skipped {
+                pr: util,
+                scope: pipetrain::discovery::Scope::Explicit,
+                reasons: vec!["checks failing".to_string()],
+            }],
+            questions: Vec::new(),
+            external: BTreeMap::new(),
+            publishers: Publishers::new(),
+            references: References::new(),
+            max_parallel: 4,
+            requests: 1,
+            rate_remaining: Some(4000),
+        },
+    );
+    let value = serde_json::to_value(&plan).unwrap();
+    let held = value["skipped"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == "acme/sdk#1")
+        .unwrap();
+    assert_eq!(held["blocked_by"][0]["id"], "acme/util#2");
+    assert_eq!(held["blocked_by"][0]["rule"], "depends-on");
+    assert!(!held["blocked_by"][0]["reason"].as_str().unwrap().is_empty());
+    let failing = value["skipped"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == "acme/util#2")
+        .unwrap();
+    assert!(failing.get("blocked_by").is_none());
 }

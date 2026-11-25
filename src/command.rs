@@ -282,8 +282,44 @@ fn release_context(
     Ok(context)
 }
 
-fn read_feeds(context: &release::Context) -> behind::Feeds {
-    let wanted = behind::candidates(context);
+fn pair_packages(
+    context: &release::Context,
+    ready: &[(Pr, Scope)],
+) -> BTreeMap<String, Vec<String>> {
+    let pairs = publishers::dependency_pairs(
+        |repo| context.repos.contains(repo),
+        &context.references,
+        &context.publishers,
+    );
+    let mut found = BTreeMap::new();
+    for ((_, consumer), package) in &pairs {
+        let pinned = context
+            .versions
+            .get(&(consumer.clone(), package.clone()))
+            .is_some_and(|specs| specs.iter().any(|spec| behind::is_pin(spec)));
+        let pending = ready.iter().any(|(pr, _)| {
+            pr.key.slug().to_lowercase() == *consumer
+                && !detect::bumped_packages(&pr.files).contains(package)
+        });
+        if !pinned || !pending {
+            continue;
+        }
+        let orgs = context
+            .publishers
+            .get(package)
+            .map(|owners| {
+                owners
+                    .iter()
+                    .filter_map(|slug| slug.split_once('/').map(|(org, _)| org.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        found.insert(package.clone(), orgs);
+    }
+    found
+}
+
+fn read_feeds(wanted: &BTreeMap<String, Vec<String>>) -> behind::Feeds {
     if wanted.is_empty() {
         return behind::Feeds::new();
     }
@@ -469,7 +505,7 @@ fn build_plan_with_prepare(
         &opts.prs,
         &opts.orgs,
     )?;
-    let rules = Rules::new(&cfg)?;
+    let mut rules = Rules::new(&cfg)?;
     let deploy_branch = deploy_branch_for(&cfg, opts.date.as_deref())?;
     let explicit = explicit_targets(&prs, &cfg)?;
     let train = train_label(&explicit, opts.all, &deploy_branch);
@@ -520,8 +556,16 @@ fn build_plan_with_prepare(
     )?;
     let (publishers, references, _) = scanned;
     let mut ready = ready;
+    let mut wanted = pair_packages(&release_context, &ready);
+    if opts.check_bumps {
+        wanted.extend(behind::candidates(&release_context));
+    }
+    let feeds = read_feeds(&wanted);
+    rules.evidence = publishers::Evidence {
+        pins: release_context.versions.clone(),
+        feeds: feeds.clone(),
+    };
     let bumps = if opts.check_bumps {
-        let feeds = read_feeds(&release_context);
         behind::hold(&release_context, &feeds, &mut ready, &mut skipped)
     } else {
         Vec::new()
