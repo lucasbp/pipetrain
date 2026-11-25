@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `merge --apply` asks every DDL and infra gate at the start, before any merge. With more than one gate it lists them (`repo#n`, type and the file that triggered it) and asks once for all; if that is not confirmed it asks about each one. A confirmed gate PR is queued like any other and runs in parallel with the PRs that do not depend on it, and its pause no longer blocks the queue. A gate that is refused, unanswered or asked without a terminal holds only its own branch: the PRs that depend on it (any plan edge, or the same repo and base) are skipped with `stopped after an earlier failure`, the pause step is `stopped`, the exit code is 5, and every other PR keeps merging. `--gates-confirmed` still answers everything and nothing is confirmed implicitly. The dry run lists the gates it would ask (`notices` in `--json`, the compact preview) and asks nothing. Package waits keep their own confirmation. See [docs/merge.md](docs/merge.md#confirmation-and-gates).
+
 ## 0.13.0
 
 - `--author <login>` (repeatable) and `--mine` now select, not only hide: on `plan`, `merge` and `bundle` they add every open, non-draft PR of those logins in the orgs of the profile, with origin `author`, to the train, shared branches, `--all` and named PRs, without duplicates. The org-wide open PR list that discovery already reads is reused, so there is no extra search. Not ready PRs go to `SKIPPED` with their cause. Only logins given on the command line select; `authors` in the config still only hides. `scope` gains `author` (additive, schema stays `1`).

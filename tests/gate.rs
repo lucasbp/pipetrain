@@ -108,7 +108,7 @@ fn stacked_gate_does_not_hold_back_unrelated_prs_or_other_gates() {
     let early = with_sql(pr("acme/db", 4, "feat/z", "master"));
     let planned = run(vec![parent, child, unrelated, early]);
     assert!(planned.questions.is_empty(), "{:?}", planned.questions);
-    assert!(edge(&planned, "acme/db#4", "acme/web#3", "gate"));
+    assert!(!edge(&planned, "acme/db#4", "acme/web#3", "gate"));
     assert!(!edge(&planned, "acme/api-core#10", "acme/web#3", "gate"));
     assert!(!edge(
         &planned,
@@ -206,4 +206,61 @@ fn two_gates_come_out_in_graph_order() {
         planned.gate,
         vec!["acme/api-b#2".to_string(), "acme/api-a#1".to_string()]
     );
+}
+
+#[test]
+fn a_gate_does_not_order_a_pr_that_has_nothing_to_do_with_it() {
+    let planned = run(vec![
+        with_sql(pr("acme/db", 4, "feat/z", "master")),
+        pr("acme/web", 3, "feat/y", "master"),
+        pr("acme/mail", 8, "feat/w", "master"),
+    ]);
+    assert_eq!(planned.gate, vec!["acme/db#4".to_string()]);
+    for id in ["acme/web#3", "acme/mail#8"] {
+        let item = planned.items.iter().find(|i| i.id == id).unwrap();
+        assert!(item.after.is_empty(), "{id}: {:?}", item.after);
+    }
+    assert_eq!(planned.peak_parallel, 2);
+}
+
+#[test]
+fn a_descendant_of_a_gate_by_target_stays_behind_it() {
+    let planned = run(vec![
+        with_sql(pr("acme/db", 4, "feat/z", "master")),
+        pr("acme/db", 5, "feat/q", "master"),
+        pr("acme/web", 3, "feat/y", "master"),
+    ]);
+    assert!(edge(&planned, "acme/db#4", "acme/db#5", "target"));
+    let web = planned.items.iter().find(|i| i.id == "acme/web#3").unwrap();
+    assert!(web.after.is_empty());
+}
+
+#[test]
+fn a_descendant_of_a_gate_by_package_stays_behind_it() {
+    let publisher = with_sql(pr("acme/kit", 6, "feat/a", "master"));
+    let consumer = bump(pr("acme/web", 5, "feat/b", "master"), "@acme/kit");
+    let other = pr("acme/other", 7, "feat/c", "master");
+    let planned = run_with(
+        "[packages]\n\"@acme/kit\" = \"acme/kit\"\n",
+        vec![publisher, consumer, other],
+    );
+    assert_eq!(planned.gate, vec!["acme/kit#6".to_string()]);
+    assert!(edge(&planned, "acme/kit#6", "acme/web#5", "package"));
+    let other = planned
+        .items
+        .iter()
+        .find(|i| i.id == "acme/other#7")
+        .unwrap();
+    assert!(other.after.is_empty());
+}
+
+#[test]
+fn a_pr_of_the_same_change_on_the_gate_branch_still_waits_for_it() {
+    let planned = run(vec![
+        with_sql(pr("acme/db", 4, "feat/same", "master")),
+        pr("acme/web", 3, "feat/same", "master"),
+        pr("acme/mail", 8, "feat/other", "master"),
+    ]);
+    assert!(edge(&planned, "acme/db#4", "acme/web#3", "gate"));
+    assert!(!edge(&planned, "acme/db#4", "acme/mail#8", "gate"));
 }

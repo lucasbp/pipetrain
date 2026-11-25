@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::mpsc::{self, SyncSender};
 use std::thread;
 
@@ -56,6 +56,27 @@ pub enum Event {
         data: String,
         reply: SyncSender<Result<(), String>>,
     },
+    Runner {
+        id: String,
+        waiting: bool,
+        reply: Option<SyncSender<()>>,
+    },
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Capacity {
+    pub slots: BTreeMap<String, usize>,
+    pub resources: BTreeMap<String, Vec<String>>,
+}
+
+impl Capacity {
+    fn limit(&self, resource: &str) -> usize {
+        self.slots.get(resource).copied().unwrap_or(1).max(1)
+    }
+
+    fn needs(&self, id: &str) -> &[String] {
+        self.resources.get(id).map_or(&[], Vec::as_slice)
+    }
 }
 
 pub trait Coordinator {
@@ -92,6 +113,30 @@ impl Progress {
         receive
             .recv()
             .map_err(|_| "scheduler did not acknowledge checkpoint".to_string())?
+    }
+
+    pub fn waiting_for_runner(&self, waiting: bool) -> Result<(), String> {
+        if waiting {
+            return self
+                .sender
+                .send(Event::Runner {
+                    id: self.id.clone(),
+                    waiting: true,
+                    reply: None,
+                })
+                .map_err(|_| "scheduler stopped receiving progress".to_string());
+        }
+        let (reply, receive) = mpsc::sync_channel(1);
+        self.sender
+            .send(Event::Runner {
+                id: self.id.clone(),
+                waiting: false,
+                reply: Some(reply),
+            })
+            .map_err(|_| "scheduler stopped receiving progress".to_string())?;
+        receive
+            .recv()
+            .map_err(|_| "scheduler did not grant a slot".to_string())
     }
 
     pub fn send(&self, message: impl Into<String>) -> Result<(), String> {
@@ -134,6 +179,29 @@ pub fn run<W>(
     jobs: &[Job],
     states: BTreeMap<String, Status>,
     max_parallel: usize,
+    policy: FailurePolicy,
+    coordinator: &mut impl Coordinator,
+    worker: W,
+) -> Result<Report, String>
+where
+    W: Fn(&Job, bool, Progress) -> Result<Completion, Failure> + Sync,
+{
+    run_with(
+        jobs,
+        states,
+        max_parallel,
+        &Capacity::default(),
+        policy,
+        coordinator,
+        worker,
+    )
+}
+
+pub fn run_with<W>(
+    jobs: &[Job],
+    states: BTreeMap<String, Status>,
+    max_parallel: usize,
+    capacity: &Capacity,
     policy: FailurePolicy,
     coordinator: &mut impl Coordinator,
     worker: W,
@@ -187,14 +255,23 @@ where
         let mut attempted = BTreeSet::new();
         let mut active_repos = BTreeSet::new();
         let mut barrier_active = false;
+        let mut waiting: BTreeSet<String> = BTreeSet::new();
+        let mut regrants: VecDeque<(String, SyncSender<()>)> = VecDeque::new();
+        let mut held: BTreeMap<String, usize> = BTreeMap::new();
         loop {
             let mut changed = false;
+            while active.len() - waiting.len() < max_parallel
+                && let Some((id, reply)) = regrants.pop_front()
+            {
+                waiting.remove(&id);
+                let _ = reply.send(());
+            }
             let recovering = jobs.iter().any(|job| {
                 report.states[&job.id] == Status::Running && !attempted.contains(&job.id)
             });
             if !report.stopped || recovering {
                 for (index, job) in jobs.iter().enumerate() {
-                    if active.len() >= max_parallel || barrier_active {
+                    if active.len() - waiting.len() >= max_parallel || barrier_active {
                         break;
                     }
                     if attempted.contains(&job.id)
@@ -253,6 +330,11 @@ where
                     if active_repos.contains(&job.repo) {
                         continue;
                     }
+                    if capacity.needs(&job.id).iter().any(|resource| {
+                        held.get(resource).copied().unwrap_or(0) >= capacity.limit(resource)
+                    }) {
+                        continue;
+                    }
                     if !resumed {
                         match coordinator.prepare(job) {
                             Ok(None) => {}
@@ -302,6 +384,9 @@ where
                     active.insert(job.id.clone());
                     attempted.insert(job.id.clone());
                     active_repos.insert(job.repo.clone());
+                    for resource in capacity.needs(&job.id) {
+                        *held.entry(resource.clone()).or_default() += 1;
+                    }
                     barrier_active = job.barrier;
                     changed = true;
                     let sender = sender.clone();
@@ -356,10 +441,30 @@ where
                     }
                     let _ = reply.send(result);
                 }
+                Ok(Event::Runner {
+                    id, waiting: true, ..
+                }) => {
+                    waiting.insert(id);
+                }
+                Ok(Event::Runner {
+                    id,
+                    waiting: false,
+                    reply,
+                }) => {
+                    if let Some(reply) = reply {
+                        regrants.push_back((id, reply));
+                    }
+                }
                 Ok(Event::Transition { id, status, fatal }) => {
                     let job = jobs.iter().find(|job| job.id == id).unwrap();
                     active.remove(&id);
+                    waiting.remove(&id);
                     active_repos.remove(&job.repo);
+                    for resource in capacity.needs(&id) {
+                        if let Some(count) = held.get_mut(resource) {
+                            *count = count.saturating_sub(1);
+                        }
+                    }
                     barrier_active = false;
                     if fatal
                         || (matches!(status, Status::Failed { .. })
