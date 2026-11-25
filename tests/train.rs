@@ -264,9 +264,10 @@ fn ddl_is_a_manual_pause_before_everything() {
     assert!(gate.manual_pause);
     assert!(gate.lane.is_none());
     for item in plan.items.iter().filter(|i| !i.manual_pause) {
-        assert!(
+        assert_eq!(
             has_edge(&plan, "acme/svc-billing#21", &item.id, "gate"),
-            "{} does not wait for the DDL",
+            item.head == gate.head,
+            "{}: the gate edge must follow the gate branch only",
             item.id
         );
     }
