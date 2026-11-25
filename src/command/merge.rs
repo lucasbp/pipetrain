@@ -2259,6 +2259,7 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
     if let Some(notice) = archival.notice(&state_path) {
         eprintln!("{notice}");
     }
+    let mut store = archival.fresh_view(store);
     if !json && opts.plan.progress {
         eprintln!("state: {}", state_path.display());
     }

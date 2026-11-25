@@ -5785,3 +5785,81 @@ fn the_report_counts_the_requests_of_a_parallel_run() {
         "usage line missing"
     );
 }
+
+fn selection_of(ids: &[&str]) -> std::collections::BTreeSet<String> {
+    ids.iter().map(|id| id.to_string()).collect()
+}
+
+#[test]
+fn dry_run_that_would_archive_does_not_resume_the_state_it_would_archive() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    std::fs::create_dir_all(state.directory.path()).unwrap();
+    let recorded_at = (chrono::Utc::now() - chrono::Duration::hours(30))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let bytes = serde_json::to_vec_pretty(&json!({
+        "schema": 2,
+        "created_at": recorded_at,
+        "updated_at": recorded_at,
+        "profile": "acme",
+        "queue_id": "original-queue",
+        "pending": [
+            {"id": "acme/api#1", "repo": "acme/api", "base": "main", "sha": merge_sha(1), "recorded_at": recorded_at},
+            {"id": "acme/api#2", "repo": "acme/api", "base": "main", "sha": merge_sha(2), "recorded_at": recorded_at}
+        ]
+    }))
+    .unwrap();
+    std::fs::write(state.directory.join("state.json"), &bytes).unwrap();
+    let mut store = state.reopen();
+    let archival = store
+        .archive_stale_queue(
+            &selection_of(&["acme/api#3"]),
+            24,
+            false,
+            chrono::Utc::now(),
+        )
+        .unwrap();
+    assert!(matches!(
+        archival,
+        pipetrain::merge::Archival::WouldArchive { .. }
+    ));
+    rig.store = archival.fresh_view(store);
+    let run = rig.run(&plan_on(&[3]), dry(), false, false).unwrap();
+    assert!(
+        run.outcome
+            .report
+            .steps
+            .iter()
+            .all(|step| step.kind != Kind::Resume)
+    );
+    assert!(run.outcome.report.state.pending.is_empty());
+    let text = render(&run.outcome.report, false);
+    assert!(!text.contains("inherited pending"), "{text}");
+    assert!(!text.contains("kept, failed deploy"), "{text}");
+    assert_eq!(
+        std::fs::read(state.directory.join("state.json")).unwrap(),
+        bytes
+    );
+}
+
+#[test]
+fn dry_run_without_archival_keeps_listing_the_inherited_pending() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    inherited_state(&state);
+    let mut store = state.reopen();
+    let archival = store
+        .archive_stale_queue(
+            &selection_of(&["acme/api#1"]),
+            24,
+            false,
+            chrono::Utc::now(),
+        )
+        .unwrap();
+    assert!(matches!(archival, pipetrain::merge::Archival::Kept));
+    rig.store = archival.fresh_view(store);
+    let run = rig.run(&plan_on(&[3]), dry(), false, false).unwrap();
+    assert_eq!(run.step(0).kind, Kind::Resume);
+    assert_eq!(run.step(1).kind, Kind::Resume);
+    assert_eq!(run.outcome.report.state.pending.len(), 2);
+}

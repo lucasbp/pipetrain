@@ -129,6 +129,15 @@ What counts:
 
 If A and B reference each other's packages, no edge is added and the question `dependency-cycle` names both repos.
 
+The edge depends on what the pin says, read from the feed of the package:
+
+- The PR of B bumps the package itself: the `package` rule already orders it and this rule adds nothing.
+- B pins a version the feed does not have yet: A goes first, as above, with the reason `<B> references <package> <version>, which is not published yet, so it waits for <A>`.
+- Every pin of B is already published: the order is reversed with the rule `package-before-publisher`, B before A, with the reason `<B> pins <package> <version>, already published; merging before <A> avoids a forced bump`. Making B wait for A would only force a bump of a version that exists. This edge never holds a PR (a not-ready A does not hold B), is not a package edge for bump, wait or release purposes, and a cycle with an earlier rule drops it without a question.
+- The feed could not be read, or B has no resolvable pin (a range, a floating version, a `path` reference): the edge of A before B stays, with the suffix `(kept by doubt: ...)` in the reason.
+
+Cost: one feed request per package that a pending PR references with a pin, once per plan, shared with `--check-bumps`.
+
 Why it sits here: it is inferred from manifests, so any explicit rule above beats it, and it beats the defaults that follow.
 
 ### 6. target
@@ -150,11 +159,11 @@ Every gate PR that has no predecessor is ordered before every PR that is not a g
 
 #### Late gates
 
-A DDL or infra PR that must come after another PR by a `package`, `dependency`, `target` or `stacked` edge is a late gate. It is not run first: it runs after its predecessors, with the pause right before it. For `package` the version has to exist before the bump can merge; for `stacked` the PR is the base branch of a stack, so its children have to merge into its branch first. The gate stays in `gate` and keeps `manual_pause`, `--json` marks it with `gate_late` (the key is absent for every other PR), and it does not hold back the rest of the queue: only PRs that depend on it by their own edge, such as a later PR on the same deploy target, come after it.
+A DDL or infra PR that must come after another PR by a `package`, `dependency`, `package-before-publisher`, `target` or `stacked` edge is a late gate. It is not run first: it runs after its predecessors, with the pause right before it. For `package` the version has to exist before the bump can merge; for `stacked` the PR is the base branch of a stack, so its children have to merge into its branch first. The gate stays in `gate` and keeps `manual_pause`, `--json` marks it with `gate_late` (the key is absent for every other PR), and it does not hold back the rest of the queue: only PRs that depend on it by their own edge, such as a later PR on the same deploy target, come after it.
 
 A gate means "pause and confirm when its turn comes", not "be first in the whole queue". The `stacked` rule therefore wins over "gates first" for the parent and what depends on it; every other gate keeps going first.
 
-A gate is late only when every one of its non-gate predecessor edges is `package`, `dependency`, `target` or `stacked`, and it has at least one. A gate with a predecessor from any other rule keeps the `gate-has-predecessor` question and still runs first.
+A gate is late only when every one of its non-gate predecessor edges is `package`, `dependency`, `package-before-publisher`, `target` or `stacked`, and it has at least one. A gate with a predecessor from any other rule keeps the `gate-has-predecessor` question and still runs first.
 
 Why gates are applied before layers: a migration must land before the code that reads it, whatever layer that code lives in. Letting the layer rule decide first could put the migration after its consumer.
 

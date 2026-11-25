@@ -30,8 +30,17 @@ pub struct SkippedOut {
     pub scope: String,
     pub head: String,
     pub reasons: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blocked_by: Vec<Blocker>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Blocker {
+    pub id: String,
+    pub rule: Rule,
+    pub reason: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -106,18 +115,25 @@ pub struct Gathered {
     pub rate_remaining: Option<u64>,
 }
 
-fn skipped_out(skipped: Vec<Skipped>) -> Vec<SkippedOut> {
+fn skipped_out(
+    skipped: Vec<Skipped>,
+    mut blockers: BTreeMap<String, Vec<Blocker>>,
+) -> Vec<SkippedOut> {
     let mut out: Vec<SkippedOut> = skipped
         .into_iter()
-        .map(|s| SkippedOut {
-            id: s.pr.key.to_string(),
-            title: s.pr.title,
-            url: s.pr.url,
-            author: s.pr.author,
-            scope: s.scope.as_str().to_string(),
-            head: s.pr.head_ref,
-            reasons: s.reasons,
-            hidden: false,
+        .map(|s| {
+            let id = s.pr.key.to_string();
+            SkippedOut {
+                blocked_by: blockers.remove(&id).unwrap_or_default(),
+                id,
+                title: s.pr.title,
+                url: s.pr.url,
+                author: s.pr.author,
+                scope: s.scope.as_str().to_string(),
+                head: s.pr.head_ref,
+                reasons: s.reasons,
+                hidden: false,
+            }
         })
         .collect();
     out.sort_by(|a, b| a.id.cmp(&b.id));
@@ -173,7 +189,8 @@ fn finished_work(reasons: &[String]) -> bool {
     })
 }
 
-fn hold_dependents(rules: &Rules, gathered: &mut Gathered) {
+fn hold_dependents(rules: &Rules, gathered: &mut Gathered) -> BTreeMap<String, Vec<Blocker>> {
+    let mut blockers: BTreeMap<String, Vec<Blocker>> = BTreeMap::new();
     let parents: Vec<Pr> = gathered
         .skipped
         .iter()
@@ -181,7 +198,7 @@ fn hold_dependents(rules: &Rules, gathered: &mut Gathered) {
         .map(|skipped| skipped.pr.clone())
         .collect();
     if parents.is_empty() || gathered.ready.is_empty() {
-        return;
+        return blockers;
     }
     let mut everyone = gathered.ready.clone();
     everyone.extend(
@@ -239,6 +256,20 @@ fn hold_dependents(rules: &Rules, gathered: &mut Gathered) {
                     lines.push(format!("{}: {cause}", dep.id));
                 }
                 reasons.insert(item.id.clone(), lines);
+                blockers.insert(
+                    item.id.clone(),
+                    item.after
+                        .iter()
+                        .filter(|dep| {
+                            DEPENDENCY_RULES.contains(&dep.rule) && left_out.contains_key(&dep.id)
+                        })
+                        .map(|dep| Blocker {
+                            id: dep.id.clone(),
+                            rule: dep.rule,
+                            reason: dep.reason.clone(),
+                        })
+                        .collect(),
+                );
                 left_out.insert(item.id.clone(), Category::Waiting);
                 grew = true;
             }
@@ -258,10 +289,11 @@ fn hold_dependents(rules: &Rules, gathered: &mut Gathered) {
             None => gathered.ready.push((pr, scope)),
         }
     }
+    blockers
 }
 
 pub fn build(rules: &Rules, mut gathered: Gathered) -> Plan {
-    hold_dependents(rules, &mut gathered);
+    let blockers = hold_dependents(rules, &mut gathered);
     let snapshots = snapshots(&gathered.ready);
     let selected: Vec<&Pr> = gathered
         .ready
@@ -293,7 +325,7 @@ pub fn build(rules: &Rules, mut gathered: Gathered) -> Plan {
         references: gathered.references,
     });
     let questions = merged(gathered.questions, planned.questions);
-    let skipped = skipped_out(gathered.skipped);
+    let skipped = skipped_out(gathered.skipped, blockers);
     for readiness in &mut preflight {
         if readiness.status == "blocked" {
             continue;
