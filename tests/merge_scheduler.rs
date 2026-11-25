@@ -410,3 +410,133 @@ fn checkpoint_ack_precedes_effect_and_failure_prevents_effect() {
         assert_eq!(report.stopped, fail_checkpoint);
     }
 }
+
+fn capacity(resources: &[(&str, &[&str])], slots: &[(&str, usize)]) -> Capacity {
+    Capacity {
+        slots: slots.iter().map(|(k, n)| (k.to_string(), *n)).collect(),
+        resources: resources
+            .iter()
+            .map(|(id, list)| (id.to_string(), list.iter().map(|s| s.to_string()).collect()))
+            .collect(),
+    }
+}
+
+fn peak_with(jobs: &[Job], capacity: &Capacity, max_parallel: usize) -> usize {
+    let current = AtomicUsize::new(0);
+    let peak = AtomicUsize::new(0);
+    let mut recorder = Recorder::default();
+    let report = run_with(
+        jobs,
+        BTreeMap::new(),
+        max_parallel,
+        capacity,
+        FailurePolicy::StopOnPublisher,
+        &mut recorder,
+        |_, _, _| {
+            let active = current.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(active, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(30));
+            current.fetch_sub(1, Ordering::SeqCst);
+            Ok(Completion::Done)
+        },
+    )
+    .unwrap();
+    assert!(report.states.values().all(|state| *state == Status::Done));
+    peak.load(Ordering::SeqCst)
+}
+
+#[test]
+fn jobs_sharing_a_deploy_resource_run_one_at_a_time() {
+    let jobs = [
+        job("a", "acme/one", &[]),
+        job("b", "acme/two", &[]),
+        job("c", "acme/three", &[]),
+    ];
+    let shared = capacity(
+        &[
+            ("a", &["concurrency group deploy"]),
+            ("b", &["concurrency group deploy"]),
+        ],
+        &[],
+    );
+    assert_eq!(peak_with(&jobs, &shared, 3), 2);
+    let all = capacity(
+        &[
+            ("a", &["concurrency group deploy"]),
+            ("b", &["concurrency group deploy"]),
+            ("c", &["concurrency group deploy"]),
+        ],
+        &[],
+    );
+    assert_eq!(peak_with(&jobs, &all, 3), 1);
+}
+
+#[test]
+fn jobs_without_a_resource_are_not_serialized() {
+    let jobs = [job("a", "acme/one", &[]), job("b", "acme/two", &[])];
+    assert_eq!(peak_with(&jobs, &Capacity::default(), 2), 2);
+}
+
+#[test]
+fn deploy_slots_let_more_jobs_share_a_resource() {
+    let jobs = [
+        job("a", "acme/one", &[]),
+        job("b", "acme/two", &[]),
+        job("c", "acme/three", &[]),
+    ];
+    let resources = [
+        ("a", &["runner label deploy"][..]),
+        ("b", &["runner label deploy"][..]),
+        ("c", &["runner label deploy"][..]),
+    ];
+    let two = capacity(&resources, &[("runner label deploy", 2)]);
+    assert_eq!(peak_with(&jobs, &two, 3), 2);
+}
+
+#[test]
+fn a_job_waiting_for_a_runner_frees_the_parallel_slot() {
+    let jobs = [
+        job("a", "acme/one", &[]),
+        job("b", "acme/two", &[]),
+        job("c", "acme/three", &[]),
+    ];
+    let shared = capacity(
+        &[("a", &["runner label pool"]), ("b", &["runner label pool"])],
+        &[("runner label pool", 2)],
+    );
+    let started = Mutex::new(Vec::new());
+    let gate_open = AtomicUsize::new(0);
+    let mut recorder = Recorder::default();
+    let report = run_with(
+        &jobs,
+        BTreeMap::new(),
+        2,
+        &shared,
+        FailurePolicy::StopOnPublisher,
+        &mut recorder,
+        |job, _, progress| {
+            started.lock().unwrap().push(job.id.clone());
+            match job.id.as_str() {
+                "a" => {
+                    progress.waiting_for_runner(true).unwrap();
+                    while gate_open.load(Ordering::SeqCst) == 0 {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    progress.waiting_for_runner(false).unwrap();
+                }
+                "c" => {
+                    gate_open.store(1, Ordering::SeqCst);
+                }
+                _ => {
+                    while !started.lock().unwrap().contains(&"c".to_string()) {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
+            }
+            Ok(Completion::Done)
+        },
+    )
+    .unwrap();
+    assert!(report.states.values().all(|state| *state == Status::Done));
+    assert!(started.lock().unwrap().contains(&"c".to_string()));
+}
