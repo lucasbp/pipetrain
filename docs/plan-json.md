@@ -146,8 +146,12 @@ Consumers should switch on `code`, never on `message` or `hint`.
 | `deploys_now` | integer | Items in the plan whose base is not a train branch: the deploys if nothing is bundled. |
 | `deploys_saved` | integer | Sum of `saved` over `bundles`. `0` when there are no bundles. |
 | `deploys_after` | integer | `deploys_now - deploys_saved`: the deploys if every suggestion is applied. |
-| `cache_hits` | integer | Lookups answered by the local cache. `0` with `--no-cache` or `--refresh`. |
+| `cache_hits` | integer | Lookups answered by the local cache, file cache and HTTP cache together. `0` with `--no-cache` or `--refresh`. |
 | `cache_misses` | integer | Lookups the cache could not answer, so they went to GitHub. `0` with `--no-cache`. |
+| `core_requests` | integer | Additive. REST requests spent by this run, 304 answers excluded. |
+| `graphql_requests` | integer | Additive. GraphQL requests spent by this run. |
+| `search_requests` | integer | Additive. Search requests spent by this run. |
+| `not_modified` | integer | Additive. Requests answered `304 Not Modified`; they are refunded and not counted above. |
 | `elapsed_ms` | integer | Milliseconds of wall clock from the start of the command until the data was gathered, before rendering. |
 | `feed_checks` | integer (optional) | Distinct package and version pairs looked up in a feed by `plan --check-feeds`. Omitted when `0`, so a plan without the flag is byte-identical to before. |
 | `hidden_by_author` | integer (optional) | How many PRs (items and skipped) are hidden by the author filter. Omitted when `0`. |
@@ -200,6 +204,10 @@ Consumers should switch on `code`, never on `message` or `hint`.
     "deploys_after": 1,
     "cache_hits": 0,
     "cache_misses": 0,
+    "core_requests": 7,
+    "graphql_requests": 2,
+    "search_requests": 0,
+    "not_modified": 0,
     "elapsed_ms": 14600
   }
 }

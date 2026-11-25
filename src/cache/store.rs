@@ -44,7 +44,7 @@ pub(super) fn write(path: &Path, data: &Value) {
     let _ = write_atomic(path, &bytes);
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(super) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::other("entry path has no parent"))?;

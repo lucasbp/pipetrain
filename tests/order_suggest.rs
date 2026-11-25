@@ -113,6 +113,8 @@ fn lenient_client(base: &str) -> Client {
         max_requests: 50,
         max_per_minute: 1000,
         min_remaining: 0,
+        max_per_second: 1000,
+        ..ApiConfig::default()
     };
     Client::with_base_url(FAKE.to_string(), &cfg, false, base)
 }
@@ -229,6 +231,8 @@ fn two_repos_over_the_fake_server_print_the_block_and_leak_no_token() {
         max_requests: 50,
         max_per_minute: 1000,
         min_remaining: 0,
+        max_per_second: 1000,
+        ..ApiConfig::default()
     };
     let mut client = Client::with_base_url(FAKE.to_string(), &cfg, false, &base);
     let names = names_of(["Acme/Sdk".to_string(), "Acme/Util".to_string()]);

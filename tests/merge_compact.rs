@@ -86,6 +86,7 @@ fn estimate(exceeds: bool) -> ApiEstimate {
 
 fn report(steps: Vec<StepReport>, not_merging: Vec<NotMerging>) -> Report {
     Report {
+        api_usage: Default::default(),
         api_estimate: estimate(false),
         max_parallel: 4,
         summary: Summary::from_steps(&steps),

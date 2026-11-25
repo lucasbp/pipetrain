@@ -56,6 +56,8 @@ fn client(base: &str, token: &str) -> Client {
         max_requests: 50,
         max_per_minute: 1000,
         min_remaining: 0,
+        max_per_second: 1000,
+        ..ApiConfig::default()
     };
     Client::with_base_url(token.to_string(), &cfg, false, base)
 }

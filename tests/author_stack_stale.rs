@@ -119,6 +119,8 @@ fn mine_is_the_login_of_the_token_and_only_flags_select() {
         max_requests: 50,
         max_per_minute: 1000,
         min_remaining: 0,
+        max_per_second: 1000,
+        ..ApiConfig::default()
     };
     let mut client =
         Client::with_base_url("ghp_FAKE0123456789".to_string(), &api, false, &server.base);

@@ -16,14 +16,18 @@ fn api_summary(stats: &Stats) -> String {
         .rate_remaining
         .map(|n| n.to_string())
         .unwrap_or_else(|| "?".to_string());
+    let mut text = format!(
+        "{} requests (core {}, graphql {}, search {})",
+        stats.requests, stats.core_requests, stats.graphql_requests, stats.search_requests
+    );
     if stats.cache_hits > 0 {
-        format!(
-            "{} requests, {} from cache, {left} left",
-            stats.requests, stats.cache_hits
-        )
-    } else {
-        format!("{} requests, {left} left", stats.requests)
+        text.push_str(&format!(", {} from cache", stats.cache_hits));
     }
+    if stats.not_modified > 0 {
+        text.push_str(&format!(", {} not modified", stats.not_modified));
+    }
+    text.push_str(&format!(", {left} left"));
+    text
 }
 
 fn heading(color: &str, title: &str, note: &str) -> String {

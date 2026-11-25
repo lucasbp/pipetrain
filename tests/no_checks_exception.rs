@@ -163,6 +163,7 @@ fn the_compact_dry_run_marks_the_exception_on_the_row() {
         StepReport::new(Kind::Merge, "acme/web#2", Status::Planned, "into master"),
     ];
     let report = Report {
+        api_usage: Default::default(),
         api_estimate: ApiEstimate::default(),
         max_parallel: 4,
         summary: Summary::from_steps(&steps),

@@ -18,6 +18,15 @@ fn header<T: FromStr>(headers: &HeaderMap, name: &str) -> Option<T> {
 }
 
 impl Rate {
+    pub fn unknown(resource: &str) -> Self {
+        Self {
+            limit: None,
+            remaining: None,
+            reset: None,
+            resource: resource.to_string(),
+        }
+    }
+
     pub fn from_headers(headers: &HeaderMap) -> Self {
         Self {
             limit: header(headers, "x-ratelimit-limit"),
