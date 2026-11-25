@@ -54,7 +54,7 @@ One ready PR.
 | `base` | string | Base branch. |
 | `sha` | string | Head commit SHA read at plan time. |
 | `layer` | string or null | Name of the first `[[layer]]` whose `repos` match `org/repo`. `null` when the repo is in no layer. |
-| `scope` | string | Why the PR was discovered: `train`, `shared-branch`, `into-train`, `explicit` or `released`. |
+| `scope` | string | Why the PR was discovered: `train`, `shared-branch`, `into-train`, `explicit`, `released`, `author` or `stack-parent`. `author` is an open, non-draft PR of a login chosen with `--author` or `--mine`; `stack-parent` is a PR added because its head branch is the base of a selected PR. Both values are additive, schema stays `1`. |
 | `gate` | string or null | `"ddl"`, `"infra"` or `null`. |
 | `gate_reason` | string or null | For a gate PR, the first changed path that matched (`ddl_globs` or `infra_globs`), or `repo is listed in deploy.infra_repos`. `null` when `gate` is `null`. |
 | `manual_pause` | boolean | `true` when the PR is a gate: whoever runs the train must stop and confirm before continuing. |
@@ -114,7 +114,7 @@ A file-overlap report between two ready PRs of the same repo: a hint that they m
 | `url` | string | PR web URL. |
 | `author` | string (optional) | The GitHub login of the PR author. Omitted when unknown. |
 | `hidden` | boolean (optional) | `true` when the author filter hides this PR. Omitted otherwise. |
-| `scope` | string | `train`, `shared-branch`, `into-train`, `explicit` or `released`. |
+| `scope` | string | `train`, `shared-branch`, `into-train`, `explicit`, `released`, `author` or `stack-parent`. |
 | `head` | string | The head branch of the skipped PR, so a `shared-branch` skip can be traced to the branch name that matched. |
 | `reasons` | string[] | One or more of: `already merged`, `closed`, `draft`, `changes requested`, `review required`, `not approved`, `checks pending`, `checks failing`, `checks failing: <names>`, `no checks reported`, `merge conflict`, `branch behind its base, update it`, `already in <ref>`, `already in <ref> (same content)`. `branch behind its base, update it` is read from GitHub's `mergeStateStatus` and appears only when it is `BEHIND`, which GitHub reports when branch protection requires the branch to be up to date; a PR with a merge conflict carries `merge conflict` instead. A merged or closed PR carries only that one reason. `already in <ref>` also stands alone, where `<ref>` is the branch that already contains the PR head: its base branch, or `deploy_branch`. `already in <ref> (same content)` stands alone too: every file the PR changes has identical content in `<ref>`, though the commits differ (for example after a squash merge). `checks failing: <names>` lists the failing checks, for example `checks failing: build, test`: sorted, at most 5 names and then `, +N more`; the plain `checks failing` stays when GitHub gives no name. Full merge-state blockers can also add `branch protection blocks merge (BLOCKED)`, `merge conflict (DIRTY)`, `checks are not passing (UNSTABLE)` and `draft (DRAFT)`. UNKNOWN mergeability is a preflight warning rather than a skipped reason. The `already in ` and `checks failing` reasons have a variable part, so match them by the `already in ` and `checks failing` prefixes; the `(same content)` suffix tells the two `already in` forms apart. |
 

@@ -171,6 +171,22 @@ impl Client {
         })
     }
 
+    pub fn open_prs_with_head(&mut self, key: &PrKey, branch: &str) -> Result<Vec<Pr>> {
+        let query = format!(
+            "query($o: String!, $r: String!, $h: String!) {{ repository(owner: $o, name: $r) {{ pullRequests(states: OPEN, headRefName: $h, first: 5) {{ nodes {{ {PR_FIELDS} }} }} }} }}"
+        );
+        let response = self.graphql(
+            &format!("find the open PR whose head is {branch} in {}", key.slug()),
+            &query,
+            json!({ "o": key.org, "r": key.repo, "h": branch }),
+        )?;
+        Ok(response
+            .pointer("/data/repository/pullRequests/nodes")
+            .and_then(Value::as_array)
+            .map(|nodes| nodes.iter().filter_map(parse_pr).collect())
+            .unwrap_or_default())
+    }
+
     pub fn viewer_login(&mut self) -> Result<String> {
         let response = self.graphql(
             "read the token's login",

@@ -218,8 +218,8 @@ pipetrain plan [OPTIONS] [PRS]...
 | `--profile <name>` | Profile to use. Without it the choice follows [the rules below](#profiles). |
 | `--org <org>` | Org to look at. Repeatable. Overrides `orgs` of the selected profile. |
 | `--date <date>` | Train date, instead of today. Accepts the date format of `train_date_format` (default `dd-mm-yyyy`, for example `--date 29-10-2026`) or ISO `yyyy-mm-dd` (`--date 2026-10-29`). |
-| `--mine` | On `plan` and `bundle`. Show only PRs by the token's own login. See [Only your PRs](#only-your-prs). Cannot be combined with `--all-authors`. |
-| `--author <login>` | On `plan` and `bundle`. Show only PRs by this author; repeatable, `@me` is you. Cannot be combined with `--all-authors`. |
+| `--mine` | On `plan` and `bundle`. Select and show only PRs by the token's own login. See [Only your PRs](#only-your-prs). Cannot be combined with `--all-authors`. |
+| `--author <login>` | On `plan` and `bundle`. Select and show only PRs by this author; repeatable, `@me` is you. Cannot be combined with `--all-authors`. |
 | `--all-authors` | On `plan` and `bundle`. Ignore the authors set in the config and show every author. |
 | `--verbose` | Log every API request to stderr. On `merge` it also prints the full detail (per-check lines, URLs, every step) instead of the compact output described in [docs/merge.md](docs/merge.md#what-the-text-output-shows). |
 | `--no-cache` | Neither read nor write the [local cache](#local-cache). Cannot be combined with `--refresh`. |
@@ -555,7 +555,7 @@ orgs = ["globex"]
 
 ### Only your PRs
 
-The plan is always computed with every PR, because the order of your PRs can depend on a PR from someone else. The author filter runs at the end and only hides: the text, the queue and the exit code skip the PRs of other authors, while `--json` keeps them marked `hidden`.
+`--mine` and `--author` also select: on `plan`, `merge` and `bundle` they add every open, non-draft PR of those logins in the orgs of the profile (origin `author`), next to the train, shared branches, `--all` and PRs named on the command line, without duplicates. The org-wide list of open PRs is already read for discovery, so the selection costs no extra search request. A PR that is not ready goes to `SKIPPED` with its cause. A login only selects when it comes from the command line; `authors` in the config keeps only hiding. The plan is always computed with every selected PR, because the order of your PRs can depend on a PR from someone else. The author filter then only hides: the text, the queue and the exit code skip the PRs of other authors, while `--json` keeps them marked `hidden`.
 
 ```
 pipetrain plan --mine

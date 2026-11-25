@@ -29,6 +29,13 @@ impl AuthorFilter {
         }
     }
 
+    pub fn selecting(&self) -> Vec<String> {
+        match self {
+            Self::Only(list) => list.clone(),
+            Self::Config | Self::None => Vec::new(),
+        }
+    }
+
     pub fn effective(&self, cfg: &Config) -> Vec<String> {
         match self {
             Self::Config => cfg.authors.clone(),

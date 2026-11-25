@@ -489,13 +489,13 @@ struct PlanArgs {
     )]
     all: bool,
 
-    #[arg(long, help = "Show only PRs by the token's own login")]
+    #[arg(long, help = "Select and show only PRs by the token's own login")]
     mine: bool,
 
     #[arg(
         long = "author",
         value_name = "LOGIN",
-        help = "Show only PRs by this author; repeatable, @me is you"
+        help = "Select and show only PRs by this author; repeatable, @me is you"
     )]
     authors: Vec<String>,
 
@@ -589,13 +589,13 @@ struct BundleArgs {
     )]
     all: bool,
 
-    #[arg(long, help = "Show only PRs by the token's own login")]
+    #[arg(long, help = "Select and show only PRs by the token's own login")]
     mine: bool,
 
     #[arg(
         long = "author",
         value_name = "LOGIN",
-        help = "Show only PRs by this author; repeatable, @me is you"
+        help = "Select and show only PRs by this author; repeatable, @me is you"
     )]
     authors: Vec<String>,
 
@@ -708,13 +708,13 @@ struct MergeArgs {
     )]
     all: bool,
 
-    #[arg(long, help = "Show only PRs by the token's own login")]
+    #[arg(long, help = "Select and show only PRs by the token's own login")]
     mine: bool,
 
     #[arg(
         long = "author",
         value_name = "LOGIN",
-        help = "Show only PRs by this author; repeatable, @me is you"
+        help = "Select and show only PRs by this author; repeatable, @me is you"
     )]
     authors: Vec<String>,
 

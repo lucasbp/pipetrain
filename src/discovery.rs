@@ -1,10 +1,11 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
+use anyhow::Result;
 use chrono::NaiveDate;
 
 use crate::bundle::is_train_branch;
 use crate::config::{Config, DEFAULT_TRAIN_DATE_FORMAT, render_date};
-use crate::model::{Pr, Question};
+use crate::model::{Pr, PrKey, PrState, Question};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
@@ -13,6 +14,8 @@ pub enum Scope {
     IntoTrain,
     Explicit,
     Released,
+    Author,
+    StackParent,
 }
 
 impl Scope {
@@ -23,6 +26,8 @@ impl Scope {
             Scope::IntoTrain => "into-train",
             Scope::Explicit => "explicit",
             Scope::Released => "released",
+            Scope::Author => "author",
+            Scope::StackParent => "stack-parent",
         }
     }
 
@@ -33,6 +38,8 @@ impl Scope {
             Scope::IntoTrain,
             Scope::Explicit,
             Scope::Released,
+            Scope::Author,
+            Scope::StackParent,
         ]
         .into_iter()
         .find(|scope| scope.as_str() == name)
@@ -97,13 +104,25 @@ fn shared_branches(all: &[Pr], cfg: &Config, train: &str) -> HashSet<String> {
         .collect()
 }
 
-fn classify_scope(pr: &Pr, cfg: &Config, shared: &HashSet<String>, train: &str) -> Option<Scope> {
+fn is_author(pr: &Pr, authors: &[String]) -> bool {
+    !pr.is_draft && authors.iter().any(|a| a.eq_ignore_ascii_case(&pr.author))
+}
+
+fn classify_scope(
+    pr: &Pr,
+    cfg: &Config,
+    shared: &HashSet<String>,
+    train: &str,
+    authors: &[String],
+) -> Option<Scope> {
     if is_train_branch(&pr.head_ref, train) || labelled(pr, cfg) {
         Some(Scope::Train)
     } else if shared.contains(&pr.head_ref) {
         Some(Scope::SharedBranch)
     } else if is_train_branch(&pr.base_ref, train) {
         Some(Scope::IntoTrain)
+    } else if is_author(pr, authors) {
+        Some(Scope::Author)
     } else {
         None
     }
@@ -169,10 +188,19 @@ pub(crate) fn refresh_questions(out: &mut Discovered, train: &str) {
 }
 
 pub fn discover(all: Vec<Pr>, cfg: &Config, train: &str) -> Discovered {
+    discover_authored(all, cfg, train, &[])
+}
+
+pub fn discover_authored(
+    all: Vec<Pr>,
+    cfg: &Config,
+    train: &str,
+    authors: &[String],
+) -> Discovered {
     let shared = shared_branches(&all, cfg, train);
     let mut out = Discovered::default();
     for pr in all {
-        let Some(scope) = classify_scope(&pr, cfg, &shared, train) else {
+        let Some(scope) = classify_scope(&pr, cfg, &shared, train, authors) else {
             continue;
         };
         let reasons = cfg.blockers(&pr);
@@ -224,4 +252,108 @@ pub fn explicit(prs: Vec<Pr>, cfg: &Config) -> Discovered {
         }
     }
     out
+}
+
+pub fn add_authored(out: &mut Discovered, pool: &[Pr], cfg: &Config, authors: &[String]) {
+    let mut seen: HashSet<PrKey> = out
+        .ready
+        .iter()
+        .map(|(pr, _)| pr.key.clone())
+        .chain(out.skipped.iter().map(|s| s.pr.key.clone()))
+        .collect();
+    for pr in pool {
+        if !is_author(pr, authors) || !seen.insert(pr.key.clone()) {
+            continue;
+        }
+        push_classified(out, pr.clone(), Scope::Author, cfg);
+    }
+}
+
+fn push_classified(out: &mut Discovered, pr: Pr, scope: Scope, cfg: &Config) {
+    let reasons = cfg.blockers(&pr);
+    if reasons.is_empty() {
+        out.ready.push((pr, scope));
+    } else {
+        out.skipped.push(Skipped { pr, scope, reasons });
+    }
+}
+
+fn lands_on_a_branch_of_its_own(pr: &Pr, cfg: &Config) -> bool {
+    let base = pr.base_ref.to_lowercase();
+    !base.is_empty()
+        && !base.eq_ignore_ascii_case(&pr.default_branch)
+        && !PLAIN_BRANCHES.contains(&base.as_str())
+        && !base.starts_with(&cfg.train_prefix.to_lowercase())
+}
+
+fn same_repo(a: &Pr, b: &Pr) -> bool {
+    a.key.slug().eq_ignore_ascii_case(&b.key.slug())
+}
+
+pub fn add_stack_parents(
+    out: &mut Discovered,
+    cfg: &Config,
+    mut find: impl FnMut(&Pr) -> Result<Vec<Pr>>,
+) -> Result<()> {
+    let mut seen: HashSet<PrKey> = out
+        .ready
+        .iter()
+        .map(|(pr, _)| pr.key.clone())
+        .chain(out.skipped.iter().map(|s| s.pr.key.clone()))
+        .collect();
+    let mut queue: VecDeque<Pr> = out
+        .ready
+        .iter()
+        .map(|(pr, _)| pr.clone())
+        .chain(out.skipped.iter().map(|s| s.pr.clone()))
+        .collect();
+    while let Some(child) = queue.pop_front() {
+        if !lands_on_a_branch_of_its_own(&child, cfg) {
+            continue;
+        }
+        let parents: Vec<Pr> = find(&child)?
+            .into_iter()
+            .filter(|p| {
+                p.key != child.key
+                    && same_repo(p, &child)
+                    && p.head_ref == child.base_ref
+                    && p.state == PrState::Open
+            })
+            .collect();
+        let [parent] = parents.as_slice() else {
+            continue;
+        };
+        if !seen.insert(parent.key.clone()) {
+            continue;
+        }
+        push_classified(out, parent.clone(), Scope::StackParent, cfg);
+        queue.push_back(parent.clone());
+    }
+    hold_children_of_unready_parents(out);
+    Ok(())
+}
+
+fn hold_children_of_unready_parents(out: &mut Discovered) {
+    loop {
+        let held = out.ready.iter().position(|(child, _)| {
+            out.skipped.iter().any(|s| {
+                s.pr.key != child.key && same_repo(&s.pr, child) && s.pr.head_ref == child.base_ref
+            })
+        });
+        let Some(index) = held else {
+            return;
+        };
+        let (pr, scope) = out.ready.remove(index);
+        let parent = out
+            .skipped
+            .iter()
+            .find(|s| s.pr.key != pr.key && same_repo(&s.pr, &pr) && s.pr.head_ref == pr.base_ref)
+            .map(|s| s.pr.key.to_string())
+            .unwrap_or_default();
+        out.skipped.push(Skipped {
+            pr,
+            scope,
+            reasons: vec![format!("stack parent {parent} not ready")],
+        });
+    }
 }

@@ -2051,6 +2051,26 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
         built.profile.as_ref().map(|profile| profile.name.as_str()),
     )?;
     let mut store = Store::open(Some(state_path.clone()))?;
+    let selection: std::collections::BTreeSet<String> = built
+        .items
+        .iter()
+        .map(|item| item.id.to_lowercase())
+        .chain(
+            built
+                .skipped
+                .iter()
+                .map(|skipped| skipped.id.to_lowercase()),
+        )
+        .collect();
+    let archival = store.archive_stale_queue(
+        &selection,
+        cfg.merge.stale_pending_hours,
+        opts.apply,
+        chrono::Utc::now(),
+    )?;
+    if let Some(notice) = archival.notice(&state_path) {
+        eprintln!("{notice}");
+    }
     if !json && opts.plan.progress {
         eprintln!("state: {}", state_path.display());
     }

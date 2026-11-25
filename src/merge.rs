@@ -8,9 +8,11 @@ use serde::{Deserialize, Serialize};
 use crate::emit::PAUSE_LINE;
 use crate::github::Run;
 
+mod archive;
 pub mod category;
 mod storage;
 
+pub use archive::{Archival, ArchivedState, archived_beside};
 pub use storage::{PendingPreview, StatePreview, resolve_state_path};
 
 pub const SCHEMA: u32 = 2;
