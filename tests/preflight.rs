@@ -215,16 +215,64 @@ fn failed_checks_keep_names_states_and_both_kinds_of_urls_in_reports_and_text() 
         ] {
             assert!(text.contains(value), "{text}");
         }
-        if command == "merge" {
-            let compact = String::from_utf8(fixture.run(command, &[1], &[]).stdout).unwrap();
-            assert!(!compact.contains("https://"), "{compact}");
-            assert!(!compact.contains("ERROR"), "{compact}");
+        let compact = String::from_utf8(fixture.run(command, &[1], &[]).stdout).unwrap();
+        assert!(!compact.contains("https://"), "{compact}");
+        assert!(!compact.contains("ERROR"), "{compact}");
+        assert!(compact.contains("blocked"), "{compact}");
+        if command == "plan" {
+            assert!(compact.contains("api#1  checks failing"), "{compact}");
+            assert!(!compact.contains("ci/build"), "{compact}");
+            assert!(!compact.contains("PREFLIGHT"), "{compact}");
+            assert!(compact.contains("--verbose"), "{compact}");
+        } else {
             assert!(
                 compact.contains("checks ci/build, package-version failing"),
                 "{compact}"
             );
-            assert!(compact.contains("blocked"), "{compact}");
         }
+    }
+}
+
+#[test]
+fn compact_plan_shows_the_sequence_and_keeps_automatic_outputs_separate() {
+    let mut child = node(1, "CLEAN", "main");
+    child["body"] = json!("Depends-On: acme/api#2");
+    let mut waiting = node(3, "CLEAN", "main");
+    waiting["reviewDecision"] = json!("REVIEW_REQUIRED");
+    let fixture = Fixture::new(vec![child, node(2, "CLEAN", "main"), waiting]);
+    let ids = [1, 2, 3];
+    let compact = String::from_utf8(fixture.run("plan", &ids, &[]).stdout).unwrap();
+    let parent_at = compact
+        .find("step 1  api#2")
+        .unwrap_or_else(|| panic!("{compact}"));
+    let child_at = compact
+        .find("step 2  api#1")
+        .unwrap_or_else(|| panic!("{compact}"));
+    assert!(parent_at < child_at, "{compact}");
+    assert!(compact[child_at..].contains("after api#2"), "{compact}");
+    assert!(compact.contains("waiting  api#3"), "{compact}");
+    assert!(!compact.contains("WHERE IT CAME FROM"), "{compact}");
+    let verbose = String::from_utf8(fixture.run("plan", &ids, &["--verbose"]).stdout).unwrap();
+    assert!(verbose.contains("WHERE IT CAME FROM"), "{verbose}");
+    assert!(verbose.contains("PREFLIGHT"), "{verbose}");
+    let queue = fixture.run("plan", &ids, &["--emit", "queue"]).stdout;
+    assert_eq!(
+        queue,
+        fixture
+            .run("plan", &ids, &["--emit", "queue", "--verbose"])
+            .stdout
+    );
+    let json = fixture.json("plan", &ids, &[]);
+    let verbose_json = fixture.json("plan", &ids, &["--verbose"]);
+    for key in [
+        "schema",
+        "items",
+        "preflight",
+        "stages",
+        "skipped",
+        "questions",
+    ] {
+        assert_eq!(json[key], verbose_json[key], "{key}");
     }
 }
 

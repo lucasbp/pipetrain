@@ -539,7 +539,10 @@ struct PlanArgs {
     )]
     date: Option<String>,
 
-    #[arg(long, help = "Log every API request to stderr")]
+    #[arg(
+        long,
+        help = "Show the full plan, causes and checks; log API requests to stderr"
+    )]
     verbose: bool,
 
     #[arg(

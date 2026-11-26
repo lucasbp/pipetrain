@@ -11,6 +11,9 @@ use crate::planner::{Item, Rule, is_late_rule};
 use crate::stage_view;
 use crate::style::{bold, dim, green, paint, red, yellow};
 
+mod compact;
+pub use compact::compact;
+
 fn api_summary(stats: &Stats) -> String {
     let left = stats
         .rate_remaining
@@ -229,6 +232,26 @@ fn after_lines(out: &mut String, item: &Item, names: &Names, indent: &str) {
             dim("after"),
             bold(&names.short(&dep.id)),
             dim(&format!("({}: {})", dep.rule.as_str(), dep.reason))
+        );
+    }
+}
+
+fn feed_checks(out: &mut String, plan: &Plan) {
+    let mut checks = BTreeSet::new();
+    for item in plan.items.iter().filter(|item| !item.hidden) {
+        for dep in &item.after {
+            if let (Some(package), Some(version)) = (&dep.package, &dep.version)
+                && (dep.published.is_some() || dep.feed_error.is_some())
+            {
+                checks.insert((package, version, dep.published, dep.feed_error.as_deref()));
+            }
+        }
+    }
+    for (package, version, published, error) in checks {
+        let _ = writeln!(
+            out,
+            "  feed  {package} {version}{}",
+            crate::emit::feed_suffix(published, error)
         );
     }
 }
@@ -683,6 +706,7 @@ pub fn text(plan: &Plan) -> String {
         }
     }
 
+    feed_checks(&mut out, plan);
     let preflight = plan.preflight_lines();
     if !preflight.is_empty() {
         let _ = writeln!(out, "\n{}", bold("PREFLIGHT"));

@@ -6,6 +6,12 @@ The guiding principle is **when in doubt, serial**. Waiting is cheap and a wrong
 
 Code: `src/planner.rs` (rules, graph, stages, lanes), `src/planner/order.rs` (the `order` rule), `src/planner/dependency.rs` (the `dependency` rule), `src/manifest.rs` (manifest parsing: published and referenced package ids, with `src/cargo.rs`, `src/pyproject.rs` and `src/gomod.rs` for Cargo, Python and Go), `src/discovery.rs` (which PRs are in), `src/contained.rs` (PRs already in the base or the train by commit), `src/content.rs` (same, by file content), `src/bundle.rs` (deploy bundling suggestion), `src/detect.rs` (Depends-On and package bumps), `src/config.rs` (gate, layer, target matching).
 
+## Reading the text plan
+
+`pipetrain plan` lists the selected PRs by step. Each row shows the PR and its title, gate confirmation, shared deploy resource or first direct predecessor when applicable. A step with several predecessors shows how many more there are. Skipped PRs show one cause and whether the PR is waiting or blocked. Open questions include the suggested fix. Preflight warnings and configured exceptions remain visible.
+
+With `--check-feeds`, both text views show the observed publication status of the requested package versions. Use `pipetrain plan --verbose` for selection criteria, parallel lanes, complete dependency and preflight details, individual checks and their URLs, conflicts and bundle instructions. API requests are logged to stderr. The output formats for automation are documented in [plan JSON](plan-json.md) and [queue output](queue-output.md).
+
 ## What goes into the plan
 
 Only PRs that are ready: not merged, not closed, not draft, approved (or with no review decision at all, see below; not required at all with `require_approval = false`), checks green and no merge conflict. A PR that fails any of these shows up under `skipped` with the reasons and takes no part in ordering.

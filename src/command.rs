@@ -449,11 +449,13 @@ pub fn plan_json(opts: &PlanOptions) -> Result<String> {
     plan_text(&built)
 }
 
-fn emit(built: &Plan, json: bool) -> Result<()> {
+fn emit(built: &Plan, json: bool, verbose: bool) -> Result<()> {
     if json {
         println!("{}", plan_text(built)?);
-    } else {
+    } else if verbose {
         anstream::print!("{}", render::text(built));
+    } else {
+        anstream::print!("{}", render::compact(built));
     }
     Ok(())
 }
@@ -471,14 +473,14 @@ fn print_queue(built: &Plan) {
     }
 }
 
-fn deliver(built: &Plan, json: bool, mode: Option<Emit>) -> Result<i32> {
+fn deliver(built: &Plan, json: bool, mode: Option<Emit>, verbose: bool) -> Result<i32> {
     match mode {
         Some(Emit::Queue) => {
             print_queue(built);
             Ok(emit::exit_code(built))
         }
         None => {
-            emit(built, json)?;
+            emit(built, json, verbose)?;
             Ok(0)
         }
     }
@@ -486,7 +488,7 @@ fn deliver(built: &Plan, json: bool, mode: Option<Emit>) -> Result<i32> {
 
 pub fn plan(opts: PlanOptions) -> Result<i32> {
     let (built, _) = build_plan(&opts)?;
-    let code = deliver(&built, opts.json, opts.emit)?;
+    let code = deliver(&built, opts.json, opts.emit, opts.verbose)?;
     Ok(if opts.strict && !built.has_eligible() {
         emit::EXIT_NO_ELIGIBLE
     } else {
