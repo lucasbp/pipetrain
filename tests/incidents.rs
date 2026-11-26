@@ -1,4 +1,6 @@
 mod common;
+#[path = "common/interruption.rs"]
+mod interruption;
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -40,6 +42,7 @@ struct Script {
     blocked: bool,
     filtered: bool,
     failed: bool,
+    deploying: bool,
     later: bool,
 }
 
@@ -131,6 +134,12 @@ impl Script {
             return (200, json!({"status": "ahead", "ahead_by": 1}));
         }
         if line.contains("/actions/runs?") {
+            if self.deploying {
+                let mut running = workflow_run("success");
+                running["status"] = json!("in_progress");
+                running["conclusion"] = Value::Null;
+                return (200, json!({"total_count": 1, "workflow_runs": [running]}));
+            }
             let conclusion = if self.failed
                 && !(self.later && line.contains(&format!("head_sha={}", "d".repeat(40))))
             {
@@ -270,8 +279,9 @@ impl Fixture {
         (outcome, phases, slept.get())
     }
 
-    fn cli(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_pipetrain"))
+    fn command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_pipetrain"));
+        command
             .args(args)
             .args(["--config", "config.toml", "--no-cache", "--no-progress"])
             .current_dir(self.directory.path())
@@ -280,10 +290,77 @@ impl Fixture {
             .env("PIPETRAIN_API_URL", &self.server.base)
             .env("PIPETRAIN_NO_UPDATE_CHECK", "1")
             .env("PIPETRAIN_LOG", "0")
-            .stdin(Stdio::null())
-            .output()
-            .unwrap()
+            .stdin(Stdio::null());
+        command
     }
+
+    fn cli(&self, args: &[&str]) -> Output {
+        self.command(args).output().unwrap()
+    }
+}
+
+#[test]
+fn interrupted_cli_resumes_the_accepted_merge_in_another_process() {
+    let fixture = Fixture::new(Script {
+        deploying: true,
+        ..Default::default()
+    });
+    let target = "acme/api#1";
+    let args = ["merge", target, "--apply", "--yes", "--json"];
+    let sha = interruption::interrupt_deploy(
+        &mut fixture.command(&args),
+        &fixture.directory.join("state.json"),
+        target,
+        Duration::from_secs(30),
+    );
+    assert_eq!(sha, merged_sha(1));
+    let saved = fixture.store().state;
+    assert_eq!(saved.pending.len(), 1);
+    assert_eq!(saved.pending[0].id, target);
+    assert_eq!(saved.pending[0].sha.as_ref(), Some(&sha));
+
+    let report = |args: &[&str]| -> Value {
+        let output = fixture.cli(args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+    let preview = report(&["merge", target, "--json"]);
+    assert_eq!(preview["steps"].as_array().unwrap().len(), 1);
+    assert_eq!(preview["steps"][0]["kind"], "resume");
+    assert_eq!(preview["steps"][0]["target"], target);
+    assert_eq!(preview["steps"][0]["status"], "planned");
+    fixture.script.lock().unwrap().deploying = false;
+    let resumed = report(&args);
+    assert_eq!(resumed["steps"].as_array().unwrap().len(), 1);
+    let step = &resumed["steps"][0];
+    assert_eq!(step["kind"], "resume");
+    assert_eq!(step["target"], target);
+    assert_eq!(step["status"], "done");
+    assert_eq!(step["merge_sha"], sha);
+    assert_eq!(step["expected_runs"][0]["conclusion"], "success");
+    assert_eq!(step["deploy_outcome"], "confirmed");
+    assert_eq!(resumed["summary"]["merged"], 0);
+    let writes: Vec<_> = fixture
+        .server
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|request| {
+            let line = request.lines().next().unwrap();
+            (!line.starts_with("GET ") && !line.starts_with("POST /graphql "))
+                .then(|| line.to_owned())
+        })
+        .collect();
+    assert_eq!(writes, ["PUT /repos/acme/api/pulls/1/merge HTTP/1.1"]);
+    let settled = fixture.store().state;
+    assert_eq!(settled.queue_id, saved.queue_id);
+    assert!(settled.pending.is_empty());
+    assert!(settled.active_jobs.is_empty());
 }
 
 #[test]

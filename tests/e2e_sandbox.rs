@@ -1,3 +1,6 @@
+#[path = "common/interruption.rs"]
+mod interruption;
+
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -587,7 +590,7 @@ impl Sandbox {
         pr
     }
 
-    fn cli(&self, args: &[&str], merge: bool) -> Output {
+    fn command(&self, args: &[&str], merge: bool) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_pipetrain"));
         command
             .args(args)
@@ -608,7 +611,11 @@ impl Sandbox {
         if merge {
             command.args(["--no-cache", "--no-progress"]);
         }
-        execute(&mut command, Duration::from_secs(240)).unwrap()
+        command
+    }
+
+    fn cli(&self, args: &[&str], merge: bool) -> Output {
+        execute(&mut self.command(args, merge), Duration::from_secs(240)).unwrap()
     }
 
     fn merge(&self, prs: &[&Pull], code: i32) -> (Value, Duration) {
@@ -617,7 +624,7 @@ impl Sandbox {
         (report, elapsed)
     }
 
-    fn merge_with_admin(&self, prs: &[&Pull], code: i32, admin: bool) -> (Value, Duration) {
+    fn merge_command(&self, prs: &[&Pull], admin: bool) -> Command {
         assert!(!prs.is_empty(), "merge requires explicit sandbox PRs");
         let references: Vec<_> = prs
             .iter()
@@ -636,8 +643,16 @@ impl Sandbox {
             args.push("--admin");
         }
         args.extend(references.iter().map(String::as_str));
+        self.command(&args, true)
+    }
+
+    fn merge_with_admin(&self, prs: &[&Pull], code: i32, admin: bool) -> (Value, Duration) {
         let started = Instant::now();
-        let output = self.cli(&args, true);
+        let output = execute(
+            &mut self.merge_command(prs, admin),
+            Duration::from_secs(240),
+        )
+        .unwrap();
         let elapsed = started.elapsed();
         assert_exit(&output, code);
         let report: Value = serde_json::from_slice(&output.stdout).unwrap();
@@ -900,14 +915,45 @@ fn e2e_api_expected_deploy() {
         Some(file["sha"].as_str().unwrap()),
     );
     let pr = sandbox.open(API, &branch);
-    let (report, _) = sandbox.merge(&[&pr], 0);
-    let step = step(&report, "merge", &pr, "done");
+    let sha = interruption::interrupt_deploy(
+        &mut sandbox.merge_command(&[&pr], false),
+        &sandbox.directory.join("state.json"),
+        &pr.reference(),
+        Duration::from_secs(240),
+    );
+    assert_sha(&sha);
+    let pending = sandbox.state();
+    assert_eq!(pending["pending"].as_array().unwrap().len(), 1);
+    assert_eq!(pending["pending"][0]["id"], pr.reference());
+    assert_eq!(pending["pending"][0]["sha"], sha);
+    assert_eq!(
+        pending["pending"][0]["deploy_prediction"]["status"],
+        "expected"
+    );
+    let live = read(API, &format!("pulls/{}", pr.number));
+    assert_eq!(live["merged"], true);
+    assert_eq!(live["merge_commit_sha"], sha);
+    let output = execute(
+        sandbox.merge_command(&[&pr], false).arg("--verbose"),
+        Duration::from_secs(240),
+    )
+    .unwrap();
+    assert_exit(&output, 0);
+    let trace = String::from_utf8_lossy(&output.stderr);
+    assert!(trace.contains(&format!("GET /repos/{API}/actions/runs?head_sha={sha}")));
+    assert!(!trace.contains("PUT /repos/"));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["steps"].as_array().unwrap().len(), 1);
+    let step = step(&report, "resume", &pr, "done");
+    assert_eq!(step["merge_sha"], sha);
+    assert_eq!(report["summary"]["merged"], 0);
     confirmed(step);
     assert_eq!(report["summary"]["deploy_confirmed"], 1);
     assert_eq!(
         wait_run(API, step["merge_sha"].as_str().unwrap()),
         "success"
     );
+    assert_eq!(main_tip(API), sha);
     sandbox.settled();
 }
 

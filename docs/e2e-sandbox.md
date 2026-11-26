@@ -55,7 +55,14 @@ and the manual Actions waiter a three minute limit with three second polling.
 The guarded check-run waiter has the same three minute limit and polling interval;
 it waits for checks to appear and for all of them to complete.
 
-Recovery selects the already merged fix PR B explicitly. Discovery reports it
+The expected API deploy case kills its own merge subprocess after the state
+file contains the accepted merge SHA and the expected workflow prediction.
+The harness stays alive for cleanup. It checks the pending record with
+`state show`, verifies the SHA on GitHub, then starts another CLI process using
+the same state file and PR. The resumed request trace must show deploy reads
+at that SHA and zero merge PUTs. The successful run settles the pending record.
+
+Web recovery selects the already merged fix PR B explicitly. Discovery reports it
 under `not_merging` as already merged, while pending A is resumed from the same
 state file. No new merge is scheduled. The later SHA and run evidence must match
 both the resume resolution and its single audit entry.
