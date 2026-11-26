@@ -62,14 +62,15 @@ fn later(
         if !complete || evidence.is_empty() || evidence.iter().any(|run| run.html_url.is_empty()) {
             bail!("later SHA {tip} lacks complete workflow run evidence; runs: {urls}");
         }
-        if settled == Some(count) {
+        let observed = (count, crate::merge::settled_ids(&runs, prediction));
+        if settled.as_ref() == Some(&observed) {
             return Ok(Resolution {
                 status: AuditAction::ResolvedByLaterDeploy,
                 sha: tip,
                 runs: evidence,
             });
         }
-        settled = Some(count);
+        settled = Some(observed);
         if poll == 0 {
             (hooks.sleep)(Duration::from_secs(env.cfg.merge.poll_seconds.max(1)));
         }

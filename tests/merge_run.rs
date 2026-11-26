@@ -608,9 +608,14 @@ fn respond(script: &Mutex<Script>, line: &str, payload: &str) -> (u16, Value) {
             .run_readings
             .pop_front()
             .unwrap_or_else(|| script.runs_by_sha.get(sha).unwrap_or(&script.runs).clone());
+        let page = line
+            .split_once("&page=")
+            .map_or(1, |(_, page)| page.parse::<usize>().unwrap());
+        let total = script.run_total.unwrap_or(runs.len() as u64);
+        let page_runs: Vec<_> = runs.into_iter().skip((page - 1) * 100).take(100).collect();
         return (
             200,
-            json!({"total_count": script.run_total.unwrap_or(runs.len() as u64), "workflow_runs": runs}),
+            json!({"total_count": total, "workflow_runs": page_runs}),
         );
     }
     (404, json!({"message": "not found"}))
@@ -3910,6 +3915,88 @@ fn chain_of_known_but_excluded_workflow_is_not_expected() {
     assert_eq!(run.step(0).status, Status::Done);
     assert_eq!(run.step(0).expected_runs.len(), 1);
     assert!(state.reopen().state.pending.is_empty());
+}
+
+#[test]
+fn deploy_on_page_two_is_confirmed_only_after_two_complete_polls() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    rig.script().runs = paginated_deploy(101, "success");
+    let run = short_deploy(&mut rig);
+    assert_eq!(
+        run.step(0).status,
+        Status::Done,
+        "{} GETs: {}",
+        rig.polls(),
+        run.said(0)
+    );
+    assert_eq!(rig.polls(), 4);
+    assert_eq!(run.step(0).expected_runs.len(), 1);
+    assert_eq!(rig.puts().len(), 1);
+    assert!(state.reopen().state.pending.is_empty());
+}
+
+fn paginated_deploy(id: u64, conclusion: &str) -> Vec<Value> {
+    let mut runs: Vec<_> = (1..=100)
+        .map(|id| {
+            let mut run = run_with(id, 1, "completed", Some("success"));
+            run["path"] = json!(".github/workflows/aux.yml");
+            run
+        })
+        .collect();
+    runs.push(run_with(id, 2, "completed", Some(conclusion)));
+    runs
+}
+
+#[test]
+fn a_replacement_on_the_second_page_restarts_confirmation_or_fails() {
+    for (conclusion, status, requests) in
+        [("success", Status::Done, 6), ("failure", Status::Failed, 4)]
+    {
+        let mut rig = Rig::new("");
+        let first = paginated_deploy(101, "success");
+        rig.script().run_readings = [first.clone(), first].into();
+        rig.script().runs = paginated_deploy(102, conclusion);
+        let run = short_deploy(&mut rig);
+        assert_eq!(run.step(0).status, status);
+        assert_eq!(rig.polls(), requests);
+    }
+}
+
+#[test]
+fn a_later_page_error_resets_confirmation_and_preserves_visible_failure() {
+    let mut rig = Rig::new("");
+    rig.script().runs = paginated_deploy(101, "success");
+    rig.script().run_errors = [200, 200, 200, 503].into();
+    let run = rig.go(&plan_on(&[1]));
+    assert_eq!(run.step(0).status, Status::Done);
+    assert_eq!(rig.polls(), 8);
+    let mut rig = Rig::new("");
+    let mut runs = paginated_deploy(101, "success");
+    runs.swap(0, 100);
+    runs[0]["conclusion"] = json!("failure");
+    rig.script().runs = runs;
+    rig.script().run_errors = [200, 503].into();
+    let run = short_deploy(&mut rig);
+    assert_eq!(run.step(0).status, Status::Failed);
+    assert_eq!(rig.polls(), 2);
+    assert!(run.said(0).contains("ended as failure"));
+}
+
+#[test]
+fn a_slow_page_cannot_start_another_read_after_the_deploy_deadline() {
+    let mut rig = Rig::new("");
+    let state = FilterState::attach(&mut rig);
+    rig.script().runs = paginated_deploy(101, "success");
+    rig.script().http_elapsed.insert(
+        "GET /repos/acme/api/actions/runs?".into(),
+        Duration::from_secs(3),
+    );
+    let run = short_deploy(&mut rig);
+    assert_eq!(run.step(0).status, Status::Stopped);
+    assert_eq!(rig.polls(), 1);
+    assert_eq!(run.slept, Duration::ZERO);
+    assert_eq!(state.reopen().state.pending.len(), 1);
 }
 
 #[test]

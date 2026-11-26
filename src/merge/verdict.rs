@@ -11,6 +11,26 @@ pub enum Verdict {
     Skipped(usize),
 }
 
+pub(crate) fn settled_ids(
+    runs: &[Run],
+    prediction: Option<&crate::workflows::PushRuns>,
+) -> Vec<u64> {
+    let mut ids: Vec<_> = runs
+        .iter()
+        .filter(|run| match prediction {
+            Some(crate::workflows::PushRuns::Expected {
+                workflows,
+                chained_workflows,
+                ..
+            }) => workflows.contains(&run.path) || chained_workflows.contains(&run.path),
+            _ => true,
+        })
+        .map(|run| run.id)
+        .collect();
+    ids.sort_unstable();
+    ids
+}
+
 fn same_workflow(a: &Run, b: &Run) -> bool {
     if a.workflow_id != 0 || b.workflow_id != 0 {
         a.workflow_id == b.workflow_id

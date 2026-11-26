@@ -20,6 +20,7 @@ pub use report::{
     Summary,
 };
 pub use storage::{PendingPreview, StatePreview, resolve_state_path};
+pub(crate) use verdict::settled_ids;
 pub use verdict::{Verdict, judge, judge_expected};
 
 pub const SCHEMA: u32 = 2;

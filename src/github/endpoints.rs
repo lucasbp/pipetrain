@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
@@ -728,23 +728,73 @@ impl Client {
         sha: &str,
         push_only: bool,
     ) -> Result<(Vec<Run>, bool), ApiError> {
-        let event = if push_only { "&event=push" } else { "" };
-        let path = format!("/repos/{slug}/actions/runs?head_sha={sha}{event}&per_page=100");
-        let body = self
-            .get(&path)?
-            .into_body(&path)
-            .map_err(|error| self.redact(error))?;
-        let runs: Vec<Run> = body
-            .get("workflow_runs")
-            .and_then(Value::as_array)
-            .map(|runs| runs.iter().map(parse_run).collect())
-            .unwrap_or_default();
-        let complete = body.get("workflow_runs").is_some_and(Value::is_array)
-            && body
-                .get("total_count")
-                .and_then(Value::as_u64)
-                .map_or(runs.len() < 100, |total| total == runs.len() as u64);
+        let mut runs = Vec::new();
+        let complete = self.read_run_pages(slug, sha, push_only, &mut runs, || true)?;
         Ok((runs, complete))
+    }
+
+    pub(crate) fn read_run_pages(
+        &mut self,
+        slug: &str,
+        sha: &str,
+        push_only: bool,
+        runs: &mut Vec<Run>,
+        time_left: impl Fn() -> bool,
+    ) -> Result<bool, ApiError> {
+        let event = if push_only { "&event=push" } else { "" };
+        let first = format!("/repos/{slug}/actions/runs?head_sha={sha}{event}&per_page=100");
+        let mut path = first.clone();
+        let mut ids = BTreeSet::new();
+        let mut first_total = None;
+        for page in 1..=10 {
+            if !time_left() {
+                break;
+            }
+            let body = self
+                .get(&path)?
+                .into_body(&path)
+                .map_err(|error| self.redact(error))?;
+            let Some(entries) = body["workflow_runs"].as_array() else {
+                break;
+            };
+            let total = body["total_count"].as_u64();
+            if page == 1 {
+                first_total = total;
+            }
+            let mut valid = entries.len() <= 100
+                && total == first_total
+                && (body.get("total_count").is_none() || total.is_some());
+            for entry in entries {
+                let run = parse_run(entry);
+                if entry
+                    .get("head_sha")
+                    .is_some_and(|value| value.as_str() != Some(sha))
+                {
+                    valid = false;
+                    continue;
+                }
+                valid &= !run.status.is_empty() && (push_only || !run.path.is_empty());
+                if run.id != 0 {
+                    valid &= ids.insert(run.id);
+                }
+                runs.push(run);
+            }
+            let read = runs.len() as u64;
+            if !valid || total.is_some_and(|count| read > count) {
+                break;
+            }
+            if page > 1 && ids.len() != runs.len() {
+                break;
+            }
+            if total == Some(read) || entries.len() < 100 {
+                return Ok(total.is_none_or(|count| count == read));
+            }
+            if ids.len() != runs.len() {
+                break;
+            }
+            path = format!("{first}&page={}", page + 1);
+        }
+        Ok(false)
     }
 
     pub fn refresh_runs(&mut self, slug: &str, known: &[Run]) -> Result<Vec<Run>, ApiError> {
