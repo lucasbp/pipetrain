@@ -1,5 +1,5 @@
 use super::{ExactFeed, PublisherExecution, PublisherRun};
-use crate::command::feed::{Check, Checker};
+use crate::feed::registry::{Check, Checker};
 use crate::github::Client;
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Duration};

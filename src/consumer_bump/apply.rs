@@ -5,10 +5,10 @@ use regex::Regex;
 use serde_json::{Value, json};
 
 use super::backend::{ConsumerRemote, GithubRemote};
+use super::pin::{Status, classify};
 use super::{
     BumpGateway, Consumer, RestoreMode, RestoreSettings, ensure_head, pin_commit_push, safe_path,
 };
-use crate::command::bump::{Status, classify};
 use crate::feed::Ecosystem;
 use crate::github::Client;
 
