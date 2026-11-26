@@ -4,6 +4,9 @@ use std::collections::BTreeMap;
 
 use super::{Ecosystem, FeedOptions, Fetched, Outcome, Session};
 
+mod retractions;
+pub(super) use retractions::exclude_go_retractions;
+
 #[derive(Deserialize)]
 struct CrateRelease {
     name: String,
@@ -112,6 +115,29 @@ struct GoInfo {
     version: String,
 }
 
+pub(super) fn validate_version(ecosystem: Ecosystem, version: Option<&str>) -> Result<()> {
+    let Some(version) = version else {
+        return Ok(());
+    };
+    match ecosystem {
+        Ecosystem::Cargo => {
+            semver::Version::parse(version)
+                .context("Cargo feed checks require an exact major.minor.patch version")?;
+        }
+        Ecosystem::Pypi => {
+            version
+                .parse::<pep440_rs::Version>()
+                .context("PyPI feed checks require an exact PEP 440 version")?;
+        }
+        Ecosystem::Go => {
+            semver::Version::parse(version.strip_prefix('v').unwrap_or(version))
+                .context("Go feed checks require an exact module version")?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn go_versions(session: &Session, base: &str, opts: &FeedOptions) -> Result<Outcome<Vec<String>>> {
     let module = go_path(&opts.package)?;
     let root = format!("{base}/{module}");
@@ -122,9 +148,6 @@ fn go_versions(session: &Session, base: &str, opts: &FeedOptions) -> Result<Outc
             format!("v{v}")
         }
     });
-    if let Some(v) = &requested {
-        go_version(v)?;
-    }
     let (mut versions, listed) =
         match session.get_body(Ecosystem::Go, &format!("{root}/@v/list"), |body| {
             let text = body.read_to_string()?;

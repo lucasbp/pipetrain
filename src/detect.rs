@@ -253,12 +253,12 @@ pub fn bumped_packages(files: &[ChangedFile]) -> BTreeSet<String> {
 pub(crate) fn source_override<'a>(
     ecosystem: crate::feed::Ecosystem,
     package: &str,
-    lines: impl Iterator<Item = &'a str>,
+    mut lines: impl Iterator<Item = &'a str>,
 ) -> bool {
     use crate::feed::Ecosystem;
     static SOURCE_KEY: OnceLock<Regex> = OnceLock::new();
     let key = regex(&SOURCE_KEY, r"(?:^|[,{])\s*(registry|source|index)\s*=");
-    lines.into_iter().any(|line| {
+    lines.any(|line| {
         let line = line.trim_start();
         match ecosystem {
             Ecosystem::Cargo => {

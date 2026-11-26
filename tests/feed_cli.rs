@@ -179,6 +179,48 @@ fn a_go_module_without_tags_uses_the_proxy_latest_and_a_missing_module_is_not_fo
 }
 
 #[test]
+fn automatic_go_bumps_exclude_retracted_tags_including_the_tag_that_retracts_itself() {
+    use pipetrain::command::feed::{FeedOptions, latest_target};
+    use pipetrain::feed::Ecosystem;
+    let (base, requests) = common::serve_bodies(vec![
+        "v1.1.0\nv1.2.0\nv1.2.1\nv1.3.0-rc.1\n".into(),
+        "module example.org/Test\nretract (\n [v1.2.0, v1.2.1] // incorrect releases\n v1.3.0-rc.1\n)\n".into(),
+    ]);
+    let opts = FeedOptions {
+        package: "example.org/Test".into(),
+        version: None,
+        ecosystem: Some(Ecosystem::Go),
+        org: None,
+        registry: Some(base),
+        json: true,
+    };
+    assert_eq!(
+        latest_target(&opts, true, &mut Vec::new())
+            .unwrap()
+            .unwrap()
+            .version,
+        "v1.1.0"
+    );
+    assert!(requests.join().unwrap()[1].starts_with("GET /example.org/!test/@v/v1.2.1.mod "));
+}
+
+#[test]
+fn a_partial_crate_requirement_cannot_prove_publication() {
+    let output = feed(&[
+        "example",
+        "--ecosystem",
+        "cargo",
+        "--version",
+        "1.5",
+        "--wait",
+        "--registry",
+        &common::closed_base(),
+    ]);
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("exact major.minor.patch"));
+}
+
+#[test]
 fn npm_version_that_is_published() {
     let server = serve(|_| |_: &str| (200, packument(&["1.0.0", "1.1.0", "1.2.0"])));
     let output = feed(&[

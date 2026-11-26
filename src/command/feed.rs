@@ -161,6 +161,7 @@ fn fetch_nuget(session: &Session, opts: &FeedOptions) -> Result<Fetched> {
 }
 
 fn fetch(session: &Session, ecosystem: Ecosystem, opts: &FeedOptions) -> Result<Fetched> {
+    registries::validate_version(ecosystem, opts.version.as_deref())?;
     match ecosystem {
         Ecosystem::Npm => fetch_npm(session, opts),
         Ecosystem::Nuget => fetch_nuget(session, opts),
@@ -380,12 +381,21 @@ pub fn annotate(plan: &mut Plan, checker: &mut Checker) -> usize {
     total
 }
 
-fn lookup(opts: &FeedOptions, notes: &mut Vec<String>) -> Result<Result<Report, i32>> {
+fn lookup(
+    opts: &FeedOptions,
+    notes: &mut Vec<String>,
+    selecting_target: bool,
+) -> Result<Result<Report, i32>> {
     let ecosystem = opts
         .ecosystem
         .unwrap_or_else(|| Ecosystem::default_for(&opts.package));
     let session = Session::new();
     let fetched = fetch(&session, ecosystem, opts)?;
+    let fetched = if selecting_target && ecosystem == Ecosystem::Go {
+        registries::exclude_go_retractions(&session, &opts.package, fetched)?
+    } else {
+        fetched
+    };
     match fetched {
         Fetched::Refused { had_token } => {
             notes.push(refusal(ecosystem, had_token));
@@ -423,7 +433,7 @@ pub fn versions(opts: &FeedOptions, notes: &mut Vec<String>) -> Result<Result<Ve
 }
 
 pub fn latest(opts: &FeedOptions, notes: &mut Vec<String>) -> Result<Result<String, i32>> {
-    Ok(match lookup(opts, notes)? {
+    Ok(match lookup(opts, notes, false)? {
         Ok(report) => match report.latest {
             Some(latest) => Ok(latest),
             None => {
@@ -469,7 +479,7 @@ pub fn latest_target(
     prerelease: bool,
     notes: &mut Vec<String>,
 ) -> Result<Result<Target, i32>> {
-    Ok(match lookup(opts, notes)? {
+    Ok(match lookup(opts, notes, true)? {
         Ok(report) => match choose_target(&report, prerelease) {
             Ok(target) => Ok(target),
             Err(message) => {
@@ -482,7 +492,7 @@ pub fn latest_target(
 }
 
 pub fn proof(opts: &FeedOptions, notes: &mut Vec<String>) -> Result<Result<bool, i32>> {
-    Ok(lookup(opts, notes)?.map(|report| report.published == Some(true)))
+    Ok(lookup(opts, notes, false)?.map(|report| report.published == Some(true)))
 }
 
 pub struct WaitOptions {
@@ -554,6 +564,7 @@ pub fn wait_for(
     {
         bail!("--org is required for nuget unless --registry is given");
     }
+    registries::validate_version(ecosystem, opts.version.as_deref())?;
     let session = Session::new();
     Ok(feed::wait_loop(
         plan,
@@ -642,7 +653,7 @@ pub struct Rendered {
 }
 
 pub fn render(opts: &FeedOptions, notes: &mut Vec<String>) -> Result<Rendered> {
-    Ok(match lookup(opts, notes)? {
+    Ok(match lookup(opts, notes, false)? {
         Err(code) => Rendered {
             stdout: None,
             exit: code,

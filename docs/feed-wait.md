@@ -20,6 +20,8 @@ Usage errors of `--wait` exit with 1 and not with the clap default of 2, because
 
 ## Loop
 
+Automatic Go bump targets also read the highest release's `go.mod` to exclude retracted tags and closed retraction intervals. An explicit Go version keeps the proxy's publication status, including versions still available after retraction.
+
 1. Check the feed with the same lookup as `feed`.
 2. If the version is published, stop with exit 0.
 3. If the feed answered 401 or 403, stop with exit 2. No retry.
