@@ -12,10 +12,11 @@ pub enum Verdict {
 }
 
 pub(crate) fn settled_ids(
-    runs: &[Run],
+    listing: &crate::github::RunListing,
     prediction: Option<&crate::workflows::PushRuns>,
-) -> Vec<u64> {
-    let mut ids: Vec<_> = runs
+) -> Vec<(u64, u64)> {
+    let mut ids: Vec<_> = listing
+        .runs
         .iter()
         .filter(|run| match prediction {
             Some(crate::workflows::PushRuns::Expected {
@@ -25,7 +26,7 @@ pub(crate) fn settled_ids(
             }) => workflows.contains(&run.path) || chained_workflows.contains(&run.path),
             _ => true,
         })
-        .map(|run| run.id)
+        .map(|run| (run.id, listing.attempts[&run.id]))
         .collect();
     ids.sort_unstable();
     ids

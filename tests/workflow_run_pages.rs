@@ -155,6 +155,21 @@ fn a_short_page_disagreeing_with_its_total_is_incomplete() {
 }
 
 #[test]
+fn a_single_page_requires_positive_run_ids_and_matching_shas() {
+    for (field, invalid) in [
+        ("id", Value::Null),
+        ("id", json!(0)),
+        ("head_sha", json!("other")),
+    ] {
+        let mut body = page(1, 1, Some(1));
+        body["workflow_runs"][0][field] = invalid;
+        let (result, paths) = read(vec![(200, body)], false, 2);
+        assert!(!result.unwrap().1);
+        assert_eq!(paths, expected_paths(1, false));
+    }
+}
+
+#[test]
 fn later_page_errors_and_request_budget_stops_reach_the_caller() {
     let pages = vec![(200, page(1, 100, Some(101))), (401, Value::Null)];
     let (result, paths) = read(pages.clone(), false, 3);

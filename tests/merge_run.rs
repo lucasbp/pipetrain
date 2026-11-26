@@ -3981,6 +3981,19 @@ fn a_replacement_on_the_second_page_restarts_confirmation_or_fails() {
 }
 
 #[test]
+fn a_new_attempt_of_the_same_run_needs_its_own_confirmation() {
+    let mut rig = Rig::new("");
+    let mut first = paginated_deploy(101, "success");
+    first[100]["run_attempt"] = json!(1);
+    rig.script().run_readings = [first.clone(), first.clone()].into();
+    first[100]["run_attempt"] = json!(2);
+    rig.script().runs = first;
+    let run = short_deploy(&mut rig);
+    assert_eq!(run.step(0).status, Status::Done);
+    assert_eq!(rig.polls(), 6);
+}
+
+#[test]
 fn a_later_page_error_resets_confirmation_and_preserves_visible_failure() {
     let mut rig = Rig::new("");
     rig.script().runs = paginated_deploy(101, "success");
@@ -5615,7 +5628,10 @@ fn an_inherited_failed_deploy_in_an_unrelated_repo_does_not_block_the_queue() {
 #[test]
 fn a_dry_run_announces_the_inherited_failed_deploy_it_would_keep() {
     let mut rig = Rig::new("");
-    inherited_pending(&mut rig, "acme/old#34", "acme/old", "master", failed_runs());
+    let mut runs = paginated_deploy(101, "failure");
+    runs.swap(0, 100);
+    rig.script().run_errors = [200, 503].into();
+    inherited_pending(&mut rig, "acme/old#34", "acme/old", "master", runs);
 
     let run = rig.run(&plan_on(&[1]), dry(), true, true).unwrap();
 

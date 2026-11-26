@@ -778,12 +778,17 @@ fn deploy_failed(client: &mut Client, pending: &Pending) -> Option<String> {
         .deploy_prediction
         .as_ref()
         .filter(|reading| matches!(reading, PushRuns::Expected { .. }));
-    let (runs, _) = client
-        .workflow_runs(&pending.repo, sha, prediction.is_none())
-        .ok()?;
+    let mut listing = crate::github::RunListing::default();
+    let _ = client.read_run_pages(
+        &pending.repo,
+        sha,
+        prediction.is_none(),
+        &mut listing,
+        || true,
+    );
     let verdict = prediction.map_or_else(
-        || judge(&runs),
-        |prediction| judge_expected(&runs, prediction),
+        || judge(&listing.runs),
+        |prediction| judge_expected(&listing.runs, prediction),
     );
     match verdict {
         Verdict::Failed(text) => Some(text),

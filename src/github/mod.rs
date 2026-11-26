@@ -9,6 +9,7 @@ mod retry;
 mod token;
 
 pub use client::{Client, Download, Window, origin};
+pub(crate) use endpoints::RunListing;
 pub use endpoints::{BranchRequirements, BranchWrite, LivePr, PrWrite, Run};
 pub use error::{ApiError, describe_reset};
 pub use guard::{Below, Usage};

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
@@ -55,6 +55,34 @@ pub struct Run {
     pub status: String,
     pub conclusion: Option<String>,
     pub url: String,
+}
+
+#[derive(Default, Clone)]
+pub(crate) struct RunListing {
+    pub runs: Vec<Run>,
+    pub attempts: BTreeMap<u64, u64>,
+}
+
+impl RunListing {
+    fn record(&mut self, entry: &Value, sha: &str, push_only: bool) -> bool {
+        if entry
+            .get("head_sha")
+            .is_some_and(|value| value.as_str() != Some(sha))
+        {
+            return false;
+        }
+        let run = parse_run(entry);
+        let attempt = entry.get("run_attempt");
+        let number = attempt.and_then(Value::as_u64).unwrap_or_default();
+        let unique = self.attempts.insert(run.id, number).is_none();
+        let valid = unique
+            && run.id != 0
+            && !run.status.is_empty()
+            && (push_only || !run.path.is_empty())
+            && (attempt.is_none() || number > 0);
+        self.runs.push(run);
+        valid
+    }
 }
 
 fn parse_run(value: &Value) -> Run {
@@ -728,9 +756,9 @@ impl Client {
         sha: &str,
         push_only: bool,
     ) -> Result<(Vec<Run>, bool), ApiError> {
-        let mut runs = Vec::new();
-        let complete = self.read_run_pages(slug, sha, push_only, &mut runs, || true)?;
-        Ok((runs, complete))
+        let mut listing = RunListing::default();
+        let complete = self.read_run_pages(slug, sha, push_only, &mut listing, || true)?;
+        Ok((listing.runs, complete))
     }
 
     pub(crate) fn read_run_pages(
@@ -738,13 +766,12 @@ impl Client {
         slug: &str,
         sha: &str,
         push_only: bool,
-        runs: &mut Vec<Run>,
+        listing: &mut RunListing,
         time_left: impl Fn() -> bool,
     ) -> Result<bool, ApiError> {
         let event = if push_only { "&event=push" } else { "" };
         let first = format!("/repos/{slug}/actions/runs?head_sha={sha}{event}&per_page=100");
         let mut path = first.clone();
-        let mut ids = BTreeSet::new();
         let mut first_total = None;
         for page in 1..=10 {
             if !time_left() {
@@ -765,32 +792,14 @@ impl Client {
                 && total == first_total
                 && (body.get("total_count").is_none() || total.is_some());
             for entry in entries {
-                let run = parse_run(entry);
-                if entry
-                    .get("head_sha")
-                    .is_some_and(|value| value.as_str() != Some(sha))
-                {
-                    valid = false;
-                    continue;
-                }
-                valid &= !run.status.is_empty() && (push_only || !run.path.is_empty());
-                if run.id != 0 {
-                    valid &= ids.insert(run.id);
-                }
-                runs.push(run);
+                valid &= listing.record(entry, sha, push_only);
             }
-            let read = runs.len() as u64;
+            let read = listing.runs.len() as u64;
             if !valid || total.is_some_and(|count| read > count) {
-                break;
-            }
-            if page > 1 && ids.len() != runs.len() {
                 break;
             }
             if total == Some(read) || entries.len() < 100 {
                 return Ok(total.is_none_or(|count| count == read));
-            }
-            if ids.len() != runs.len() {
-                break;
             }
             path = format!("{first}&page={}", page + 1);
         }
@@ -804,14 +813,37 @@ impl Client {
                 if run.status == "completed" {
                     return Ok(run.clone());
                 }
-                let path = format!("/repos/{slug}/actions/runs/{}", run.id);
-                let body = self
-                    .get(&path)?
-                    .into_body(&path)
-                    .map_err(|error| self.redact(error))?;
-                Ok(parse_run(&body))
+                self.run_by_id(slug, run.id).map(|body| parse_run(&body))
             })
             .collect()
+    }
+
+    fn run_by_id(&mut self, slug: &str, id: u64) -> Result<Value, ApiError> {
+        let path = format!("/repos/{slug}/actions/runs/{id}");
+        self.get(&path)?
+            .into_body(&path)
+            .map_err(|error| self.redact(error))
+    }
+
+    pub(crate) fn refresh_run_listing(
+        &mut self,
+        slug: &str,
+        sha: &str,
+        known: &RunListing,
+        listing: &mut RunListing,
+    ) -> Result<bool, ApiError> {
+        for run in &known.runs {
+            if run.status == "completed" {
+                listing.runs.push(run.clone());
+                listing.attempts.insert(run.id, known.attempts[&run.id]);
+            } else {
+                let entry = self.run_by_id(slug, run.id)?;
+                if entry["id"].as_u64() != Some(run.id) || !listing.record(&entry, sha, false) {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
     }
 
     pub fn tree(&mut self, slug: &str, sha: &str) -> Result<(Vec<String>, bool)> {

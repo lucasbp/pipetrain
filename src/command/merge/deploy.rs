@@ -57,7 +57,7 @@ fn wait_for_deploy(
     let mut settled = None;
     let mut last = "no workflow run yet".to_string();
     let mut auxiliary_failures = std::collections::BTreeSet::new();
-    let mut known: Vec<crate::github::Run> = Vec::new();
+    let mut known = crate::github::RunListing::default();
     let outcome = loop {
         let now = (hooks.now)();
         if clock.ceiling_hit(now) {
@@ -66,34 +66,32 @@ fn wait_for_deploy(
         if clock.timed_out(now) {
             break Deploy::TimedOut(last);
         }
-        let mut runs = Vec::new();
+        let mut listing = crate::github::RunListing::default();
         let judge_runs =
             |runs: &[_]| expected.map_or_else(|| judge(runs), |p| judge_expected(runs, p));
-        let reading = if settled.is_none() && follow_by_id(expected, &known) {
-            client.refresh_runs(slug, &known).map(|refreshed| {
-                runs = refreshed;
-                true
-            })
+        let reading = if settled.is_none() && follow_by_id(expected, &known.runs) {
+            client.refresh_run_listing(slug, sha, &known, &mut listing)
         } else {
-            client.read_run_pages(slug, sha, expected.is_none(), &mut runs, || {
+            client.read_run_pages(slug, sha, expected.is_none(), &mut listing, || {
                 !clock.remaining((hooks.now)()).is_zero()
             })
         };
+        let runs = &listing.runs;
         let complete = match reading {
             Ok(complete) => {
                 consecutive_errors = 0;
                 if complete {
-                    known.clone_from(&runs);
+                    known.clone_from(&listing);
                 } else {
-                    known.clear();
+                    known = Default::default();
                 }
                 complete
             }
-            Err(_) if matches!(judge_runs(&runs), Verdict::Failed(_)) => false,
+            Err(_) if matches!(judge_runs(runs), Verdict::Failed(_)) => false,
             Err(error) if transient_read(&error) => {
                 consecutive_errors += 1;
                 settled = None;
-                known.clear();
+                known = Default::default();
                 last = format!("transient workflow read error: {error}");
                 let remaining = clock.remaining((hooks.now)());
                 if remaining.is_zero() {
@@ -189,7 +187,7 @@ fn wait_for_deploy(
                 }
             }
         }
-        let mut verdict = judge_runs(&runs);
+        let mut verdict = judge_runs(runs);
         if !complete && !matches!(verdict, Verdict::Failed(_)) {
             verdict = Verdict::Waiting(
                 "workflow run response is incomplete; cannot confirm deploy".to_string(),
@@ -200,7 +198,7 @@ fn wait_for_deploy(
             Verdict::Failed(text) => break Deploy::Failed(text),
             verdict @ (Verdict::Passed(count) | Verdict::Skipped(count)) => {
                 let skipped = matches!(verdict, Verdict::Skipped(_));
-                let observed = (count, crate::merge::settled_ids(&runs, expected));
+                let observed = (count, crate::merge::settled_ids(&listing, expected));
                 if settled.as_ref() == Some(&observed) {
                     break if skipped {
                         Deploy::Skipped(count)
