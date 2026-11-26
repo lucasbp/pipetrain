@@ -122,6 +122,11 @@ fn dotnet_versions(patch: &str, prefix: char) -> BTreeMap<String, String> {
     found
 }
 
+pub(crate) fn toml_string(value: &str) -> Option<String> {
+    let wrapped: toml::Table = toml::from_str(&format!("value = {value}")).ok()?;
+    Some(wrapped.get("value")?.as_str()?.trim().to_string())
+}
+
 fn npm_versions(patch: &str, prefix: char) -> BTreeMap<String, String> {
     static PAIR: OnceLock<Regex> = OnceLock::new();
     static SEMVER: OnceLock<Regex> = OnceLock::new();

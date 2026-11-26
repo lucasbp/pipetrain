@@ -4,7 +4,7 @@ use std::sync::OnceLock;
 use regex::Regex;
 use toml::{Table, Value};
 
-use crate::detect::side_lines;
+use crate::detect::{side_lines, toml_string as string_value};
 
 const DEPENDENCY_SECTIONS: [&str; 3] = ["dependencies", "dev-dependencies", "build-dependencies"];
 
@@ -111,7 +111,7 @@ fn section_of(header: &str) -> (Section, Option<String>) {
         r"(?:^|\.)(?:dependencies|dev-dependencies|build-dependencies)$",
     );
     if let Some(caps) = named.captures(header) {
-        let name = caps[1].trim_matches('"').to_string();
+        let name = caps[1].trim_matches(['"', '\'']).to_string();
         return (Section::Table, Some(name));
     }
     if plain.is_match(header) {
@@ -129,12 +129,6 @@ fn flush(pending: Option<Pending>, found: &mut BTreeMap<String, String>) {
     {
         found.insert(name, version);
     }
-}
-
-fn string_value(value: &str) -> Option<String> {
-    static QUOTED: OnceLock<Regex> = OnceLock::new();
-    let quoted = regex(&QUOTED, r#"^"([^"]*)""#);
-    Some(quoted.captures(value.trim())?[1].trim().to_string())
 }
 
 fn inline_entry(key: &str, value: &str) -> Option<(String, String)> {
@@ -159,7 +153,7 @@ pub(crate) fn bumped_names(patch: &str, prefix: char) -> BTreeMap<String, String
     static HEADER: OnceLock<Regex> = OnceLock::new();
     static PAIR: OnceLock<Regex> = OnceLock::new();
     let header = regex(&HEADER, r"^\[([^\[\]]+)\]\s*(?:#.*)?$");
-    let pair = regex(&PAIR, r#"^("[^"]+"|[A-Za-z0-9_.-]+)\s*=\s*(.+)$"#);
+    let pair = regex(&PAIR, r#"^("[^"]+"|'[^']+'|[A-Za-z0-9_.-]+)\s*=\s*(.+)$"#);
     let mut found = BTreeMap::new();
     let mut section = Section::Unknown;
     let mut pending: Option<Pending> = None;
@@ -179,7 +173,7 @@ pub(crate) fn bumped_names(patch: &str, prefix: char) -> BTreeMap<String, String
         let Some(caps) = pair.captures(line) else {
             continue;
         };
-        let key = caps[1].trim_matches('"');
+        let key = caps[1].trim_matches(['"', '\'']);
         let value = caps[2].trim();
         match section {
             Section::Other => {}

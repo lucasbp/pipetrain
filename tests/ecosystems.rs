@@ -351,8 +351,8 @@ fn checked_waits_use_the_changed_manifest_without_changing_the_queue_contract() 
         (
             "Cargo.toml",
             "[package]\nname = \"acme_lib\"\n",
-            "[dependencies]\nacme_lib = \"=1.1.0\"\n",
-            " [dependencies]\n-acme_lib = \"=1.0.0\"\n+acme_lib = \"=1.1.0\"",
+            "[dependencies]\n'acme_lib' = '=1.1.0'\n",
+            " [dependencies]\n-'acme_lib' = '=1.0.0'\n+'acme_lib' = '=1.1.0'",
             "/ac/me/acme_lib",
             r#"{"name":"acme_lib","vers":"1.1.0","yanked":false}"#,
             "acme-lib",
@@ -361,8 +361,8 @@ fn checked_waits_use_the_changed_manifest_without_changing_the_queue_contract() 
         (
             "pyproject.toml",
             "[project]\nname = \"Acme.Lib\"\n",
-            "[project]\ndependencies = [\"Acme.Lib==1.1rc2\"]\n",
-            "-    \"Acme.Lib==1.0\",\n+    \"Acme.Lib==1.1rc2\",",
+            "[project]\ndependencies = ['Acme.Lib==1.1rc2']\n",
+            " [project]\n-dependencies = ['Acme.Lib==1.0']\n+dependencies = ['Acme.Lib==1.1rc2']",
             "/pypi/acme-lib/json",
             r#"{"releases":{"1.1rc2":[{"yanked":false}]}}"#,
             "acme-lib",
