@@ -16,6 +16,13 @@ pipetrain is a Rust CLI that plans and executes merge queues across repositories
 - `src/mcp/` exposes read-only tools using the command implementations. Keep reusable output in a function returning it and print in the command's `run` path.
 - `docs/` holds contracts and design notes; `tests/` holds integration tests. See [docs/architecture.md](docs/architecture.md) for the full module map and design decisions.
 
+## Architecture review
+
+- Start with the closest workflow in [the module map](docs/architecture.md). Keep a rule with the data and tests that explain it. Split a module when two parts change for different reasons and the caller can pass a small, explicit input or result across the boundary. File length alone does not justify a split.
+- Keep flag parsing, terminal output and exit handling at the CLI boundary. MCP handlers adapt the same application operation to their read-only protocol. Commands coordinate policy and I/O. Keep planner rules, verdicts and value comparisons callable with in-memory inputs. Put HTTP, Git and filesystem operations in the adapter for that resource.
+- Trace the current callers before sharing or moving code. If two paths enforce the same rule, put it in their common domain module and import it from there. Keep genuinely different rules explicit, such as expected workflow verdicts and legacy verdicts. Prefer private modules and retain published paths through re-exports when moving library types.
+- In review, trace a changed behavior from its CLI or MCP entry point to the rule and any external effect. Use the tests for that boundary. For a move, check existing imports, serialized fields, stdout/stderr, exit codes and dry-run behavior where affected. Add focused coverage when an affected contract has no regression test. Run the validation below.
+
 ## Validation
 
 Before saying a change works, run exactly these checks:

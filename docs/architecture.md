@@ -16,7 +16,7 @@ Paths below are relative to the repository root. Each line identifies a source m
 - `src/command/authors.rs`: configured and command-line author filters, including the authenticated login.
 - `src/command/apply.rs`: bundle execution, initial confirmation gate, GitHub writes and action reports.
 - `src/command/checklist.rs`: live bundle action checklist.
-- `src/command/feed.rs`: feed lookup, authentication, wait orchestration and CLI output.
+- `src/command/feed.rs`: feed command options, plan annotations, wait orchestration and CLI output.
 - `src/command/bump.rs`: read-only default-branch manifest scan and proposed version-change reports.
 - `src/command/order.rs`: manifest-backed repository order suggestions and TOML output.
 - `src/command/order/graph.rs`: repository dependency analysis for order suggestions.
@@ -57,9 +57,11 @@ Paths below are relative to the repository root. Each line identifies a source m
 - `src/gomod.rs`: Go module publication, references and diff versions.
 - `src/publishers.rs`: manifest candidate selection and publisher/reference maps.
 - `src/feed.rs`: NuGet/npm feed data, version comparison, wait loop and report rendering.
+- `src/feed/registry.rs` owns registry HTTP requests, authentication and exact-version lookups shared by the feed command and publication verification.
 - `src/publication.rs`: exact new-publication verification and opaque publication evidence.
 - `src/publication/backend.rs`: GitHub workflow/job/log collection and exact NuGet feed adapter.
 - `src/consumer_bump.rs`: evidence-backed pin preparation through the bump gateway.
+- `src/consumer_bump/pin.rs` classifies an existing dependency pin for both the bump preview and consumer preparation.
 - `src/consumer_bump/journal.rs`: durable publisher inputs, consumer contracts and preparation markers.
 - `src/consumer_bump/backend.rs`: isolated Git workspaces, pin edits, restore checks, branch reservation and draft PR operations.
 - `src/consumer_bump/backend/process.rs`: owned subprocess trees and platform-specific termination.
@@ -73,7 +75,8 @@ Paths below are relative to the repository root. Each line identifies a source m
 - `src/merge/storage.rs`: state paths, schema loading, previews, exclusive locking and atomic saves.
 - `src/workflows.rs`: push-filter evaluation, expected workflow paths, chained workflows and conservative predictions.
 - `src/merge_scheduler.rs`: dependency-aware worker scheduling, repository exclusion, barriers and failure policies.
-- `src/command/merge.rs`: merge CLI orchestration, live revalidation, merge requests and deploy polling.
+- `src/command/merge.rs`: merge CLI orchestration, live revalidation and merge requests.
+- `src/command/merge/deploy.rs` tracks a deployment at the merged SHA. It applies the workflow verdict to the step report and handles polling, retries and runner waits.
 - `src/command/merge/compact.rs` and `src/command/merge/verbose.rs` render compact and detailed merge reports.
 - `src/command/merge/estimate.rs` calculates projected API requests from the plan, pending deploys and deploy predictions.
 - `src/command/merge/parallel.rs`: queue-to-job translation, worker clients and coordinator-owned state/progress.
@@ -135,6 +138,14 @@ Paths below are relative to the repository root. Each line identifies a source m
 - `src/update/notice.rs`: cached, bounded and suppressible update notices.
 - `src/update/error.rs`: update error types.
 
+## Boundaries to watch in review
+
+| Area | Evidence and review guidance |
+| --- | --- |
+| Merge execution | `merge_one` and `merge_plan_inner` still coordinate GitHub writes, durable checkpoints and recovery in `src/command/merge.rs`. A deeper split needs an explicit owner for the intent saved before a merge and the SHA recorded afterwards. Exercise both resume and parallel-worker tests when changing that sequence. |
+| Bundle and merge output | In `src/command/apply.rs`, `run_step` writes to GitHub while `live_rows` and `render_actions` present the result. In `src/command/merge/compact.rs`, `enrich` reads failed-job details from GitHub. Keep those reads out of rendering when extending the reports. |
+| Large cohesive files | `src/main.rs` declares and binds clap arguments. `src/render.rs` renders a plan from memory. `tests/merge_run.rs` exercises the executor against a local test server, including lost approvals and stacked heads. Their sizes reflect three different jobs. Review changes against each file's job. |
+
 ## Design decisions
 
 ### Durable state has its own identity, schema and lock
@@ -167,7 +178,7 @@ The planner only adds ordering constraints: waiting is cheaper than a wrong para
 
 ### Read retries, immutable cache keys and secret redaction
 
-`src/github/client.rs` routes reads through the bounded policy in `src/github/retry.rs`; writes take the single-attempt path. Selected server errors and secondary rate limits use backoff and jitter, while exhausted primary quotas are reported. `src/command/merge.rs` additionally bounds deploy polling and retry work by execution deadlines. The rationale for applying automatic client retries only to reads is not explicitly stated (reason not documented). Transport failures still return from the client's read call; deploy polling has its own recovery. Policy limits and request accounting are described in the README's [API budget](../README.md#api-budget).
+`src/github/client.rs` routes reads through the bounded policy in `src/github/retry.rs`; writes take the single-attempt path. Selected server errors and secondary rate limits use backoff and jitter, while exhausted primary quotas are reported. `src/command/merge/deploy.rs` additionally bounds deploy polling and retry work by execution deadlines. The rationale for applying automatic client retries only to reads is not explicitly stated (reason not documented). Transport failures still return from the client's read call; deploy polling has its own recovery. Policy limits and request accounting are described in the README's [API budget](../README.md#api-budget).
 
 `src/github/endpoints.rs` and `src/github/cached.rs` cache SHA-bound data; mutable PR lists, reviews, checks and branch tips are fetched again. This reduces repeated requests without freezing readiness. Cache files omit tokens, headers and patches; patch-bearing manifest changes are fetched again. Entry corruption or an unsupported cache version becomes a miss. Storage keys, bounds and pruning stay local to `src/cache/`. User controls and cache contents live in the README's [local cache](../README.md#local-cache).
 
