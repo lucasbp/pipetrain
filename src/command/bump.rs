@@ -520,7 +520,7 @@ pub fn execute(opts: &BumpOptions) -> Result<Outcome> {
         );
     }
     let mut client = Client::new(github::token()?, &cfg.api, opts.verbose)
-        .with_cache(Cache::at_default(opts.cache));
+        .with_profile_cache(Cache::at_default(opts.cache), &resolved.info.name);
     let progress = Progress::start(opts.progress);
     let mut heads = BTreeMap::new();
     let scanned = scan_at_heads(&mut client, &names, &opts.package, ecosystem, &mut heads)?;

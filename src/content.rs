@@ -19,7 +19,7 @@ pub struct Check {
     pub paths: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Probe {
     pub slug: String,
     pub expression: String,

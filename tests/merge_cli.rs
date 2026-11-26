@@ -1,5 +1,29 @@
 use std::process::{Command, Output, Stdio};
 
+mod common;
+
+#[test]
+fn noninteractive_bump_apply_without_confirmation_never_reads_github_or_creates_state() {
+    let dir = common::TempDir::new("merge-confirmation");
+    let server = common::serve_handler(|_| (404, serde_json::Value::Null));
+    let state = dir.join("state.json");
+    let out = Command::new(env!("CARGO_BIN_EXE_pipetrain"))
+        .args(["merge", "--apply", "--bump", "--org", "acme", "--state"])
+        .arg(&state)
+        .env("GH_TOKEN", "ghp_FAKE0123456789")
+        .env("PIPETRAIN_API_URL", &server.base)
+        .env("PIPETRAIN_NO_UPDATE_CHECK", "1")
+        .env("PIPETRAIN_LOG", "0")
+        .current_dir(dir.path())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("refusing to merge without a terminal"));
+    assert!(server.seen.lock().unwrap().is_empty());
+    assert!(!state.exists());
+}
+
 fn run(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_pipetrain"))
         .args(args)

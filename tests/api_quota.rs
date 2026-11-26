@@ -179,8 +179,20 @@ fn a_start_above_the_reserve_goes_ahead() {
 }
 
 #[test]
-fn a_second_plan_over_the_same_data_makes_at_most_a_tenth_of_the_requests() {
-    let fake = common::serve_requests(answer);
+fn a_second_plan_reuses_file_lists_and_observes_a_revoked_approval() {
+    let reread = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let revoked = reread.clone();
+    let fake = common::serve_requests(move |line, body| {
+        let (status, mut data) = answer(line, body);
+        if revoked.load(Ordering::SeqCst)
+            && number_of(body) == 1
+            && let Some(pr) = data.pointer_mut("/data/repository/pullRequest")
+        {
+            pr["reviewDecision"] = json!("CHANGES_REQUESTED");
+            pr["latestOpinionatedReviews"]["nodes"] = json!([{"state":"CHANGES_REQUESTED"}]);
+        }
+        (status, data)
+    });
     let cache = scratch("cache");
     let args = [
         "plan",
@@ -201,6 +213,9 @@ fn a_second_plan_over_the_same_data_makes_at_most_a_tenth_of_the_requests() {
     );
     let after_first = network_requests(&fake);
     assert!(after_first >= 10, "{after_first}");
+    let first_plan: Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(first_plan["items"].as_array().unwrap().len(), 6);
+    reread.store(true, Ordering::SeqCst);
     let second = run(&args, &fake.base, &cache, false);
     assert!(
         second.status.success(),
@@ -208,12 +223,16 @@ fn a_second_plan_over_the_same_data_makes_at_most_a_tenth_of_the_requests() {
         String::from_utf8_lossy(&second.stderr)
     );
     let second_requests = network_requests(&fake) - after_first;
-    assert!(
-        second_requests * 10 <= after_first,
-        "first {after_first}, second {second_requests}"
-    );
+    assert_eq!(second_requests + 6, after_first);
     let plan: Value = serde_json::from_slice(&second.stdout).unwrap();
-    assert!(plan["stats"]["cache_hits"].as_u64().unwrap() > 0, "{plan}");
+    assert_eq!(plan["items"].as_array().unwrap().len(), 5);
+    assert_eq!(plan["skipped"][0]["id"], "acme/api#1");
+    assert!(
+        plan["skipped"][0]["reasons"]
+            .to_string()
+            .contains("changes requested")
+    );
+    assert!(plan["stats"]["cache_hits"].as_u64().unwrap() >= 5);
 }
 
 #[test]

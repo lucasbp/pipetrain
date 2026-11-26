@@ -637,7 +637,7 @@ What is cached, and the key of each entry:
 | The text of package manifests | repo and commit sha. |
 | The blob id of a file at a PR head | repo and head sha. |
 
-What is never cached: anything that can change without a new sha, such as the list of open PRs, reviews, checks, merge state, the tip of a branch, and the "already merged" comparisons. Those are fetched on every run. The token, request headers and diffs are never written either: a PR that changes a package manifest, whose diff the planner reads, is always fetched again.
+Every plan reads the current PR list, reviews, checks, branch tips and merge comparisons. Mutable REST reads can use a conditional request. PR file pages with diffs stay out of the HTTP cache. Separate processes can reuse entries within the same API origin, resolved profile and credential. See [GitHub API quota and cache](docs/api-quota.md#the-persistent-cache) for the storage and freshness rules.
 
 Where it lives: the `pipetrain` folder inside your user cache directory (`%LOCALAPPDATA%` on Windows, `~/.cache` on Linux, `~/Library/Caches` on macOS). Set `PIPETRAIN_CACHE_DIR` to use another folder. Entries are small JSON files written atomically. Entries older than 14 days are deleted, and the oldest go first when the folder passes 32 MiB. Deleting the folder is always safe; the next run rebuilds it.
 

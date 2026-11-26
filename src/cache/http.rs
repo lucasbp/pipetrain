@@ -131,9 +131,13 @@ pub fn is_sha(text: &str) -> bool {
 
 pub fn freshness_of(path: &str, live: bool) -> Freshness {
     let (route, query) = path.split_once('?').unwrap_or((path, ""));
-    let by_sha = route.split('/').any(is_sha)
-        && (route.contains("/git/trees/") || route.contains("/git/blobs/"));
-    let ref_is_sha = route.contains("/contents/")
+    let mut segments = route.strip_prefix("/repos/").unwrap_or("").split('/');
+    let resource = segments.nth(2);
+    let by_sha = resource == Some("git")
+        && matches!(segments.next(), Some("trees" | "blobs"))
+        && segments.next().is_some_and(is_sha)
+        && segments.next().is_none();
+    let ref_is_sha = resource == Some("contents")
         && query
             .split('&')
             .any(|pair| pair.strip_prefix("ref=").is_some_and(is_sha));
@@ -205,6 +209,10 @@ mod tests {
         );
         assert_eq!(
             freshness_of("/repos/o/r/actions/runs?head_sha=x", true),
+            Freshness::Revalidate
+        );
+        assert_eq!(
+            freshness_of(&format!("/repos/o/{sha}/git/trees/main"), true),
             Freshness::Revalidate
         );
     }

@@ -197,7 +197,7 @@ pub fn execute(opts: &OrderOptions) -> Result<Suggested> {
         ));
     }
     let mut client = Client::new(github::token()?, &cfg.api, opts.verbose)
-        .with_cache(Cache::at_default(opts.cache));
+        .with_profile_cache(Cache::at_default(opts.cache), &resolved.info.name);
     let progress = Progress::start(opts.progress);
     let suggestion = suggest(&mut client, &names)?;
     drop(progress);

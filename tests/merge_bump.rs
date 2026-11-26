@@ -1,4 +1,6 @@
 mod common;
+#[path = "merge_bump/github.rs"]
+mod github;
 
 use std::cell::Cell;
 use std::rc::Rc;
