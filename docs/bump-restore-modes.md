@@ -10,7 +10,7 @@ A locked restore proves the pin only when the repo commits `packages.lock.json`.
 - `unlocked`: a plain restore plus a build. No lock file is expected or written. The build is the proof that the pinned version resolves and compiles; it runs with `--no-restore` after the restore.
 - `skip`: only the manifest edit. Nothing proves the pin, and the PR body says so. Use it for repos where a restore or build cannot run in an isolated checkout.
 
-The mode in effect is printed per repo in the dry run, in the apply output and as `restore_mode` in `--json`. `merge --bump` is unchanged and stays `locked`, because publication-backed preparation relies on the lock files.
+Standalone bump reports the mode per repo in the dry run, apply output and JSON `restore_mode`. In merge, these options apply to shared base-branch bumps under `--bump-behind` or `--bump`. Preparation against a consumer head through a planned package edge requires locked restore.
 
 Precedence: `--restore-mode`, then `[bump.repos."org/repo"]`, then `[bump]`, then `locked`.
 

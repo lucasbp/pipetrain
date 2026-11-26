@@ -123,11 +123,12 @@ fn fetch_npm(
     })
 }
 
-fn fetch_nuget(
+pub(crate) fn fetch_nuget(
     session: &Session,
     package: &str,
     org: Option<&str>,
     registry: Option<&str>,
+    inspect: impl FnOnce(&str, &Value) -> Result<()>,
 ) -> Result<Fetched> {
     let Some(index_url) = feed::nuget_index_url(org, registry) else {
         bail!("--org is required for nuget unless --registry is given");
@@ -146,6 +147,7 @@ fn fetch_nuget(
             feed::host(&index_url)
         );
     };
+    inspect(&index_url, &index)?;
     let url = feed::nuget_versions_url(&base, package);
     Ok(match session.get(Ecosystem::Nuget, &url)? {
         Outcome::Body(body) => Fetched::Found {
@@ -168,7 +170,7 @@ pub(crate) fn fetch(
     registries::validate_version(ecosystem, version)?;
     match ecosystem {
         Ecosystem::Npm => fetch_npm(session, package, org, registry),
-        Ecosystem::Nuget => fetch_nuget(session, package, org, registry),
+        Ecosystem::Nuget => fetch_nuget(session, package, org, registry, |_, _| Ok(())),
         Ecosystem::Cargo | Ecosystem::Pypi | Ecosystem::Go => {
             registries::fetch(session, ecosystem, package, version, registry)
         }

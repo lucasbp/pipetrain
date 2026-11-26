@@ -48,16 +48,22 @@ pub const API_ENV: &str = "PIPETRAIN_API_URL";
 pub const QUOTA_CHECK_ENV: &str = "PIPETRAIN_QUOTA_CHECK";
 
 pub fn is_loopback(url: &str) -> bool {
-    let Some(rest) = url.strip_prefix("http://") else {
+    let Ok(uri) = url.parse::<ureq::http::Uri>() else {
         return false;
     };
-    let authority = rest.split('/').next().unwrap_or_default();
-    let host = if authority.starts_with('[') {
-        authority.split(']').next().map(|h| format!("{h}]"))
+    uri.scheme_str() == Some("http")
+        && uri
+            .authority()
+            .is_some_and(|authority| !authority.as_str().contains('@'))
+        && matches!(uri.host(), Some("127.0.0.1" | "localhost" | "[::1]"))
+}
+
+pub(crate) fn debug_loopback_env(name: &str) -> Option<String> {
+    if cfg!(debug_assertions) {
+        std::env::var(name).ok().filter(|url| is_loopback(url))
     } else {
-        authority.split(':').next().map(str::to_string)
-    };
-    matches!(host.as_deref(), Some("127.0.0.1" | "localhost" | "[::1]"))
+        None
+    }
 }
 
 fn api_override(value: Option<&str>) -> Option<&str> {

@@ -564,7 +564,7 @@ state these potential writes and identify candidate consumers without inventing
 versions. `--bump-push-step` changes the exact publisher step name, whose default
 is `Push to GitHub Packages`.
 
-A proved new NuGet publication can prepare one isolated bump branch and draft PR
+For a planned package edge, a proved publication can prepare one isolated bump branch and draft PR
 per consumer head. The draft targets that consumer's head branch and needs CI
 and review. The consumer and its descendants stay blocked in yellow; independent
 items can continue. A skipped or duplicate publication emits a gray bump skip
@@ -581,7 +581,9 @@ attention event and exit code 5 without changing the dependency graph.
 
 ## PRs that need a bump first
 
-The dry run reads the feed of every package a PR consumes through an exact pin. A PR whose pin is further behind than the repo's `max-behind` allows is left out as `waiting: needs a bump of <package> to <version>`, and a `bump` step in `planned` state appears before it. Its dependents wait for it. `merge --apply` executes that step only with `--bump-behind` (off by default): it opens a draft bump PR into the default branch of the consumer and keeps the PR waiting until that PR is merged, then updates the branch of the held PR with its base (a conflict makes it `blocked: merge conflict`) so the next plan releases it. Rules and reasons: [bump-in-merge.md](bump-in-merge.md).
+The dry run shows a bump step and the consumers held at their configured `max-behind` limit. Use `--bump-behind` for named feed targets. If a queued release crosses the limit, `merge --bump --apply` can prepare a shared draft for the proved version on the selected consumers' base. Resume with the original command and state after integration. Pipetrain verifies the base and requests updates for stale consumer branches. The next plan and fresh readiness checks govern their merges. See [version-gate bumps](bump-in-merge.md).
+
+Publication-backed version-gate steps use `kind: bump` and identify the consumer in `target`. The structured `bump` object includes `source: "queue_publication"`, `package`, `base`, `publishers`, `version` (null while unproved), `ready`, and the draft's `pull_request_url` when known. The outcome is `attention` while held and `incorporated` when the planned head includes the verified pin. Waiting for publication, integration or a branch update contributes a stopped event (exit 5). The plan and queue schemas are unchanged.
 
 ## Shared preflight
 

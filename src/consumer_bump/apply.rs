@@ -125,7 +125,7 @@ pub fn pull_request_body(
         }
     };
     format!(
-        "pipetrain opened this draft pull request with `pipetrain bump --apply`.\n\nIt moves `{package}` to {version}. That version was found in the package feed before this branch was created.\n\n{files}\n\n{closing}\n\nReview it and let CI run before merging; pipetrain does not merge it."
+        "pipetrain opened this draft pull request to move `{package}` to {version}. That version was found in the package feed before this branch was created.\n\n{files}\n\n{closing}\n\nReview the changes and let CI run before merging."
     )
 }
 
@@ -318,6 +318,21 @@ pub fn apply_repo(
     settings: &RestoreSettings,
     gateway: &mut impl BumpGateway,
 ) -> Result<Applied> {
+    let branch = standalone_branch(ecosystem, package, version);
+    apply_to_branch(
+        ecosystem, package, version, candidate, settings, gateway, branch,
+    )
+}
+
+pub(crate) fn apply_to_branch(
+    ecosystem: Ecosystem,
+    package: &str,
+    version: &str,
+    candidate: &Candidate,
+    settings: &RestoreSettings,
+    gateway: &mut impl BumpGateway,
+    branch: String,
+) -> Result<Applied> {
     if candidate.rows.is_empty() || candidate.rows.iter().any(|(path, _)| !safe_path(path)) {
         bail!("manifest paths must be relative paths inside the repository");
     }
@@ -335,7 +350,6 @@ pub fn apply_repo(
             Err(reason) => return Ok(Applied::Skipped(reason)),
         },
     };
-    let branch = standalone_branch(ecosystem, package, version);
     let files: Vec<String> = candidate
         .rows
         .iter()

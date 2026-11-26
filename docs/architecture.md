@@ -85,6 +85,7 @@ Paths below are relative to the repository root. Each line identifies a source m
 - `src/command/merge/recovery.rs`: ancestry and run evidence for later-deploy resolution.
 - `src/command/merge/package.rs`: execution-time package feed waits before consumers.
 - `src/command/merge/bump.rs`: publication verification, consumer preparation and durable bump recovery.
+- `src/command/merge/bump/queued.rs` verifies queued publications for consumers held by the version gate. `merge/queued.rs` checks consumer admission and reports the wait. `merge/behind/published.rs` reconciles the shared draft and verifies incorporation.
 
 ### GitHub transport and local cache
 

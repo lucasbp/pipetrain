@@ -7,19 +7,14 @@ branches and draft PRs before any operation. Standalone `bump` defaults to a dry
 bump tool always uses the dry run. Enabling preparation cannot bypass publication proof,
 dependency ordering, CI, or human review.
 
-Automatic preparation is limited to selected consumer PRs already eligible for
-the merge plan. PRs excluded for missing approval, failing checks or other
-readiness blockers are not edited by this option. Author-hidden PRs are not bump
-targets. Those consumers require a separate reviewed preparation before joining
-the queue. Bump audit events are additional to the queue-job progress count.
-The current planner records one package contract per publisher/consumer pair.
-Consumers of multiple packages published by the same repository require manual
-preparation to cover every package; automatic preparation is not a complete
-multi-package update for that topology.
+Automatic preparation covers selected, visible consumers with a package dependency
+in the plan and consumers held because a queued release will cross their exact
+pin's `max-behind` limit. Bump audit events are additional to the queue-job
+progress count.
 
 ## What `merge --bump` covers
 
-Covered, per consumer PR in the plan:
+For a planned package edge:
 
 - The consumer has a package edge from a publisher in the same queue (the planner
   saw its manifest diff bump the package the publisher releases), the publisher's
@@ -30,6 +25,33 @@ Covered, per consumer PR in the plan:
   `packages.lock.json` files, restored with `--use-lock-file` and `--locked-mode`.
 - The draft PR targets the consumer PR's head branch. Nothing is merged.
 
+For a version gate crossed by the queue:
+
+- The executor records the consumer PR, head, base, pin, package and possible publishers
+  before sending the producer merge. A single publishing repository and PR, its
+  recorded merge SHA, a successful new push of one newer stable version in the
+  same major, and presence of that version in the feed are required. The push
+  destination in the successful step must match the producer's service index or
+  its advertised `PackagePublish` endpoint. A version present in two feeds
+  qualifies only when the log identifies the expected one.
+- Selected consumers sharing a repository, base, package and proved version
+  share one draft into that base. `--restore-mode` and `--solution` apply to
+  these base-branch bumps. The plan JSON and queue output keep their existing formats.
+- The state records the intended branch and prepared commit before a create-only
+  Git push. A restart reconciles that commit and searches for the matching PR,
+  including closed PRs, before creating anything. A changed branch or closed
+  draft requires inspection. The queue leaves bump candidates for separate
+  review and integration even if one becomes ready and appears in the selection.
+- After review, merge the bump into the base and repeat the original merge
+  command with the same state file. Pipetrain checks the merged commit and exact
+  pin on the base, then requests an update for each stale consumer head. Repeat
+  after CI finishes. Each consumer must contain the bump and pin at its planned
+  head and pass normal merge readiness. Independent queue items may proceed.
+
+```powershell
+pipetrain merge 'acme/sdk#1' 'acme/web#2' 'acme/web#3' --bump --apply --state queue.json
+```
+
 Prerequisites on the machine that runs `merge --bump --apply`: `git` on the path
 with credentials that can fetch and push to the consumer repository, a git commit
 identity (`user.name` and `user.email`), the .NET SDK, and a token with Contents and
@@ -39,26 +61,10 @@ Not covered:
 
 - npm and every ecosystem other than NuGet: the publisher proof reads the NuGet push
   log, and consumer preparation validates NuGet project paths and lock files.
-- Several packages from one publisher to one consumer (one contract per pair).
-- A consumer PR that is not in the merge plan, or has no package edge to the
-  publisher.
-- A consumer that falls behind a package the queue itself publishes, with no package
-  edge to it. When the consumer repo checks a `max-behind` version distance, each
-  queue publication moves the package further from the version the consumer
-  references and its version check fails. The plan flags it as
-  `package-release-behind`, but that is a question and a `waiting` state only: it
-  adds no ordering edge and does not feed `applicable` or the journal, so
-  `merge --bump` prepares nothing for it.
-
-For that last case use `pipetrain bump <package> --to <version> --repo <org/repo>
---apply` after the version shows in the feed (`pipetrain feed <package> --version
-<version>` or the proof `bump --apply` does itself). It reuses the same git,
-restore and push code and proves the version in the feed, but it opens its PR into
-the default branch, outside the merge journal, and is a separate command that you run
-after the publisher merged. Doing this inside the merge run, as a step that waits for
-the publication and then prepares a bump branch for a consumer without an edge,
-needs an ordering decision (where the step sits in the schedule, and whether the
-consumer waits for its PR) and is not implemented.
+- Multiple packages on one ordinary publisher/consumer edge (one contract per pair).
+- Unselected or author-hidden consumers, ambiguous publishers or versions, and
+  unsupported pins. A gate that was already failing before the queue release uses
+  the named-target [bump-behind flow](bump-in-merge.md).
 
 ## Standalone `bump --apply`
 
@@ -110,7 +116,7 @@ format. Localized or changed messages, missing logs, ambiguous jobs and unavaila
 feed metadata stop preparation instead of guessing. A structured publisher artifact
 could replace the log adapter later.
 
-## Consumer preparation
+## Consumer preparation for a planned package edge
 
 `consumer_bump::prepare_many` takes publication results, an explicit consumer PR
 snapshot, and a `BumpGateway`. With no published results it returns `Skipped`
@@ -172,14 +178,15 @@ inspection, the owner can remove that isolated directory; unpublished work is
 retained until that decision. Failed git/dotnet output is bounded and not printed
 by the backend, preventing accidental credential disclosure through diagnostics.
 
-Tests use local HTTP fixtures, fake remotes and a fake process runner. They cover
+Backend tests use local HTTP fixtures, fake remotes and a fake process runner. They cover
 first publication, exact feed checks, publisher skip, target duplicate versus
 another package duplicate, auxiliary skipped jobs, stale workflow identity,
 changed consumer heads, literal and central pins, locked restore, unexpected
 restore edits, and partial failures preserving existing files. No consumer
 repository, package feed, real dotnet project or GitHub mutation is exercised by
-those tests. The real ProcessRunner is compiled; actual publisher/consumer use
-still needs an authorized runtime validation against a real publisher and consumer.
+those backend tests. The merge CLI suite in `tests/queue_publication.rs` runs
+separate processes with a loopback GitHub API, a NuGet service index and temporary
+Git remotes. Its optional locked-restore test uses the .NET SDK and local packages.
 
 ## Merge CLI and durable resume
 
@@ -187,11 +194,11 @@ The default publisher step name is exactly `Push to GitHub Packages`.
 `--bump-push-step NAME` selects another exact workflow step name. The publisher's
 organization selects the GitHub NuGet feed; its exact newly pushed version must
 exist there. No path uses latest, modifies a publisher workflow, or invents a
-package version. An all-skipped or duplicate publisher produces a gray bump skip,
+package version. For a planned package edge an all-skipped or duplicate publisher produces a gray bump skip,
 without reading the consumer, creating a workspace or creating a PR. That bump
 skip does not skip the consumer's ordinary merge checks and gates.
 
-Consumers are read at their planned PR head SHA. Exactly one `.sln` or `.slnx`
+For edge-based preparation consumers are read at their planned PR head SHA. Exactly one `.sln` or `.slnx`
 must exist. Supported `.csproj` and `.props` manifests containing the target pins
 are discovered at that same SHA; ambiguity or unsupported pins require attention.
 The default workspace root is `bump-workspaces` inside the pipetrain cache. Each

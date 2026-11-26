@@ -684,6 +684,7 @@ struct BundleArgs {
 }
 
 #[derive(clap::Args)]
+#[command(group(clap::ArgGroup::new("bump_mode").args(["bump", "bump_behind"]).multiple(true)))]
 struct MergeArgs {
     #[arg(
         long,
@@ -773,21 +774,21 @@ struct MergeArgs {
 
     #[arg(
         long,
-        help = "With --apply, open a draft bump PR into each PR held with `needs a bump of` and wait for it to be merged (off by default)"
+        help = "With --apply, prepare a draft on the base of PRs held for a named, published target"
     )]
     bump_behind: bool,
 
     #[arg(
         long,
-        requires = "bump_behind",
-        help = "How --bump-behind proves a nuget pin: locked (lock files), unlocked (plain restore plus build) or skip (neither)"
+        requires = "bump_mode",
+        help = "Restore proof for a base-branch NuGet bump: locked, unlocked (restore and build), or skip"
     )]
     restore_mode: Option<pipetrain::consumer_bump::RestoreMode>,
 
     #[arg(
         long,
-        requires = "bump_behind",
-        help = "Solution file --bump-behind restores when a repo has several, relative to the repo root"
+        requires = "bump_mode",
+        help = "Solution to restore for a base-branch bump, relative to the repository root"
     )]
     solution: Option<String>,
 
@@ -1013,6 +1014,11 @@ fn run_merge(args: MergeArgs) -> Result<i32> {
         bump: args.bump && !args.no_bump,
         bump_options: merge::bump::Options {
             push_step: args.bump_push_step,
+            behind: merge::behind::Options {
+                restore_mode: args.restore_mode,
+                solution: args.solution.clone(),
+                workspace: None,
+            },
             ..Default::default()
         },
         bump_behind: args.bump_behind.then_some(merge::behind::Options {

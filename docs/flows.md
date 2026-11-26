@@ -179,7 +179,7 @@ pipetrain merge --all --bump --apply
 
 The plan identifies publishers and the consumer's requested version, then emits a package wait before that consumer. Feed annotations are informational. Execution rechecks a known version after the publisher finishes using the shared bounded feed loop; published evidence releases the consumer without a question. A missing version keeps manual confirmation. `--yes` answers only initial apply confirmation; `--gates-confirmed` answers gates, including the manual fallback after an absent-version timeout. DDL and infra pauses also retain explicit gate handling. See [queue waits](queue-output.md#wait-comments) and [package waits during merge](feed-wait.md#package-waits-during-merge).
 
-With `--bump`, publication proof must establish an exact newly pushed NuGet version from the recorded execution and its presence in the feed. Isolated Git and restore operations can then prepare a draft PR targeting the consumer's head branch. The consumer waits for CI and review. Evidence, supported pins, durable journals and partial-failure rules live in [publication-backed preparation](publication-bump.md).
+With `--bump`, publication proof must establish an exact newly pushed NuGet version from the recorded execution and its presence in the feed. A planned package edge prepares a draft targeting the consumer head. If the release crosses the consumer's `max-behind` limit, affected PRs sharing a base wait for a shared draft into that base. After integration, repeat the same merge command and state to update branches and recheck pins and CI. See [publication-backed preparation](publication-bump.md).
 
 ### What can go wrong and the right way out
 

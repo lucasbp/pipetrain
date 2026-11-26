@@ -29,6 +29,7 @@ pub mod authors;
 pub mod bump;
 pub mod bump_apply;
 mod checklist;
+mod consumer_heads;
 pub mod feed;
 pub mod init;
 pub mod log;
@@ -197,6 +198,7 @@ fn repos_to_scan(ready: &[(Pr, Scope)]) -> BTreeMap<String, (String, String)> {
 
 #[derive(Default)]
 struct ManifestScan {
+    primary: BTreeMap<(String, String), bool>,
     publishers: Publishers,
     references: References,
     manifests: Vec<release::Manifest>,
@@ -206,6 +208,7 @@ struct ManifestScan {
 pub(crate) struct RepoSnapshot {
     head: String,
     tree: Vec<String>,
+    tree_truncated: bool,
     incomplete: bool,
     manifests: Vec<(String, String, String)>,
 }
@@ -246,6 +249,7 @@ fn scan_repo_with_tree(
     Ok(RepoSnapshot {
         head: sha.to_owned(),
         tree,
+        tree_truncated: truncated,
         incomplete,
         manifests,
     })
@@ -275,6 +279,10 @@ fn scan_publishers(
                 scan.restricted_feeds.inspect(pr, sha, &snapshot);
             }
         }
+        scan.primary.insert(
+            (slug.to_lowercase(), sha.clone()),
+            consumer_heads::incomplete(&snapshot),
+        );
         scan.manifests.extend(snapshot.manifests);
         progress::count(index + 1, repos.len());
     }
@@ -311,6 +319,12 @@ fn release_context(
     let repos = repos_to_scan(ready);
     for (index, repo) in candidates.iter().enumerate() {
         if let Some((slug, sha)) = repos.get(repo) {
+            if with_bumps
+                && scanned.primary.get(&(repo.clone(), sha.clone())) == Some(&true)
+                && consumer_heads::has_external_release(&context, repo)
+            {
+                continue;
+            }
             let files = workflows::read(client, slug, sha)?;
             let files = crate::deploy_resources::with_reusables(client, slug, sha, files);
             context
@@ -612,26 +626,39 @@ fn build_plan_with_prepare(
         &scanned,
         opts.check_bumps,
     )?;
+    let heads = if opts.check_bumps {
+        consumer_heads::Heads::read(&mut client, &release_context, &scanned.primary, &ready)
+    } else {
+        Default::default()
+    };
     let ManifestScan {
         publishers,
         references,
         restricted_feeds,
+        manifests,
         ..
     } = scanned;
     let mut ready = ready;
     let mut wanted = pair_packages(&release_context, &ready);
     if opts.check_bumps {
         wanted.extend(behind::candidates(&release_context));
+        wanted.extend(heads.candidates());
     }
     let feeds = read_feeds(&wanted);
     rules.evidence = publishers::Evidence {
         pins: release_context.versions.clone(),
         feeds: feeds.clone(),
     };
-    let bumps = if opts.check_bumps {
-        behind::hold(&release_context, &feeds, &mut ready, &mut skipped)
+    let (bumps, queued_bumps) = if opts.check_bumps {
+        heads.hold(
+            &release_context,
+            &feeds,
+            &manifests,
+            &mut ready,
+            &mut skipped,
+        )
     } else {
-        Vec::new()
+        Default::default()
     };
 
     let collected = Collected {
@@ -645,8 +672,14 @@ fn build_plan_with_prepare(
     let gathered = into_gathered(&cfg, &explicit, train, deploy_branch, &client, collected);
     let mut built = plan::build(&rules, gathered);
     restricted_feeds.apply(&mut built);
-    release::annotate(&mut built, &release_context);
+    release::annotate_with(
+        &mut built,
+        &release_context,
+        |item| heads.context(&item.org, &item.repo, &item.sha),
+        opts.check_bumps,
+    );
     built.bumps = bumps;
+    built.queued_bumps = queued_bumps;
     built.deploy_resources = detect_deploy_resources(&mut client, &built);
     built.profile = Some(profile);
     let logins = match &opts.authors {

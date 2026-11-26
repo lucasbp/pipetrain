@@ -1,6 +1,6 @@
 # Bump needed by the version gate
 
-Part of issue 54. This page covers the prediction in `merge` and its execution under `--bump-behind`.
+Part of issue 54. This page covers the version-gate prediction in `merge` and its execution under `--bump-behind` or `--bump`.
 
 ## What it does
 
@@ -49,7 +49,13 @@ The release itself happens in the next run: the plan of the current run was alre
 
 Pipetrain never merges the bump PR: it is opened as a draft, so a person marks it ready and the repo's own review rules apply. This is also why the held PR stays `waiting` and does not change the exit code. Merging a bump PR that needs no review once its CI is green is not done by this change.
 
-A held PR that needs a version the queue itself publishes (no `to`) is not bumped by `--bump-behind`: `--bump` prepares that one after the publisher deploys.
+## When a queued release crosses the limit
+
+Use `merge --bump --apply` with the original PR selection. This also works when the consumer has no package edge and when a version already in the feed would leave the pin below the limit until the queued release. The executor waits for the recorded publisher and verifies the new version in its successful push log and exact feed. The push determines the target. A duplicate push, missing version or ambiguous publisher holds the consumer.
+
+The gate reads pins and workflow limits at each selected consumer head. Two PRs targeting the same base can therefore have different outcomes. If a required NuGet manifest snapshot is incomplete, the affected PR stays out of the merge steps.
+
+Consumers on the same repository and base share one draft for that package and version. A different base gets its own branch. Review and merge the draft, then run the same command with the same state. An update of the consumer branch can require another run after CI finishes. The executor checks the exact pin and ancestry again before admitting the consumer. A closed draft, changed pin or conflicting update is reported with the consumer and any known draft URL. The [publication contract](publication-bump.md) covers proof and recovery.
 
 A failed bump (restore, build, push or PR creation) is a `failed` step and exits 1, because a real operation failed. It follows `--dependency-failure`: with `skip` only the PRs that depend on the held one wait and independent PRs merge; with `stop` the run stops when some PR depends on it. `waiting` never changes the exit code.
 

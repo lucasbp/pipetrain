@@ -17,11 +17,14 @@ use crate::planner::Item;
 use crate::publication::backend::{NugetFeed, collect_run};
 use crate::publication::{self, PublicationResult, PublisherExecution};
 
+pub mod queued;
+
 pub const DEFAULT_PUSH_STEP: &str = "Push to GitHub Packages";
 
 #[derive(Debug, Clone)]
 pub struct Options {
     pub push_step: String,
+    pub behind: super::behind::Options,
     pub workspace: Option<PathBuf>,
     pub timeout: Duration,
     pub logs_api_base: String,
@@ -31,9 +34,11 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             push_step: DEFAULT_PUSH_STEP.into(),
+            behind: Default::default(),
             workspace: None,
             timeout: Duration::from_secs(600),
-            logs_api_base: "https://api.github.com".into(),
+            logs_api_base: crate::github::debug_loopback_env("PIPETRAIN_API_URL")
+                .unwrap_or_else(|| "https://api.github.com".into()),
         }
     }
 }
@@ -83,13 +88,20 @@ pub fn track(plan: &Plan, store: &mut Store, options: &Options, operation: &Stor
     let journal = store.state.bump.get_or_insert_with(Journal::default);
     match operation {
         StoreOperation::Add(pending) => {
-            let packages: BTreeSet<_> = plan
+            let mut packages: BTreeSet<_> = plan
                 .items
                 .iter()
                 .flat_map(|item| &item.after)
                 .filter(|dependency| dependency.id == pending.id)
                 .filter_map(|dependency| dependency.package.clone())
                 .collect();
+            for contract in journal
+                .queued_bumps
+                .iter()
+                .filter(|contract| contract.publishers.contains(&pending.id))
+            {
+                packages.insert(contract.package.clone());
+            }
             if !packages.is_empty() {
                 for consumer in &plan.items {
                     let contracts: Vec<_> = consumer
@@ -117,22 +129,32 @@ pub fn track(plan: &Plan, store: &mut Store, options: &Options, operation: &Stor
                     }
                 }
                 if let Some(publisher) = plan.items.iter().find(|item| item.id == pending.id) {
-                    journal
-                        .publishers
-                        .entry(pending.id.clone())
-                        .or_insert_with(|| Publisher {
-                            repository: pending.repo.clone(),
-                            org: publisher.org.clone(),
-                            merge_sha: None,
-                            push_step: options.push_step.clone(),
-                            packages: packages.into_iter().collect(),
-                            deploy_confirmed: false,
-                            publications: Default::default(),
-                        });
+                    let recorded =
+                        journal
+                            .publishers
+                            .entry(pending.id.clone())
+                            .or_insert_with(|| Publisher {
+                                repository: pending.repo.clone(),
+                                org: publisher.org.clone(),
+                                merge_sha: None,
+                                push_step: options.push_step.clone(),
+                                packages: Vec::new(),
+                                deploy_confirmed: false,
+                                publications: Default::default(),
+                            });
+                    if recorded.merge_sha.is_none() {
+                        packages.extend(recorded.packages.iter().cloned());
+                        recorded.packages = packages.into_iter().collect();
+                    }
                 }
             }
         }
         StoreOperation::SetSha { id, sha, .. } => {
+            journal.queued_bumps.retain(|contract| &contract.id != id);
+            store
+                .state
+                .bump_behind
+                .retain(|entry| &entry.id != id || entry.publication.is_none());
             if let Some(publisher) = journal.publishers.get_mut(id) {
                 publisher.merge_sha = Some(sha.clone());
             }
@@ -248,16 +270,7 @@ fn prepare_checked(
         }
         let known = publisher.publications.get(&package.to_ascii_lowercase());
         let publications = gateway.publication(&publisher, package, known.map(Vec::as_slice))?;
-        let inputs: Vec<_> = publications
-            .iter()
-            .filter_map(|result| match result {
-                PublicationResult::Published { evidence } => Some(PublicationInput {
-                    run_id: evidence.run_id(),
-                    version: evidence.version().into(),
-                }),
-                _ => None,
-            })
-            .collect();
+        let inputs = publication_inputs(&publications);
         journal
             .publishers
             .get_mut(&dependency.publisher_id)
@@ -355,35 +368,57 @@ pub struct GithubGateway<'a> {
     pub options: &'a Options,
 }
 
-impl Gateway for GithubGateway<'_> {
-    fn publication(
+fn publication_inputs(results: &[PublicationResult]) -> Vec<PublicationInput> {
+    results
+        .iter()
+        .filter_map(|result| match result {
+            PublicationResult::Published { evidence } => Some(PublicationInput {
+                run_id: evidence.run_id(),
+                version: evidence.version().into(),
+            }),
+            PublicationResult::Skipped { .. } => None,
+        })
+        .collect()
+}
+
+impl GithubGateway<'_> {
+    fn verified_runs(
         &mut self,
         publisher: &Publisher,
         package: &str,
         known: Option<&[PublicationInput]>,
+        queued: bool,
     ) -> Result<Vec<PublicationResult>> {
         let sha = publisher
             .merge_sha
             .as_deref()
             .context("publisher has no confirmed merge SHA")?;
-        let run_ids = if let Some(known) = known {
+        let run_ids = if let Some(known) = known.filter(|_| !queued) {
             known.iter().map(|input| input.run_id).collect::<Vec<_>>()
         } else {
             let body = self.client.rest(&format!(
                 "/repos/{}/actions/runs?head_sha={sha}&event=push&per_page=100",
                 publisher.repository
             ))?;
-            if body["total_count"]
+            let total = body["total_count"]
                 .as_u64()
-                .context("missing publisher run count")?
-                > 100
-            {
-                bail!("publisher workflow run list is truncated")
-            }
+                .context("missing publisher run count")?;
             let runs = body["workflow_runs"]
                 .as_array()
                 .context("missing publisher workflow runs")?;
-            if !runs.is_empty()
+            if total != runs.len() as u64 || total > 100 {
+                bail!("publisher workflow run list is truncated")
+            }
+            if queued
+                && runs.iter().any(|run| {
+                    run["status"] != "completed"
+                        || !matches!(run["conclusion"].as_str(), Some("success" | "skipped"))
+                })
+            {
+                bail!("publisher workflow has not completed successfully for the merged SHA")
+            }
+            if known.is_none_or(|inputs| inputs.is_empty())
+                && !runs.is_empty()
                 && runs
                     .iter()
                     .all(|run| run["status"] == "completed" && run["conclusion"] == "skipped")
@@ -415,24 +450,38 @@ impl Gateway for GithubGateway<'_> {
                 org: publisher.org.clone(),
                 registry: None,
             };
-            let result = publication::verify(&execution, &run, package, &mut feed)?;
-            if let Some(known) = known {
-                match &result {
-                    PublicationResult::Published { evidence }
-                        if known.iter().any(|input| {
-                            input.run_id == evidence.run_id() && input.version == evidence.version()
-                        }) => {}
-                    _ => bail!(
-                        "saved publication inputs no longer verify against the workflow and exact feed"
-                    ),
-                }
-            }
+            let result = if queued {
+                publication::verify_pushes(&execution, &run, package, |version, destinations| {
+                    feed.contains_pushes(package, version, destinations)
+                })?
+            } else {
+                publication::verify(&execution, &run, package, &mut feed)?
+            };
             results.push(result);
+        }
+        if let Some(known) = known {
+            let observed = publication_inputs(&results);
+            if !known.iter().all(|input| observed.contains(input)) {
+                bail!(
+                    "saved publication inputs no longer verify against the workflow and exact feed"
+                )
+            }
         }
         if results.is_empty() && known.is_none() {
             bail!("no successful publisher workflow can prove publication for the merged SHA")
         }
         Ok(results)
+    }
+}
+
+impl Gateway for GithubGateway<'_> {
+    fn publication(
+        &mut self,
+        publisher: &Publisher,
+        package: &str,
+        known: Option<&[PublicationInput]>,
+    ) -> Result<Vec<PublicationResult>> {
+        self.verified_runs(publisher, package, known, false)
     }
 
     fn consumer(&mut self, item: &Item, packages: &[String]) -> Result<Consumer> {

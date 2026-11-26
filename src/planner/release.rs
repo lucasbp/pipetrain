@@ -20,6 +20,7 @@ pub struct Context {
     pub references: References,
     pub versions: Versions,
     pub releases: BTreeMap<String, BTreeSet<String>>,
+    pub nuget_releases: BTreeSet<String>,
     pub limits: BTreeMap<String, MaxBehind>,
     pub default_max: Option<u32>,
     pub repos: BTreeSet<String>,
@@ -98,6 +99,34 @@ fn queue_releases(
 }
 
 impl Context {
+    pub(crate) fn consumer_head(&self, repo: &str, manifests: &[Manifest]) -> Self {
+        let mut references = crate::publishers::collect_references(manifests);
+        for packages in references.values_mut() {
+            packages.retain(|package| self.nuget_releases.contains(package));
+        }
+        let packages = references.get(repo);
+        Self {
+            versions: referenced_versions(manifests, &references),
+            publishers: self
+                .publishers
+                .iter()
+                .filter(|(name, _)| packages.is_some_and(|known| known.contains(*name)))
+                .map(|(name, owners)| (name.clone(), owners.clone()))
+                .collect(),
+            releases: self
+                .releases
+                .iter()
+                .filter(|(name, _)| packages.is_some_and(|known| known.contains(*name)))
+                .map(|(name, ids)| (name.clone(), ids.clone()))
+                .collect(),
+            repos: BTreeSet::from([repo.to_string()]),
+            default_max: self.default_max,
+            nuget_releases: self.nuget_releases.clone(),
+            references,
+            ..Self::default()
+        }
+    }
+
     pub fn new(
         rules: &Rules,
         scanned: &Publishers,
@@ -110,8 +139,33 @@ impl Context {
         for (package, slug) in &rules.packages {
             publishers.insert(package.clone(), BTreeSet::from([slug.clone()]));
         }
+        let releases = queue_releases(&publishers, manifests, prs);
+        let mut nuget_releases = BTreeSet::new();
+        for (slug, path, text) in manifests.iter().filter(|(_, path, _)| {
+            let path = path.to_ascii_lowercase();
+            path.ends_with("proj") || path.ends_with(".props")
+        }) {
+            if let Some(name) = manifest::published(path, text)
+                && publishers
+                    .get(&name)
+                    .is_some_and(|owners| owners.contains(&slug.to_lowercase()))
+            {
+                nuget_releases.insert(name);
+            }
+            for name in manifest::references(path, text) {
+                if let Some(owner) = rules.packages.get(&name)
+                    && !scanned
+                        .get(&name)
+                        .is_some_and(|owners| owners.contains(owner))
+                {
+                    nuget_releases.insert(name);
+                }
+            }
+        }
+        nuget_releases.retain(|name| releases.contains_key(name));
         Self {
-            releases: queue_releases(&publishers, manifests, prs),
+            releases,
+            nuget_releases,
             versions: referenced_versions(manifests, references),
             publishers,
             references: references.clone(),
@@ -159,15 +213,45 @@ fn plural(count: usize) -> &'static str {
 }
 
 pub fn annotate(plan: &mut Plan, context: &Context) {
+    annotate_with(plan, context, |_| None, false);
+}
+
+pub(crate) fn annotate_with<'a>(
+    plan: &mut Plan,
+    primary: &'a Context,
+    evidence: impl Fn(&Item) -> Option<&'a Context>,
+    checked_pins: bool,
+) {
     let mut questions = Vec::new();
     let mut causes: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut warnings: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for item in &plan.items {
+        let head = evidence(item);
         let repo = format!("{}/{}", item.org, item.repo).to_lowercase();
-        let Some(packages) = context.references.get(&repo) else {
-            continue;
-        };
+        let packages: BTreeSet<_> = primary
+            .references
+            .get(&repo)
+            .into_iter()
+            .flatten()
+            .chain(
+                head.and_then(|context| context.references.get(&repo))
+                    .into_iter()
+                    .flatten(),
+            )
+            .collect();
         for package in packages {
+            let context = if primary.nuget_releases.contains(package) {
+                head.unwrap_or(primary)
+            } else {
+                primary
+            };
+            if !context
+                .references
+                .get(&repo)
+                .is_some_and(|names| names.contains(package))
+            {
+                continue;
+            }
             let owned = context
                 .publishers
                 .get(package)
@@ -180,9 +264,8 @@ pub fn annotate(plan: &mut Plan, context: &Context) {
             }
             let count = releasing.len();
             let releasing_ids = releasing.iter().cloned().collect::<Vec<_>>().join(", ");
-            let referenced = context
-                .versions
-                .get(&(repo.clone(), package.clone()))
+            let versions = context.versions.get(&(repo.clone(), package.clone()));
+            let referenced = versions
                 .filter(|versions| !versions.is_empty())
                 .map(|versions| versions.iter().cloned().collect::<Vec<_>>().join(", "))
                 .unwrap_or_else(|| "(version not read)".to_string());
@@ -205,6 +288,7 @@ pub fn annotate(plan: &mut Plan, context: &Context) {
                 },
             };
             match limit {
+                Some(_) if checked_pins && context.nuget_releases.contains(package) && versions.is_some_and(|pins| pins.iter().any(|pin| crate::planner::behind::is_pin(pin))) => {}
                 Some(max) if u32::try_from(count).map_or(true, |behind| behind >= max) => {
                     let message = format!(
                         "references {package} {referenced}; the queue publishes {count} new version{} of it ({releasing_ids}), so this PR will be {count} behind and the repo check fails at {max} behind ({origin})",

@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+pub mod git;
+
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -163,6 +165,15 @@ pub fn serve_requests(handler: impl Fn(&str, &str) -> (u16, Value) + Send + 'sta
 pub fn serve_with_headers(
     handler: impl Fn(&str, &str, &str) -> (u16, Headers, Value) + Send + 'static,
 ) -> Server {
+    serve_raw(move |line, payload, request| {
+        let (status, headers, body) = handler(line, payload, request);
+        (status, headers, body.to_string())
+    })
+}
+
+pub fn serve_raw(
+    handler: impl Fn(&str, &str, &str) -> (u16, Headers, String) + Send + 'static,
+) -> Server {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -178,11 +189,7 @@ pub fn serve_with_headers(
             let payload = request.split_once("\r\n\r\n").map_or("", |(_, rest)| rest);
             let (status, headers, body) = handler(line, payload, &request);
             record.lock().unwrap().push(request.clone());
-            let body = if status == 304 {
-                String::new()
-            } else {
-                body.to_string()
-            };
+            let body = if status == 304 { String::new() } else { body };
             let mut reply = format!(
                 "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
                 body.len()

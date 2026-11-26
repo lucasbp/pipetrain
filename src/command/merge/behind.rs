@@ -15,6 +15,9 @@ use crate::github::Client;
 use crate::merge::{BumpBehind, Kind, Status, StepReport, Store};
 use crate::planner::behind::Need;
 
+mod published;
+pub use published::{is_published_bump, published};
+
 const WORKSPACE_TIMEOUT: Duration = Duration::from_secs(600);
 const BLOB_CHUNK: usize = 25;
 
@@ -184,6 +187,7 @@ fn open_new(store: &mut Store, gateway: &mut dyn Gateway, need: &Need, to: &str)
                 pull_request_url: url.clone(),
                 branch,
                 recorded_at: chrono::Utc::now().to_rfc3339(),
+                publication: None,
             });
             match store.save() {
                 Ok(()) => step(
@@ -221,7 +225,8 @@ fn share(store: &mut Store, need: &Need, to: &str) -> Option<usize> {
         .bump_behind
         .iter()
         .find(|entry| {
-            entry.package == need.package
+            entry.publication.is_none()
+                && entry.package == need.package
                 && entry.to == to
                 && repo_of(&entry.id) == repo_of(&need.id)
         })?
@@ -238,11 +243,9 @@ fn share(store: &mut Store, need: &Need, to: &str) -> Option<usize> {
 pub fn run(needs: &[Need], store: &mut Store, gateway: &mut dyn Gateway) -> Vec<StepReport> {
     let mut steps = Vec::new();
     for need in needs {
-        let found = store
-            .state
-            .bump_behind
-            .iter()
-            .position(|entry| entry.id == need.id && entry.package == need.package);
+        let found = store.state.bump_behind.iter().position(|entry| {
+            entry.publication.is_none() && entry.id == need.id && entry.package == need.package
+        });
         let report = match (found, need.to.as_deref()) {
             (Some(index), _) => existing(store, gateway, need, index),
             (None, Some(to)) => match share(store, need, to) {
@@ -265,9 +268,10 @@ pub fn run(needs: &[Need], store: &mut Store, gateway: &mut dyn Gateway) -> Vec<
         .bump_behind
         .iter()
         .filter(|entry| {
-            !needs
-                .iter()
-                .any(|need| need.id == entry.id && need.package == entry.package)
+            entry.publication.is_none()
+                && !needs
+                    .iter()
+                    .any(|need| need.id == entry.id && need.package == entry.package)
         })
         .cloned()
         .collect();
@@ -278,12 +282,9 @@ pub fn run(needs: &[Need], store: &mut Store, gateway: &mut dyn Gateway) -> Vec<
         if state == PullState::Open {
             continue;
         }
-        if let Some(index) = store
-            .state
-            .bump_behind
-            .iter()
-            .position(|saved| saved.id == entry.id && saved.package == entry.package)
-        {
+        if let Some(index) = store.state.bump_behind.iter().position(|saved| {
+            saved.publication.is_none() && saved.id == entry.id && saved.package == entry.package
+        }) {
             let mut resumed = settled(store, index, state);
             if state == PullState::Closed {
                 resumed.status = Status::Skipped;

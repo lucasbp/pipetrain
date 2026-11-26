@@ -1,5 +1,5 @@
 use super::{ExactFeed, PublisherExecution, PublisherRun};
-use crate::feed::registry::{Check, Checker};
+use crate::feed::registry::{Check, Checker, Fetched, Session, fetch_nuget};
 use crate::github::Client;
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Duration};
@@ -20,6 +20,30 @@ impl ExactFeed for NugetFeed {
     }
 }
 
+impl NugetFeed {
+    pub(crate) fn contains_pushes(
+        &self,
+        package: &str,
+        version: &str,
+        destinations: &[&str],
+    ) -> Result<bool> {
+        let response = fetch_nuget(
+            &Session::new(),
+            package,
+            Some(&self.org),
+            self.registry.as_deref(),
+            |url, index| super::destination::check(url, index, &self.org, destinations),
+        )?;
+        match response {
+            Fetched::Found { versions, .. } => Ok(versions
+                .iter()
+                .any(|found| found.eq_ignore_ascii_case(version))),
+            Fetched::NotFound { .. } => Ok(false),
+            Fetched::Refused { .. } => bail!("the publisher's NuGet feed refused access"),
+        }
+    }
+}
+
 pub fn collect_run(
     client: &mut Client,
     execution: &PublisherExecution,
@@ -32,11 +56,12 @@ pub fn collect_run(
     );
     let run = client.rest(&root)?;
     let jobs = client.rest(&format!("{root}/jobs?per_page=100&filter=latest"))?;
-    if jobs["total_count"].as_u64().unwrap_or(u64::MAX) > 100 {
+    let listed = jobs["jobs"].as_array().context("missing publisher jobs")?;
+    if jobs["total_count"].as_u64() != Some(listed.len() as u64) || listed.len() > 100 {
         bail!("publisher job list is truncated");
     }
     let mut candidates = Vec::new();
-    for job in jobs["jobs"].as_array().context("missing publisher jobs")? {
+    for job in listed {
         for step in job["steps"].as_array().context("missing publisher steps")? {
             if step["name"] == push_step
                 && step["conclusion"] == "success"

@@ -307,6 +307,7 @@ fn has_work(state: &State) -> bool {
             !journal.publishers.is_empty()
                 || !journal.contracts.is_empty()
                 || !journal.consumers.is_empty()
+                || !journal.queued_bumps.is_empty()
         })
 }
 

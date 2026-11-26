@@ -759,6 +759,7 @@ pub fn final_report(report: &Report, color: bool, context: &Context) -> String {
             )
         ));
     }
+    out.push_str(&super::queued::summary(report, &context.command));
     out
 }
 
