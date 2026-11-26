@@ -489,3 +489,58 @@ fn duplicate_pins_are_rechecked_and_pep440_levels_follow_release_components() {
     .unwrap();
     assert_eq!(updated, text.replace("1.0rc1", "1.1.post1"));
 }
+
+#[test]
+fn workspace_sources_affect_only_the_selected_package_and_members() {
+    let cargo =
+        "[workspace]\nmembers=['crates/*']\n[patch.crates-io]\nexample={path='vendor/example'}";
+    let python = "[tool.uv.workspace]\nmembers=['crates/*']\nexclude=['crates/isolated']\n[tool.uv.sources]\nexample={workspace=true}";
+    for (eco, file, root, member) in [
+        (
+            Ecosystem::Cargo,
+            "Cargo.toml",
+            cargo,
+            "[dependencies]\nexample='=1.0.0'",
+        ),
+        (
+            Ecosystem::Pypi,
+            "pyproject.toml",
+            python,
+            "[project]\ndependencies=['example==1.0.0']",
+        ),
+    ] {
+        let path = format!("crates/child/{file}");
+        let tree = vec![file.to_owned(), path.clone()];
+        let read = |p: &str| {
+            assert_eq!(p, file);
+            Ok(root.to_owned())
+        };
+        assert!(bump::check_workspace_sources(eco, "example", &path, member, &tree, read).is_err());
+        assert!(bump::check_workspace_sources(eco, "other", &path, member, &tree, read).is_ok());
+        if eco == Ecosystem::Pypi {
+            assert!(
+                bump::check_workspace_sources(
+                    eco,
+                    "example",
+                    "crates/isolated/pyproject.toml",
+                    member,
+                    &tree,
+                    read
+                )
+                .is_ok()
+            );
+        }
+        let refs = bump::refs_of(
+            &[
+                ("acme/app".into(), file.into(), root.into()),
+                ("acme/app".into(), path.clone(), member.into()),
+            ],
+            "example",
+            eco,
+        );
+        assert!(
+            refs.iter()
+                .any(|(p, s)| p == &path && s.starts_with("manual:"))
+        );
+    }
+}

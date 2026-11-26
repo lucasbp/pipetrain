@@ -20,7 +20,7 @@ use crate::progress::{self, Progress};
 use crate::style::{bold, dim, green, yellow};
 
 mod pins;
-pub use pins::pin_manifest;
+pub use pins::{check_workspace_sources, pin_manifest};
 
 pub struct BumpOptions {
     pub package: String,
@@ -159,11 +159,16 @@ pub fn refs_of(
     package: &str,
     ecosystem: Ecosystem,
 ) -> Vec<(String, String)> {
-    checked_refs(manifests, package, ecosystem).unwrap_or_default()
+    let tree = manifests
+        .iter()
+        .map(|(_, path, _)| path.clone())
+        .collect::<Vec<_>>();
+    checked_refs(manifests, &tree, package, ecosystem).unwrap_or_default()
 }
 
 fn checked_refs(
     manifests: &[(String, String, String)],
+    tree: &[String],
     package: &str,
     ecosystem: Ecosystem,
 ) -> Result<Vec<(String, String)>> {
@@ -172,13 +177,28 @@ fn checked_refs(
         .iter()
         .filter(|(_, path, _)| in_ecosystem(path, ecosystem))
     {
-        let versions = if pins::handles(ecosystem) {
+        let mut versions = if pins::handles(ecosystem) {
             pins::versions(ecosystem, text, package).map_err(|_| {
                 anyhow::anyhow!("could not parse {repo}/{path} for dependency updates")
             })?
         } else {
             manifest::package_versions(path, text, package)
         };
+        if pins::handles(ecosystem)
+            && !versions.is_empty()
+            && let Err(reason) =
+                check_workspace_sources(ecosystem, package, path, text, tree, |ancestor| {
+                    manifests
+                        .iter()
+                        .find(|(_, p, _)| p == ancestor)
+                        .map(|(_, _, text)| text.clone())
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("could not read ancestor manifest {ancestor}")
+                        })
+                })
+        {
+            versions.fill(format!("manual: {reason}"));
+        }
         refs.extend(versions.into_iter().map(|v| (path.clone(), v)));
     }
     Ok(refs)
@@ -198,7 +218,7 @@ pub fn scan(
         match read_repo(client, repo, &mut questions)? {
             Some(snapshot) => {
                 readable += 1;
-                let refs = checked_refs(&snapshot.manifests, package, ecosystem)?;
+                let refs = checked_refs(&snapshot.manifests, &snapshot.tree, package, ecosystem)?;
                 if pins::handles(ecosystem) && !refs.is_empty() {
                     let guard = if snapshot.incomplete {
                         Err("the repository scan was incomplete".to_owned())

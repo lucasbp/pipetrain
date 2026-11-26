@@ -9,6 +9,8 @@ use crate::feed::Ecosystem;
 
 mod go;
 mod toml;
+mod workspace;
+pub use workspace::check_workspace_sources;
 
 struct Pin {
     current: String,
@@ -66,7 +68,7 @@ pub(super) fn valid_version(ecosystem: Ecosystem, package: &str, version: &str) 
         return false;
     }
     match ecosystem {
-        Ecosystem::Cargo => semver::Version::parse(version).is_ok(),
+        Ecosystem::Cargo => semver::Version::parse(version).is_ok_and(|v| v.build.is_empty()),
         Ecosystem::Pypi => version.parse::<pep440_rs::Version>().is_ok(),
         Ecosystem::Go => {
             static PSEUDO: LazyLock<Regex> =

@@ -50,17 +50,18 @@ fn cargo_name(name: &str) -> String {
     name.to_ascii_lowercase().replace('_', "-")
 }
 
-fn cargo_pins(text: &str, root: &DeTable<'_>, package: &str) -> Vec<Pin> {
+fn name_of(key: &str, node: &Node<'_>) -> String {
+    cargo_name(
+        node.get_ref()
+            .get("package")
+            .and_then(|n| n.get_ref().as_str())
+            .unwrap_or(key),
+    )
+}
+
+pub(super) fn patched(root: &DeTable<'_>, package: &str) -> bool {
     let name = cargo_name(package);
-    let name_of = |key: &str, node: &Node<'_>| {
-        cargo_name(
-            node.get_ref()
-                .get("package")
-                .and_then(|n| n.get_ref().as_str())
-                .unwrap_or(key),
-        )
-    };
-    let patched = tables(root, "patch").any(|t| {
+    tables(root, "patch").any(|t| {
         t.iter()
             .any(|(key, node)| name_of(key.get_ref(), node) == name)
     }) || table(root, &["replace"]).is_some_and(|t| {
@@ -68,7 +69,12 @@ fn cargo_pins(text: &str, root: &DeTable<'_>, package: &str) -> Vec<Pin> {
             let id = key.get_ref().rsplit('#').next().unwrap_or_default();
             cargo_name(id.split(':').next().unwrap_or_default()) == name
         })
-    });
+    })
+}
+
+fn cargo_pins(text: &str, root: &DeTable<'_>, package: &str) -> Vec<Pin> {
+    let name = cargo_name(package);
+    let patched = patched(root, package);
     let scopes = std::iter::once(root)
         .chain(table(root, &["workspace"]))
         .chain(tables(root, "target"));
@@ -101,16 +107,56 @@ fn cargo_pins(text: &str, root: &DeTable<'_>, package: &str) -> Vec<Pin> {
     pins
 }
 
+pub(super) fn uv_source(root: &DeTable<'_>, package: &str) -> bool {
+    let name = crate::pyproject::normalise(package);
+    let uv = table(root, &["tool", "uv"]);
+    table(root, &["tool", "uv", "sources"]).is_some_and(|t| {
+        t.keys()
+            .any(|key| crate::pyproject::normalise(key.get_ref()) == name)
+    }) || uv.is_some_and(|t| {
+        ["index-url", "extra-index-url", "find-links"]
+            .iter()
+            .any(|k| t.contains_key(*k))
+            || t.get("index")
+                .and_then(|v| v.get_ref().as_array())
+                .is_some_and(|indexes| {
+                    indexes.iter().any(|v| {
+                        v.get_ref()
+                            .get("explicit")
+                            .and_then(|v| v.get_ref().as_bool())
+                            != Some(true)
+                    })
+                })
+    }) || ["override-dependencies", "constraint-dependencies"]
+        .iter()
+        .any(|key| {
+            uv.and_then(|t| t.get(*key))
+                .and_then(|v| v.get_ref().as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.get_ref().as_str())
+                .any(|requirement| {
+                    let requirement = requirement.trim_start();
+                    let end = requirement
+                        .find(|c: char| {
+                            !(c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+                        })
+                        .unwrap_or(requirement.len());
+                    crate::pyproject::normalise(&requirement[..end]) == name
+                })
+        })
+}
+
 fn python_pins(text: &str, root: &DeTable<'_>, package: &str) -> Vec<Pin> {
     static REQUIREMENT: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]+\]\s*)?([^;]*)").unwrap()
     });
     let name = crate::pyproject::normalise(package);
     let mut pins = Vec::new();
-    let mut alternate = table(root, &["tool", "uv", "sources"]).is_some_and(|t| {
-        t.keys()
-            .any(|key| crate::pyproject::normalise(key.get_ref()) == name)
-    });
+    let mut alternate = uv_source(root, package)
+        || ["poetry", "pdm"]
+            .into_iter()
+            .any(|tool| table(root, &["tool", tool]).is_some_and(|t| t.contains_key("source")));
     let poetry = table(root, &["tool", "poetry"]);
     let groups = poetry.into_iter().flat_map(|p| tables(p, "group"));
     for scope in poetry.into_iter().chain(groups) {
