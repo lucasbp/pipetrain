@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.15.2
+
+- When a producer publishes a NuGet package during `merge --bump --apply`, pipetrain identifies queued consumers whose pin reaches their `max-behind` limit, even if the original plan had no package edge. Consumers in the same repository targeting the same base share one draft bump PR for that package and version.
+- The merge report lists the waiting consumers and how to resume. After the bump PR merges, rerun the original command with the same state file. Pipetrain checks the pin, updates stale consumer branches and rechecks readiness before merging them.
+
 ## 0.15.1
 
 - Merge tracking and recovery now read paginated GitHub Actions runs for the merge commit. A workflow on a later page is included in the verdict, and an incomplete listing cannot confirm a successful deployment.
