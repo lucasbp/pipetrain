@@ -40,14 +40,16 @@ First installs go through `install.sh` and `install.ps1`. After that `pipetrain 
 
 ## crates.io (manual, not part of the workflow)
 
-Publishing the crate is a separate decision and no workflow does it. When you decide to, from a clean checkout of the tagged commit and with the token only in the environment:
+Publish to crates.io only when requested, after the GitHub Release is available and its installers work. From a clean checkout of the tagged commit, run the dry run first. If it succeeds, let Cargo use its configured credential provider to retrieve the saved crates.io credential for the upload.
 
 ```
-cargo publish --dry-run --locked
-cargo publish --locked
+cargo publish --dry-run --locked --registry crates-io
+cargo publish --locked --registry crates-io
 ```
 
-`CARGO_REGISTRY_TOKEN` must be set in your shell for the second command; do not write it to a file. A published version cannot be replaced, only yanked, so run the dry run first and publish only after the GitHub Release is out and the installers work.
+Ask the maintainer for a token only if Cargo reports a missing credential or crates.io rejects its authentication or publish scope. Have the maintainer enter a token authorized to publish updates to `pipetrain` at the local `cargo login --registry crates-io` prompt, then retry the upload. Keep tokens out of chat, command arguments and logs.
+
+For build or network errors, diagnose the reported failure. If Cargo times out after uploading, check whether the version is already on crates.io before retrying. A published version can only be yanked.
 
 ## Checking a release by hand
 
