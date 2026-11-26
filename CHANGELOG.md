@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.15.0
+
+- `plan --check-feeds`, `feed` and standalone `bump` now support Cargo, PyPI and Go alongside NuGet and npm. Preview a consumer manifest update with `bump` before using `--apply` to open a draft PR. See [registry support](docs/feed-wait.md).
+- `plan` now shows execution order, pauses and actionable blockers in a compact view by default. Use `--verbose` for the full reasoning and per-check detail. Queue output and schema-1 JSON keep their existing contracts.
+- Planning and merge dry runs refresh mutable GitHub state, including approvals. Repeated commands reuse Git objects identified by SHA, and the persistent cache is scoped to the API origin, profile and credential.
+- Merge workflow evaluation, reporting and API estimates now live in separate modules. Regression tests cover consumer identity, recovery and write guards. CI also checks locked dependencies against RustSec, module boundaries, formatting and code comments.
+
 ## 0.14.0
 
 - The version preflight now matches the deploy gate. The `max-behind` limit is also read from reusable workflows the deploy workflow calls (`uses:` in `owner/repo/path@ref` or `./path` form, up to 5 levels), the gate fails when the pin is at or beyond the limit (`behind >= limit`, not only above it) and pre-releases are not counted. A PR held for it says `needs a bump of <package> to <version> (package <package> behind: installed A, latest stable B, limit N)`.
