@@ -4960,6 +4960,28 @@ fn no_run_grace_counts_http_and_caps_the_sleep() {
 }
 
 #[test]
+fn a_ready_answer_arriving_after_the_deadline_cannot_authorize_a_merge() {
+    for route in ["POST /graphql", "GET /repos/acme/api/pulls/1"] {
+        let mut rig = Rig::new("");
+        let state = FilterState::attach(&mut rig);
+        rig.script()
+            .http_elapsed
+            .insert(route.into(), Duration::from_secs(61));
+        let plan = plan_on(&[1]);
+        let run = rig.go(&plan);
+        assert_eq!(run.step(0).status, Status::Stopped, "{route}");
+        assert_eq!(run.outcome.code, EXIT_STOPPED);
+        assert_eq!(run.slept, Duration::ZERO);
+        assert!(rig.puts().is_empty());
+        assert!(state.reopen().state.pending.is_empty());
+        rig.script().http_elapsed.clear();
+        let retry = rig.go(&plan);
+        assert_eq!(retry.step(0).status, Status::Done);
+        assert_eq!(rig.puts().len(), 1);
+    }
+}
+
+#[test]
 fn both_mergeability_deadlines_count_slow_http_and_cap_sleeps() {
     for route in ["POST /graphql", "GET /repos/acme/api/pulls/1"] {
         let mut rig = Rig::new("");
