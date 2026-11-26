@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -210,6 +211,16 @@ pub fn scan(
     package: &str,
     ecosystem: Ecosystem,
 ) -> Result<Scan> {
+    scan_at_heads(client, names, package, ecosystem, &mut BTreeMap::new())
+}
+
+fn scan_at_heads(
+    client: &mut Client,
+    names: &Names,
+    package: &str,
+    ecosystem: Ecosystem,
+    heads: &mut BTreeMap<String, String>,
+) -> Result<Scan> {
     let mut questions = Vec::new();
     let mut found = Scan::default();
     let mut readable = 0;
@@ -241,6 +252,9 @@ pub fn scan(
                     }
                 }
                 if !refs.is_empty() {
+                    if pins::handles(ecosystem) {
+                        heads.insert(repo.clone(), snapshot.head);
+                    }
                     found.repos.push(RepoRefs {
                         repo: repo.clone(),
                         refs,
@@ -503,6 +517,7 @@ pub struct Outcome {
     pub elapsed: Duration,
     pub(crate) feed: Option<FeedOptions>,
     pub(crate) api: Option<ApiConfig>,
+    pub(crate) heads: BTreeMap<String, String>,
 }
 
 impl Outcome {
@@ -515,6 +530,7 @@ impl Outcome {
             elapsed: started.elapsed(),
             feed: None,
             api: None,
+            heads: BTreeMap::new(),
         }
     }
 }
@@ -586,7 +602,8 @@ pub fn execute(opts: &BumpOptions) -> Result<Outcome> {
     let mut client = Client::new(github::token()?, &cfg.api, opts.verbose)
         .with_cache(Cache::at_default(opts.cache));
     let progress = Progress::start(opts.progress);
-    let scanned = scan(&mut client, &names, &opts.package, ecosystem)?;
+    let mut heads = BTreeMap::new();
+    let scanned = scan_at_heads(&mut client, &names, &opts.package, ecosystem, &mut heads)?;
     drop(progress);
     before.extend(scanned.warnings.iter().cloned());
     if scanned.repos.is_empty() {
@@ -625,6 +642,7 @@ pub fn execute(opts: &BumpOptions) -> Result<Outcome> {
         elapsed,
         feed: Some(feed_options),
         api: Some(cfg.api.clone()),
+        heads,
     })
 }
 

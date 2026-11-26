@@ -205,6 +205,7 @@ pub(crate) fn scan_repo(
 }
 
 pub(crate) struct RepoSnapshot {
+    head: String,
     tree: Vec<String>,
     incomplete: bool,
     manifests: Vec<(String, String, String)>,
@@ -244,6 +245,7 @@ fn scan_repo_with_tree(
         .map(|(path, text)| (slug.to_string(), path, text))
         .collect();
     Ok(RepoSnapshot {
+        head: sha.to_owned(),
         tree,
         incomplete,
         manifests,
