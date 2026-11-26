@@ -1,27 +1,32 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::time::Duration;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::emit::PAUSE_LINE;
-use crate::github::Run;
 
 mod archive;
 pub mod category;
+mod estimate;
+mod report;
 mod storage;
+mod verdict;
 
 pub use archive::{Archival, ArchivedState, archived_beside};
+pub use estimate::{ApiEstimate, POLL_FLAT_STEPS, estimated_polls, poll_delay};
+pub use report::{
+    DeployOutcome, ExpectedRun, Kind, NotMerging, REPORT_SCHEMA, Report, Status, StepReport,
+    Summary,
+};
 pub use storage::{PendingPreview, StatePreview, resolve_state_path};
+pub use verdict::{Verdict, judge, judge_expected};
 
 pub const SCHEMA: u32 = 2;
-pub const REPORT_SCHEMA: u32 = 1;
 pub const STOPPED: &str = "stopped after an earlier failure";
 pub const EXIT_STOPPED: i32 = 5;
 
 const GENERIC_GATE: &str = "confirm DDL/infra before continuing";
-const GOOD_CONCLUSIONS: [&str; 3] = ["success", "skipped", "neutral"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Step {
@@ -52,156 +57,6 @@ pub fn steps(lines: &[String]) -> Vec<Step> {
 
 pub fn wait_is_published(text: &str) -> bool {
     text.ends_with("(published)")
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Verdict {
-    NoRuns,
-    Waiting(String),
-    Failed(String),
-    Passed(usize),
-    Skipped(usize),
-}
-
-fn same_workflow(a: &Run, b: &Run) -> bool {
-    if a.workflow_id != 0 || b.workflow_id != 0 {
-        a.workflow_id == b.workflow_id
-    } else {
-        a.name == b.name
-    }
-}
-
-fn superseded(run: &Run, all: &[Run]) -> bool {
-    run.status == "completed"
-        && run.conclusion.as_deref() == Some("cancelled")
-        && all
-            .iter()
-            .any(|other| other.id > run.id && same_workflow(other, run))
-}
-
-pub fn judge(all: &[Run]) -> Verdict {
-    if all.is_empty() {
-        return Verdict::NoRuns;
-    }
-    let runs: Vec<&Run> = all.iter().filter(|run| !superseded(run, all)).collect();
-    for run in runs.iter().filter(|run| run.status == "completed") {
-        let conclusion = run.conclusion.as_deref().unwrap_or("unknown");
-        if !GOOD_CONCLUSIONS.contains(&conclusion) {
-            return Verdict::Failed(format!(
-                "workflow {} ended as {conclusion}: {}",
-                run.name, run.url
-            ));
-        }
-    }
-    let running = runs.iter().filter(|run| run.status != "completed").count();
-    if running > 0 {
-        return Verdict::Waiting(format!(
-            "{running} of {} workflow runs still going",
-            runs.len()
-        ));
-    }
-    if runs
-        .iter()
-        .all(|run| run.conclusion.as_deref() == Some("skipped"))
-    {
-        Verdict::Skipped(runs.len())
-    } else {
-        Verdict::Passed(runs.len())
-    }
-}
-
-pub fn judge_expected(all: &[Run], prediction: &crate::workflows::PushRuns) -> Verdict {
-    let crate::workflows::PushRuns::Expected {
-        workflows,
-        chained_workflows,
-        untracked_chains,
-    } = prediction
-    else {
-        return judge(all);
-    };
-    let paths: Vec<_> = workflows.iter().chain(chained_workflows).collect();
-    let runs: Vec<_> = all
-        .iter()
-        .filter(|run| {
-            paths.contains(&&run.path)
-                && !(run.status == "completed"
-                    && run.conclusion.as_deref() == Some("cancelled")
-                    && all.iter().any(|other| {
-                        other.path == run.path && other.id > run.id && same_workflow(other, run)
-                    }))
-        })
-        .collect();
-    for run in &runs {
-        if run.status == "completed"
-            && !matches!(run.conclusion.as_deref(), Some("success" | "skipped"))
-        {
-            return Verdict::Failed(format!(
-                "workflow {} ended as {}: {}",
-                run.name,
-                run.conclusion.as_deref().unwrap_or("unknown"),
-                run.url
-            ));
-        }
-    }
-    if !untracked_chains.is_empty() {
-        return Verdict::Waiting(
-            untracked_chains
-                .iter()
-                .map(|path| format!("chained workflow {path} cannot be tracked"))
-                .collect::<Vec<_>>()
-                .join("; "),
-        );
-    }
-    if all.is_empty() {
-        return Verdict::NoRuns;
-    }
-    let missing: Vec<_> = paths
-        .iter()
-        .filter(|path| !runs.iter().any(|run| &run.path == **path))
-        .map(|path| path.as_str())
-        .collect();
-    if !missing.is_empty() || paths.is_empty() {
-        return Verdict::Waiting(format!(
-            "waiting for expected workflows: {}",
-            missing.join(", ")
-        ));
-    }
-    let running = runs.iter().filter(|run| run.status != "completed").count();
-    if running > 0 {
-        return Verdict::Waiting(format!(
-            "{running} of {} expected workflow runs still going",
-            runs.len()
-        ));
-    }
-    if runs
-        .iter()
-        .all(|run| run.conclusion.as_deref() == Some("skipped"))
-    {
-        Verdict::Skipped(runs.len())
-    } else {
-        Verdict::Passed(runs.len())
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExpectedRun {
-    pub path: String,
-    pub name: String,
-    pub html_url: String,
-    pub status: String,
-    pub conclusion: Option<String>,
-}
-
-impl From<&Run> for ExpectedRun {
-    fn from(run: &Run) -> Self {
-        Self {
-            path: run.path.clone(),
-            name: run.name.clone(),
-            html_url: run.url.clone(),
-            status: run.status.clone(),
-            conclusion: run.conclusion.clone(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -537,28 +392,6 @@ impl Store {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Kind {
-    Resume,
-    Bump,
-    Merge,
-    Gate,
-    Wait,
-    #[serde(rename = "open-pr")]
-    OpenPr,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Status {
-    Planned,
-    Done,
-    Skipped,
-    Failed,
-    Stopped,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdminOverride {
     pub reason: String,
@@ -578,253 +411,10 @@ pub struct AdminOverrideRecord {
     pub at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StepReport {
-    pub kind: Kind,
-    pub target: String,
-    pub status: Status,
-    pub detail: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub admin_override: Option<AdminOverride>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub merge_sha: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub deploy: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub blocked_by: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bump: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deploy_prediction: Option<crate::workflows::PushRuns>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub expected_runs: Vec<ExpectedRun>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resolution: Option<Resolution>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deploy_outcome: Option<DeployOutcome>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub settle_seconds: Option<u64>,
-    #[serde(skip)]
-    pub inherited: bool,
-}
-
-impl StepReport {
-    pub fn new(kind: Kind, target: &str, status: Status, detail: &str) -> Self {
-        Self {
-            kind,
-            target: target.to_string(),
-            status,
-            detail: detail.to_string(),
-            admin_override: None,
-            merge_sha: None,
-            deploy: None,
-            blocked_by: None,
-            bump: None,
-            deploy_prediction: None,
-            expected_runs: Vec::new(),
-            resolution: None,
-            deploy_outcome: None,
-            settle_seconds: None,
-            inherited: false,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DeployOutcome {
-    Confirmed,
-    Dispensed,
-    Indeterminate,
-    Skipped,
-    Failed,
-}
-
-#[derive(Debug, Default, Clone, Serialize)]
-pub struct Summary {
-    pub merged: usize,
-    pub earlier_merges_checked: usize,
-    pub deploy_confirmed: usize,
-    pub deploy_dispensed: usize,
-    pub deploy_indeterminate: usize,
-    pub deploy_resolved: usize,
-    pub deploy_skipped: usize,
-    pub deploy_failed: usize,
-    pub failed: usize,
-    pub stopped: usize,
-}
-
-impl Summary {
-    pub fn from_steps<'a>(steps: impl IntoIterator<Item = &'a StepReport>) -> Self {
-        let mut summary = Self::default();
-        for step in steps {
-            summary.failed += usize::from(step.status == Status::Failed);
-            summary.stopped += usize::from(step.status == Status::Stopped);
-            if !matches!(step.kind, Kind::Merge | Kind::Resume) || step.merge_sha.is_none() {
-                continue;
-            }
-            summary.merged += usize::from(step.kind == Kind::Merge);
-            summary.earlier_merges_checked += usize::from(step.kind == Kind::Resume);
-            if step.resolution.is_some() {
-                summary.deploy_resolved += 1;
-                continue;
-            }
-            match step.deploy_outcome {
-                Some(DeployOutcome::Confirmed) => summary.deploy_confirmed += 1,
-                Some(DeployOutcome::Dispensed) => summary.deploy_dispensed += 1,
-                Some(DeployOutcome::Indeterminate) | None => summary.deploy_indeterminate += 1,
-                Some(DeployOutcome::Skipped) => summary.deploy_skipped += 1,
-                Some(DeployOutcome::Failed) => summary.deploy_failed += 1,
-            }
-        }
-        summary
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct NotMerging {
-    pub id: String,
-    pub reasons: Vec<String>,
-    pub state: category::Category,
-}
-
-impl NotMerging {
-    pub fn new(id: &str, reasons: Vec<String>) -> Self {
-        Self {
-            id: id.to_string(),
-            state: category::classify(&reasons),
-            reasons,
-        }
-    }
-}
-
-#[derive(Debug, Default, Serialize)]
-pub struct ApiEstimate {
-    pub discovery: u64,
-    pub checks: u64,
-    pub deploy_polls: u64,
-    pub total: u64,
-    pub budget: u32,
-    pub exceeds_budget: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rate_remaining: Option<u64>,
-    pub warn: bool,
-}
-
-impl ApiEstimate {
-    pub fn warning(&self) -> Option<String> {
-        if self.exceeds_budget {
-            return Some(format!(
-                "warning: about {} API requests, over the budget of {}; raise api.max_requests (this does not block)",
-                self.total, self.budget
-            ));
-        }
-        if self.warn {
-            return Some(format!(
-                "warning: about {} API requests, over half of the {} GitHub still allows (this does not block)",
-                self.total,
-                self.rate_remaining.unwrap_or_default()
-            ));
-        }
-        None
-    }
-}
-
-pub const POLL_FLAT_STEPS: u64 = 4;
-
-pub fn poll_delay(base: Duration, ceiling: Duration, sleeps: u64) -> Duration {
-    let ceiling = ceiling.max(base);
-    if sleeps < POLL_FLAT_STEPS {
-        return base;
-    }
-    let doublings = (sleeps - POLL_FLAT_STEPS + 1).min(31) as u32;
-    base.saturating_mul(1u32 << doublings).min(ceiling)
-}
-
-pub fn estimated_polls(timeout: Duration, base: Duration, ceiling: Duration) -> u64 {
-    let base = base.max(Duration::from_millis(1));
-    let ceiling = ceiling.max(base);
-    let mut elapsed = Duration::ZERO;
-    let mut sleeps = 0u64;
-    while elapsed < timeout {
-        let delay = poll_delay(base, ceiling, sleeps);
-        if delay >= ceiling {
-            let rest = (timeout - elapsed).as_nanos().div_ceil(ceiling.as_nanos());
-            sleeps = sleeps.saturating_add(u64::try_from(rest).unwrap_or(u64::MAX));
-            break;
-        }
-        elapsed += delay;
-        sleeps += 1;
-    }
-    sleeps.saturating_add(1)
-}
-
-#[derive(Debug, Serialize)]
-pub struct Report {
-    pub api_estimate: ApiEstimate,
-    pub api_usage: crate::github::Usage,
-    pub max_parallel: usize,
-    pub summary: Summary,
-    pub preflight: Vec<crate::model::Readiness>,
-    pub state: StatePreview,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub bump_enabled: bool,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub bump_candidates: Vec<String>,
-    pub schema: u32,
-    pub applied: bool,
-    #[serde(skip)]
-    pub requested: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stopped: Option<String>,
-    pub steps: Vec<StepReport>,
-    pub not_merging: Vec<NotMerging>,
-    pub questions: Vec<String>,
-    #[serde(skip)]
-    pub notices: Vec<String>,
-    #[serde(skip)]
-    pub held: Vec<Pending>,
-}
-
-impl Report {
-    pub fn count_state(&self, state: category::Category) -> usize {
-        self.not_merging
-            .iter()
-            .filter(|skipped| skipped.state == state)
-            .count()
-    }
-
-    pub fn count(&self, status: Status) -> usize {
-        self.steps.iter().filter(|s| s.status == status).count()
-    }
-
-    pub fn exit_code(&self) -> i32 {
-        if self.count(Status::Failed) > 0 {
-            1
-        } else if self.count(Status::Stopped) > 0 {
-            EXIT_STOPPED
-        } else {
-            0
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
-
-    fn run(name: &str, status: &str, conclusion: Option<&str>) -> Run {
-        Run {
-            id: 0,
-            workflow_id: 0,
-            name: name.to_string(),
-            path: format!(".github/workflows/{name}.yml"),
-            status: status.to_string(),
-            conclusion: conclusion.map(str::to_string),
-            url: format!("https://example.test/{name}"),
-        }
-    }
 
     fn lines(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| (*s).to_string()).collect()
@@ -877,132 +467,6 @@ mod tests {
         assert!(!wait_is_published(
             "package a from x#1 must be published before y#2"
         ));
-    }
-
-    #[test]
-    fn no_runs_means_nothing_to_judge_yet() {
-        assert_eq!(judge(&[]), Verdict::NoRuns);
-    }
-
-    #[test]
-    fn only_all_skipped_runs_are_a_normal_skipped_deploy() {
-        assert_eq!(
-            judge(&[run("publish", "completed", Some("skipped"))]),
-            Verdict::Skipped(1)
-        );
-        assert_eq!(
-            judge(&[
-                numbered(1, 1, "completed", Some("success")),
-                numbered(2, 2, "completed", Some("skipped"))
-            ]),
-            Verdict::Passed(2)
-        );
-        assert_eq!(
-            judge(&[run("audit", "completed", Some("neutral"))]),
-            Verdict::Passed(1)
-        );
-        assert!(matches!(
-            judge(&[
-                numbered(1, 1, "completed", Some("failure")),
-                numbered(2, 2, "completed", Some("skipped"))
-            ]),
-            Verdict::Failed(_)
-        ));
-    }
-
-    #[test]
-    fn a_failed_run_wins_even_while_others_still_run() {
-        let runs = [
-            run("build", "in_progress", None),
-            run("deploy", "completed", Some("failure")),
-        ];
-
-        assert!(
-            matches!(judge(&runs), Verdict::Failed(text) if text.contains("deploy ended as failure"))
-        );
-    }
-
-    #[test]
-    fn cancelled_and_timed_out_runs_are_failures() {
-        for conclusion in [
-            "cancelled",
-            "timed_out",
-            "action_required",
-            "startup_failure",
-        ] {
-            let runs = [run("deploy", "completed", Some(conclusion))];
-            assert!(matches!(judge(&runs), Verdict::Failed(_)), "{conclusion}");
-        }
-    }
-
-    fn numbered(id: u64, workflow: u64, status: &str, conclusion: Option<&str>) -> Run {
-        Run {
-            id,
-            workflow_id: workflow,
-            ..run("ci", status, conclusion)
-        }
-    }
-
-    #[test]
-    fn a_cancelled_run_that_a_newer_run_of_the_same_workflow_replaced_is_ignored() {
-        let runs = [
-            numbered(1, 7, "completed", Some("cancelled")),
-            numbered(2, 7, "completed", Some("success")),
-        ];
-
-        assert_eq!(judge(&runs), Verdict::Passed(1));
-    }
-
-    #[test]
-    fn a_replacement_still_running_is_waited_for() {
-        let runs = [
-            numbered(1, 7, "completed", Some("cancelled")),
-            numbered(2, 7, "in_progress", None),
-        ];
-
-        assert_eq!(
-            judge(&runs),
-            Verdict::Waiting("1 of 1 workflow runs still going".to_string())
-        );
-    }
-
-    #[test]
-    fn a_cancelled_run_nobody_replaced_still_fails() {
-        let runs = [
-            numbered(1, 7, "completed", Some("cancelled")),
-            numbered(2, 8, "completed", Some("success")),
-        ];
-
-        assert!(matches!(judge(&runs), Verdict::Failed(_)));
-        let alone = [numbered(3, 7, "completed", Some("cancelled"))];
-        assert!(matches!(judge(&alone), Verdict::Failed(_)));
-    }
-
-    #[test]
-    fn a_newer_cancelled_run_is_not_replaced_by_an_older_one() {
-        let runs = [
-            numbered(5, 7, "completed", Some("success")),
-            numbered(6, 7, "completed", Some("cancelled")),
-        ];
-
-        assert!(matches!(judge(&runs), Verdict::Failed(_)));
-    }
-
-    #[test]
-    fn running_runs_wait_and_finished_good_runs_pass() {
-        let running = [
-            run("build", "completed", Some("success")),
-            run("deploy", "queued", None),
-        ];
-        assert_eq!(
-            judge(&running),
-            Verdict::Waiting("1 of 2 workflow runs still going".to_string())
-        );
-        let done = [
-            run("build", "completed", Some("success")),
-            run("lint", "completed", Some("skipped")),
-        ];
-        assert_eq!(judge(&done), Verdict::Passed(2));
     }
 
     #[test]

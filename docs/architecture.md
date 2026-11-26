@@ -66,11 +66,16 @@ Paths below are relative to the repository root. Each line identifies a source m
 
 ### Merge execution and recovery
 
-- `src/merge.rs`: queue-step parsing, deploy verdicts, state/report types, store operations and summaries.
+- `src/merge.rs` parses queue steps, owns state types and store operations, and re-exports the merge API.
+- `src/merge/verdict.rs` judges observed runs against legacy or expected workflow rules.
+- `src/merge/report.rs` defines the serialized report, step details, summaries and exit status.
+- `src/merge/estimate.rs` defines the API estimate, budget warnings and polling schedule used by both the estimate and the executor.
 - `src/merge/storage.rs`: state paths, schema loading, previews, exclusive locking and atomic saves.
 - `src/workflows.rs`: push-filter evaluation, expected workflow paths, chained workflows and conservative predictions.
 - `src/merge_scheduler.rs`: dependency-aware worker scheduling, repository exclusion, barriers and failure policies.
-- `src/command/merge.rs`: merge CLI orchestration, live revalidation, merge requests, deploy polling and reports.
+- `src/command/merge.rs`: merge CLI orchestration, live revalidation, merge requests and deploy polling.
+- `src/command/merge/compact.rs` and `src/command/merge/verbose.rs` render compact and detailed merge reports.
+- `src/command/merge/estimate.rs` calculates projected API requests from the plan, pending deploys and deploy predictions.
 - `src/command/merge/parallel.rs`: queue-to-job translation, worker clients and coordinator-owned state/progress.
 - `src/command/merge/stacked.rs`: in-invocation child evidence and verification of a changed parent head.
 - `src/command/merge/failure.rs`: failed-deploy dependency closure and independence checks for continuation.
@@ -134,7 +139,7 @@ Paths below are relative to the repository root. Each line identifies a source m
 
 ### Durable state has its own identity, schema and lock
 
-`src/merge.rs` separates state schema 2 from report schema 1. `src/merge/storage.rs` accepts older state in memory and refuses newer schemas before writing. State identity persists across invocations and completed queues; timestamps and pending ages preserve unknown legacy values. Named profiles select separate durable queue paths. The rationale for the particular profile-directory layout is not stated (reason not documented). Exact path precedence, legacy protection and field contracts are in [merge state](merge.md#resuming) and [state inspection](state.md).
+State schema 2 lives in `src/merge.rs`. Report schema 1 lives in `src/merge/report.rs`. `src/merge/storage.rs` accepts older state in memory and refuses newer schemas before writing. State identity persists across invocations and completed queues; timestamps and pending ages preserve unknown legacy values. Named profiles select separate durable queue paths. The rationale for the particular profile-directory layout is not stated (reason not documented). Exact path precedence, legacy protection and field contracts are in [merge state](merge.md#resuming) and [state inspection](state.md).
 
 The intent is durable recovery after the process ends between a GitHub write and its reply or between merge and deployment confirmation. Intent is recorded before merging, so resume can reconcile an unknown SHA without assuming the request failed. The exclusive OS lock spans apply; reloading under it replaces the pre-lock snapshot. Unique temporary siblings and atomic replacement preserve the previous state on failed saves. The queue ID names the persistent queue, not a particular selection. The choice of its particular ID construction algorithm has no stated rationale (reason not documented).
 
@@ -144,7 +149,7 @@ The intent is durable recovery after the process ends between a GitHub write and
 
 `src/workflows.rs` produces `expected`, `dispensed` or `indeterminate`. Push branch and path filters must both match, and rename sources count as changed paths. Execution reads workflows at the merge SHA, while dry-run prediction uses the planned head. The explicit repository exemption precedes prediction. Complete exclusions can dispense waiting; unreadable or unsupported inputs retain polling.
 
-Expected-path tracking in `src/merge.rs` requires the expected push and resolved `workflow_run` chain paths at the merge SHA. Auxiliary green jobs cannot stand in for deployment; unresolved chains cannot silently confirm it. Two complete polls with a stable run count settle successful observations. These choices prevent unrelated or early-finishing runs from providing false deploy evidence and preserve waiting under uncertainty. Saved predictions keep resume tied to the same expectation. Legacy records retain their older verdict rules. Supported filters, completeness limits and all verdict details live in [merge.md](merge.md#what-it-waits-for).
+Expected-path tracking in `src/merge/verdict.rs` requires the expected push and resolved `workflow_run` chain paths at the merge SHA. Auxiliary green jobs cannot stand in for deployment; unresolved chains cannot silently confirm it. Two complete polls with a stable run count settle successful observations. These choices prevent unrelated or early-finishing runs from providing false deploy evidence and preserve waiting under uncertainty. Saved predictions keep resume tied to the same expectation. Legacy records retain their older verdict rules. Supported filters, completeness limits and all verdict details live in [merge.md](merge.md#what-it-waits-for).
 
 ### Plan and merge share one readiness policy
 
