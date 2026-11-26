@@ -113,7 +113,7 @@ impl Script {
             return (
                 200,
                 json!({"total_count": 1, "workflow_runs": [{
-                    "name": "deploy", "path": ".github/workflows/deploy.yml",
+                    "id": 1, "name": "deploy", "path": ".github/workflows/deploy.yml",
                     "status": "completed", "conclusion": conclusion,
                     "html_url": "https://example.test/acme/api/actions/runs/1"
                 }]}),

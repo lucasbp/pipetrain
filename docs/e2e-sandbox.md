@@ -1,7 +1,8 @@
 # Opt-in GitHub sandbox tests
 
-`tests/e2e_sandbox.rs` runs the real compiled CLI against four existing public
-repositories. It checks exit codes, merge JSON, local state JSON and text, and
+`tests/e2e_sandbox.rs` runs the real compiled CLI against four repositories.
+API, web and static are private. Guarded is public and requires a review on `main`.
+The harness checks exit codes, merge JSON, local state JSON and text, and
 Actions evidence. It is ignored in the normal suite, never runs in CI, and has
 no scheduled job. A human must run it with an authenticated `gh` installation.
 
@@ -55,7 +56,14 @@ and the manual Actions waiter a three minute limit with three second polling.
 The guarded check-run waiter has the same three minute limit and polling interval;
 it waits for checks to appear and for all of them to complete.
 
-Recovery selects the already merged fix PR B explicitly. Discovery reports it
+The expected API deploy case kills its own merge subprocess after the state
+file contains the accepted merge SHA and the expected workflow prediction.
+The harness stays alive for cleanup. It checks the pending record with
+`state show`, verifies the SHA on GitHub, then starts another CLI process using
+the same state file and PR. The resumed request trace must show deploy reads
+at that SHA and zero merge PUTs. The successful run settles the pending record.
+
+Web recovery selects the already merged fix PR B explicitly. Discovery reports it
 under `not_merging` as already merged, while pending A is resumed from the same
 state file. No new merge is scheduled. The later SHA and run evidence must match
 both the resume resolution and its single audit entry.
@@ -79,15 +87,14 @@ Budget about eight minutes for a healthy full execution, subject to GitHub
 scheduling and API latency; this is an estimate, not a measured duration. It
 needs five Actions runs: four short deploy jobs (one API, two recovery web jobs,
 and one parallel web job), plus one deliberately failing guarded PR check.
-Expect roughly five billed runner-minutes with per-job one-minute rounding;
-standard runners in these
-public repos are free. Forced baseline resets are skipped by the job condition;
+The API and web jobs use private-repository Actions minutes. The guarded check
+runs on a standard runner in a public repository. Forced baseline resets are skipped by the job condition;
 the baseline commit also carries `[skip ci]`. No workflows are rerun by the test.
 
 ## Recreating the sandbox
 
 These are manual setup instructions, not part of the harness. Create each repo
-with `gh repo create lucasbp/pipetrain-sandbox-<x> --public --add-readme`, replacing
+with `gh repo create lucasbp/pipetrain-sandbox-<x> --private --add-readme`, replacing
 `<x>` with `api`, `web`, and `static`. Clone them into separate directories and
 ensure their default branch is `main`. Leave branch protection and PR checks
 disabled. Keep `README.md` in all three. Add `deploy/version.txt` containing `0`
@@ -150,7 +157,7 @@ force-resetting these unprotected sandbox `main` branches.
 
 ## Guarded repository setup
 
-Create `lucasbp/pipetrain-sandbox-guarded` as another public repository with
+Create `lucasbp/pipetrain-sandbox-guarded` as a public repository with
 default branch `main`, containing only `README.md` at baseline and no workflows.
 Create and push the annotated `baseline` tag on that setup commit as above.
 Keep rulesets disabled and required status checks unset. As the repository

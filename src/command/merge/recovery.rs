@@ -30,10 +30,18 @@ fn later(
         .filter(|reading| matches!(reading, PushRuns::Expected { .. }));
     let mut settled = None;
     for poll in 0..2 {
-        let (runs, complete) = client.workflow_runs(&pending.repo, &tip, prediction.is_none())?;
+        let mut listing = crate::github::RunListing::default();
+        let complete = client.read_run_pages(
+            &pending.repo,
+            &tip,
+            prediction.is_none(),
+            &mut listing,
+            || true,
+        )?;
+        let runs = &listing.runs;
         let verdict = prediction.map_or_else(
-            || judge(&runs),
-            |prediction| judge_expected(&runs, prediction),
+            || judge(runs),
+            |prediction| judge_expected(runs, prediction),
         );
         let evidence: Vec<ExpectedRun> = runs
             .iter()
@@ -62,14 +70,15 @@ fn later(
         if !complete || evidence.is_empty() || evidence.iter().any(|run| run.html_url.is_empty()) {
             bail!("later SHA {tip} lacks complete workflow run evidence; runs: {urls}");
         }
-        if settled == Some(count) {
+        let observed = (count, crate::merge::settled_ids(&listing, prediction));
+        if settled.as_ref() == Some(&observed) {
             return Ok(Resolution {
                 status: AuditAction::ResolvedByLaterDeploy,
                 sha: tip,
                 runs: evidence,
             });
         }
-        settled = Some(count);
+        settled = Some(observed);
         if poll == 0 {
             (hooks.sleep)(Duration::from_secs(env.cfg.merge.poll_seconds.max(1)));
         }

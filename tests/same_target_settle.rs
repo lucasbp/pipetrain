@@ -31,7 +31,7 @@ fn merge_sha(number: u64) -> String {
 
 fn run_json(conclusion: &str) -> Value {
     json!({
-        "name": "deploy",
+        "id": 101, "name": "deploy",
         "path": ".github/workflows/deploy.yml",
         "status": "completed",
         "conclusion": conclusion,

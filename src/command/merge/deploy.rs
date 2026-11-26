@@ -54,10 +54,10 @@ fn wait_for_deploy(
     let mut clock = DeployClock::new((hooks.now)(), limits.timeout, limits.queued_ceiling);
     let mut sleeps = 0u64;
     let mut consecutive_errors = 0;
-    let mut settled: Option<usize> = None;
+    let mut settled = None;
     let mut last = "no workflow run yet".to_string();
     let mut auxiliary_failures = std::collections::BTreeSet::new();
-    let mut known: Vec<crate::github::Run> = Vec::new();
+    let mut known = crate::github::RunListing::default();
     let outcome = loop {
         let now = (hooks.now)();
         if clock.ceiling_hit(now) {
@@ -66,24 +66,32 @@ fn wait_for_deploy(
         if clock.timed_out(now) {
             break Deploy::TimedOut(last);
         }
-        let reading = if settled.is_none() && follow_by_id(expected, &known) {
-            client.refresh_runs(slug, &known).map(|runs| (runs, true))
+        let mut listing = crate::github::RunListing::default();
+        let judge_runs =
+            |runs: &[_]| expected.map_or_else(|| judge(runs), |p| judge_expected(runs, p));
+        let reading = if settled.is_none() && follow_by_id(expected, &known.runs) {
+            client.refresh_run_listing(slug, sha, &known, &mut listing)
         } else {
-            client.workflow_runs(slug, sha, expected.is_none())
+            client.read_run_pages(slug, sha, expected.is_none(), &mut listing, || {
+                !clock.remaining((hooks.now)()).is_zero()
+            })
         };
-        let (runs, complete) = match reading {
-            Ok((runs, complete)) => {
+        let runs = &listing.runs;
+        let complete = match reading {
+            Ok(complete) => {
                 consecutive_errors = 0;
                 if complete {
-                    known.clone_from(&runs);
+                    known.clone_from(&listing);
                 } else {
-                    known.clear();
+                    known = Default::default();
                 }
-                (runs, complete)
+                complete
             }
+            Err(_) if matches!(judge_runs(runs), Verdict::Failed(_)) => false,
             Err(error) if transient_read(&error) => {
                 consecutive_errors += 1;
                 settled = None;
+                known = Default::default();
                 last = format!("transient workflow read error: {error}");
                 let remaining = clock.remaining((hooks.now)());
                 if remaining.is_zero() {
@@ -103,6 +111,12 @@ fn wait_for_deploy(
             Err(error) => break Deploy::Unreadable(error.to_string()),
         };
         let now = (hooks.now)();
+        if clock.ceiling_hit(now) {
+            break Deploy::QueuedTooLong(last);
+        }
+        if clock.timed_out(now) {
+            break Deploy::TimedOut(last);
+        }
         let waiting = {
             let tracked: Vec<&crate::github::Run> = match expected {
                 Some(PushRuns::Expected {
@@ -117,7 +131,7 @@ fn wait_for_deploy(
                     .collect(),
                 _ => runs.iter().collect(),
             };
-            waiting_for_runner(&tracked)
+            complete && waiting_for_runner(&tracked)
         };
         if waiting != clock.queued() {
             if waiting {
@@ -154,31 +168,26 @@ fn wait_for_deploy(
                 &observed
             }
         ));
-        let mut verdict = if let Some(prediction) = expected {
-            if let PushRuns::Expected {
-                workflows,
-                chained_workflows,
-                ..
-            } = prediction
-            {
-                let is_expected =
-                    |path: &String| workflows.contains(path) || chained_workflows.contains(path);
-                report.expected_runs = runs
-                    .iter()
-                    .filter(|run| is_expected(&run.path))
-                    .map(crate::merge::ExpectedRun::from)
-                    .collect();
-                for run in runs.iter().filter(|run| !is_expected(&run.path)) {
-                    if let Verdict::Failed(text) = judge(std::slice::from_ref(run)) {
-                        auxiliary_failures
-                            .insert(format!("auxiliary {text} (does not decide deploy)"));
-                    }
+        if let Some(PushRuns::Expected {
+            workflows,
+            chained_workflows,
+            ..
+        }) = expected
+        {
+            let is_expected =
+                |path: &String| workflows.contains(path) || chained_workflows.contains(path);
+            report.expected_runs = runs
+                .iter()
+                .filter(|run| is_expected(&run.path))
+                .map(crate::merge::ExpectedRun::from)
+                .collect();
+            for run in runs.iter().filter(|run| !is_expected(&run.path)) {
+                if let Verdict::Failed(text) = judge(std::slice::from_ref(run)) {
+                    auxiliary_failures.insert(format!("auxiliary {text} (does not decide deploy)"));
                 }
             }
-            judge_expected(&runs, prediction)
-        } else {
-            judge(&runs)
-        };
+        }
+        let mut verdict = judge_runs(runs);
         if !complete && !matches!(verdict, Verdict::Failed(_)) {
             verdict = Verdict::Waiting(
                 "workflow run response is incomplete; cannot confirm deploy".to_string(),
@@ -189,14 +198,15 @@ fn wait_for_deploy(
             Verdict::Failed(text) => break Deploy::Failed(text),
             verdict @ (Verdict::Passed(count) | Verdict::Skipped(count)) => {
                 let skipped = matches!(verdict, Verdict::Skipped(_));
-                if settled == Some(count) {
+                let observed = (count, crate::merge::settled_ids(&listing, expected));
+                if settled.as_ref() == Some(&observed) {
                     break if skipped {
                         Deploy::Skipped(count)
                     } else {
                         Deploy::Passed(count)
                     };
                 }
-                settled = Some(count);
+                settled = Some(observed);
                 let conclusion = if skipped { "skipped" } else { "passed" };
                 emit(&format!(
                     "deploy {slug}: {count} workflows {conclusion}, confirming completion"
