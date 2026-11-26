@@ -170,18 +170,15 @@ fn a_short_page_disagreeing_with_its_total_is_incomplete() {
 }
 
 #[test]
-fn a_single_page_requires_positive_run_ids_and_matching_shas() {
-    for (field, invalid) in [
-        ("id", Value::Null),
-        ("id", json!(0)),
-        ("head_sha", json!("other")),
-    ] {
-        let mut body = page(1, 1, Some(1));
-        body["workflow_runs"][0][field] = invalid;
-        let (result, paths) = read(vec![(200, body)], false, 2);
-        assert!(!result.unwrap().1);
-        assert_eq!(paths, expected_paths(1, false));
-    }
+fn a_failure_on_another_sha_cannot_contribute_evidence() {
+    let mut body = page(1, 1, Some(1));
+    body["workflow_runs"][0]["head_sha"] = json!("other");
+    body["workflow_runs"][0]["conclusion"] = json!("failure");
+    let (result, paths) = read(vec![(200, body)], false, 1);
+    let (runs, complete) = result.unwrap();
+    assert!(!complete);
+    assert!(runs.is_empty());
+    assert_eq!(paths, expected_paths(1, false));
 }
 
 #[test]

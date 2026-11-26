@@ -4768,13 +4768,7 @@ state_file = "state.json"
     let cli = |command: &str, flags: &[&str]| {
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_pipetrain"))
             .args([command, "acme/app#2", "acme/kit#1", "acme/docs#3"])
-            .args([
-                "--config",
-                "config.toml",
-                "--no-cache",
-                "--no-progress",
-                "--json",
-            ])
+            .args(["--config", "config.toml", "--no-cache", "--no-progress"])
             .args(flags)
             .current_dir(directory.path())
             .env("GH_TOKEN", "ghp_FAKE0123456789")
@@ -4789,9 +4783,9 @@ state_file = "state.json"
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+        String::from_utf8(output.stdout).unwrap()
     };
-    let plan = cli("plan", &[]);
+    let plan: Value = serde_json::from_str(&cli("plan", &["--json"])).unwrap();
     let stages = plan["stages"].as_array().unwrap();
     assert_eq!(stages.len(), 2, "{plan}");
     let ready = stages[0]["together"].as_array().unwrap();
@@ -4800,21 +4794,16 @@ state_file = "state.json"
     assert_eq!(stages[1]["together"], json!(["acme/app#2"]));
     assert_eq!(stages[1]["waits"][0]["reason"], "package");
     assert_eq!(stages[1]["waits"][0]["behind"], json!(["acme/kit#1"]));
-    let preview = cli("merge", &[]);
-    let steps = preview["steps"].as_array().unwrap();
-    let index = |target: &str| {
-        steps
-            .iter()
-            .position(|step| step["target"] == target)
-            .unwrap()
-    };
-    let wait = index("package @acme/kit 1.1.0 from acme/kit#1 must be published before acme/app#2");
-    assert_eq!(steps[wait]["kind"], "wait");
-    assert!(index("acme/kit#1") < wait && wait < index("acme/app#2"));
+    let queue = cli("plan", &["--emit", "queue"]);
+    let index = |expected: &str| queue.lines().position(|line| line == expected).unwrap();
+    let wait = index(
+        "# wait: package @acme/kit 1.1.0 from acme/kit#1 must be published before acme/app#2",
+    );
+    assert!(index("merge:acme/kit#1") < wait && wait < index("merge:acme/app#2"));
     assert!(rig.puts().is_empty());
 
     rig.script().graphql_states.insert(1, "DIRTY".into());
-    let blocked = cli("plan", &[]);
+    let blocked: Value = serde_json::from_str(&cli("plan", &["--json"])).unwrap();
     let consumer = blocked["skipped"]
         .as_array()
         .unwrap()
@@ -4823,7 +4812,8 @@ state_file = "state.json"
         .unwrap();
     assert_eq!(consumer["blocked_by"][0]["rule"], "package");
     assert_eq!(consumer["blocked_by"][0]["id"], "acme/kit#1");
-    let applied = cli("merge", &["--apply", "--yes"]);
+    let applied: Value =
+        serde_json::from_str(&cli("merge", &["--apply", "--yes", "--json"])).unwrap();
     let held = applied["not_merging"].as_array().unwrap();
     let outcome = |id: &str| held.iter().find(|item| item["id"] == id).unwrap();
     assert_eq!(outcome("acme/kit#1")["state"], "blocked");
