@@ -14,6 +14,8 @@ use crate::planner::{Dependency, Rule};
 use crate::progress;
 
 mod registries;
+mod sources;
+pub(super) use sources::Restrictions;
 
 const NPM_ACCEPT: &str = "application/vnd.npm.install-v1+json";
 
@@ -299,35 +301,6 @@ fn is_checkable(dep: &Dependency) -> bool {
     dep.rule == Rule::Package && dep.package.is_some() && dep.version.is_some()
 }
 
-pub(crate) fn apply_manifest_sources(plan: &mut Plan, manifests: &[(String, String, String)]) {
-    use crate::detect;
-    for item in &mut plan.items {
-        let slug = format!("{}/{}", item.org, item.repo);
-        for dep in &mut item.after {
-            let Some(coordinate) = &dep.feed_coordinate else {
-                continue;
-            };
-            let redirected = manifests.iter().any(|(repo, path, body)| {
-                repo.eq_ignore_ascii_case(&slug)
-                    && match coordinate.ecosystem {
-                        Ecosystem::Cargo => detect::is_cargo_toml(path),
-                        Ecosystem::Pypi => detect::is_pyproject(path),
-                        Ecosystem::Go => detect::is_go_mod(path),
-                        _ => false,
-                    }
-                    && detect::source_override(
-                        coordinate.ecosystem,
-                        &coordinate.package,
-                        body.lines(),
-                    )
-            });
-            if redirected {
-                dep.feed_coordinate = None;
-            }
-        }
-    }
-}
-
 pub fn annotate(plan: &mut Plan, checker: &mut Checker) -> usize {
     let orgs: BTreeMap<String, String> = plan
         .items
@@ -373,8 +346,9 @@ pub fn annotate(plan: &mut Plan, checker: &mut Checker) -> usize {
             Some(Check::Absent) => dep.published = Some(false),
             Some(Check::Failed(reason)) => dep.feed_error = Some(reason.clone()),
             None => {
-                dep.feed_error =
-                    Some("cannot identify one registry source for this dependency".to_string())
+                dep.feed_error = Some(dep.feed_restriction.clone().unwrap_or_else(|| {
+                    "cannot identify one registry source for this dependency".into()
+                }))
             }
         }
     }

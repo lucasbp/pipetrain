@@ -21,6 +21,7 @@ use crate::progress::{self, Progress};
 use crate::style::{bold, dim, green, yellow};
 
 mod pins;
+pub(crate) use pins::public_dependency;
 pub use pins::{check_workspace_sources, pin_manifest};
 
 pub struct BumpOptions {

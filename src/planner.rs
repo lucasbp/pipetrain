@@ -66,6 +66,8 @@ pub struct Dependency {
     pub feed_error: Option<String>,
     #[serde(skip)]
     pub feed_coordinate: Option<crate::feed::Coordinate>,
+    #[serde(skip)]
+    pub(crate) feed_restriction: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -682,6 +684,7 @@ pub fn plan(input: PlanInput<'_>) -> Planned {
                         published: None,
                         feed_error: None,
                         feed_coordinate: e.feed_coordinate.clone(),
+                        feed_restriction: None,
                     }
                 })
                 .collect();

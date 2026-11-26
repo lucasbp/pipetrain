@@ -20,6 +20,8 @@ Usage errors of `--wait` exit with 1 and not with the clap default of 2, because
 
 ## Loop
 
+For a planned Cargo, Python or Go dependency, the CLI checks the consumer manifest and its workspace at the scanned head before querying a public registry. A governing `.cargo/config`, `.cargo/config.toml`, `uv.toml` or `go.work`, an alternate source for that package, or incomplete head evidence leaves the lookup unconfirmed. Sibling projects' configurations do not affect the consumer. The wait and merge order stay in the queue; the usual manual package confirmation is available.
+
 Automatic Go bump targets also read the highest release's `go.mod` to exclude retracted tags and closed retraction intervals. An explicit Go version keeps the proxy's publication status, including versions still available after retraction.
 
 1. Check the feed with the same lookup as `feed`.

@@ -41,6 +41,7 @@ fn from_string(ecosystem: Ecosystem, text: &str, node: &Node<'_>, spec: &str) ->
     }
     let start = node.span().start + 1 + relative;
     Pin {
+        redirected: false,
         current: spec.to_owned(),
         span: Some(start..start + version.len()),
     }
@@ -94,7 +95,9 @@ fn cargo_pins(text: &str, root: &DeTable<'_>, package: &str) -> Vec<Pin> {
                         .iter()
                         .any(|key| entry.get(*key).is_some())
                 {
-                    pins.push(Pin::manual("manual: inherited or alternate Cargo source"));
+                    pins.push(Pin::alternate(
+                        "manual: inherited or alternate Cargo source",
+                    ));
                 } else {
                     let value = entry.get("version").unwrap_or(node);
                     if let Some(spec) = value.get_ref().as_str() {
@@ -177,7 +180,7 @@ fn python_pins(text: &str, root: &DeTable<'_>, package: &str) -> Vec<Pin> {
                         .any(|k| entry.get(*k).is_some())
                 {
                     alternate = true;
-                    pins.push(Pin::manual(
+                    pins.push(Pin::alternate(
                         "manual: alternate or conditional Poetry source",
                     ));
                 } else {
@@ -220,7 +223,7 @@ fn python_pins(text: &str, root: &DeTable<'_>, package: &str) -> Vec<Pin> {
             .unwrap_or(raw)
             .trim();
         if spec.starts_with('@') {
-            pins.push(Pin::manual("manual: direct Python dependency"));
+            pins.push(Pin::alternate("manual: direct Python dependency"));
         } else if spec.starts_with("==") {
             pins.push(from_string(Ecosystem::Pypi, text, node, spec));
         } else {
@@ -233,7 +236,7 @@ fn python_pins(text: &str, root: &DeTable<'_>, package: &str) -> Vec<Pin> {
     }
     if alternate {
         for pin in &mut pins {
-            *pin = Pin::manual("manual: alternate or conditional Python source");
+            *pin = Pin::alternate("manual: alternate or conditional Python source");
         }
     }
     pins

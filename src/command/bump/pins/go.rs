@@ -39,6 +39,7 @@ pub(super) fn pins(text: &str, package: &str) -> Vec<Pin> {
                 }
                 let start = offset + (version.as_ptr() as usize - line.as_ptr() as usize);
                 pins.push(Pin {
+                    redirected: false,
                     current: version.to_owned(),
                     span: Some(start..start + version.len()),
                 });
@@ -48,7 +49,7 @@ pub(super) fn pins(text: &str, package: &str) -> Vec<Pin> {
     }
     if overridden {
         for pin in &mut pins {
-            *pin = Pin::manual("manual: Go replace or exclude for this module");
+            *pin = Pin::alternate("manual: Go replace or exclude for this module");
         }
     }
     pins

@@ -24,16 +24,20 @@ fn without_comment(line: &str) -> &str {
     line.split("//").next().unwrap_or(line).trim()
 }
 
-fn module_name(raw: &str) -> String {
-    raw.trim().trim_matches('"').to_lowercase()
+pub fn published(text: &str) -> Option<String> {
+    published_name(text).map(|name| name.to_lowercase())
 }
 
-pub fn published(text: &str) -> Option<String> {
+pub(crate) fn published_name(text: &str) -> Option<String> {
     static MODULE: OnceLock<Regex> = OnceLock::new();
     let module = regex(&MODULE, r"^module\s+(\S+)");
     text.lines()
         .map(without_comment)
-        .find_map(|line| module.captures(line).map(|caps| module_name(&caps[1])))
+        .find_map(|line| {
+            module
+                .captures(line)
+                .map(|caps| caps[1].trim_matches(['"', '`']).to_string())
+        })
         .filter(|name| !name.is_empty())
 }
 

@@ -212,24 +212,15 @@ pub(crate) fn bumps(files: &[ChangedFile]) -> BTreeMap<String, Bump> {
             } else {
                 normalise_version(&raw)
             };
-            let feed = version
-                .as_ref()
-                .filter(|_| {
-                    !source_override(
-                        ecosystem,
-                        &name,
-                        side_lines(patch, '+').map(|(_, line)| line),
-                    )
-                })
-                .map(|v| Coordinate {
-                    ecosystem,
-                    package: name,
-                    version: if ecosystem == Ecosystem::Go {
-                        raw
-                    } else {
-                        v.clone()
-                    },
-                });
+            let feed = version.as_ref().map(|v| Coordinate {
+                ecosystem,
+                package: name,
+                version: if ecosystem == Ecosystem::Go {
+                    raw
+                } else {
+                    v.clone()
+                },
+            });
             bumped
                 .entry(key)
                 .and_modify(|existing| {
@@ -248,37 +239,6 @@ pub(crate) fn bumps(files: &[ChangedFile]) -> BTreeMap<String, Bump> {
 
 pub fn bumped_packages(files: &[ChangedFile]) -> BTreeSet<String> {
     bumps(files).into_keys().collect()
-}
-
-pub(crate) fn source_override<'a>(
-    ecosystem: crate::feed::Ecosystem,
-    package: &str,
-    mut lines: impl Iterator<Item = &'a str>,
-) -> bool {
-    use crate::feed::Ecosystem;
-    static SOURCE_KEY: OnceLock<Regex> = OnceLock::new();
-    let key = regex(&SOURCE_KEY, r"(?:^|[,{])\s*(registry|source|index)\s*=");
-    lines.any(|line| {
-        let line = line.trim_start();
-        match ecosystem {
-            Ecosystem::Cargo => {
-                line.starts_with("[patch.")
-                    || line.starts_with("[replace]")
-                    || key.captures(line).is_some_and(|c| &c[1] == "registry")
-            }
-            Ecosystem::Pypi => {
-                line.starts_with("[tool.uv.sources")
-                    || line.starts_with("[[tool.uv.index")
-                    || line.starts_with("[[tool.poetry.source")
-                    || key.captures(line).is_some_and(|c| &c[1] != "registry")
-            }
-            Ecosystem::Go => line
-                .split_once("=>")
-                .and_then(|(old, _)| old.trim_start_matches("replace ").split_whitespace().next())
-                .is_some_and(|name| name.trim_matches('"') == package),
-            _ => false,
-        }
-    })
 }
 
 fn normalise_version(raw: &str) -> Option<String> {

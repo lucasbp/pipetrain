@@ -15,6 +15,7 @@ pub use workspace::check_workspace_sources;
 struct Pin {
     current: String,
     span: Option<Range<usize>>,
+    redirected: bool,
 }
 
 impl Pin {
@@ -22,6 +23,14 @@ impl Pin {
         Self {
             current: reason.to_owned(),
             span: None,
+            redirected: false,
+        }
+    }
+
+    fn alternate(reason: &str) -> Self {
+        Self {
+            redirected: true,
+            ..Self::manual(reason)
         }
     }
 }
@@ -39,6 +48,11 @@ fn read(ecosystem: Ecosystem, text: &str, package: &str) -> Result<Vec<Pin>> {
         Ecosystem::Cargo | Ecosystem::Pypi => toml::pins(ecosystem, text, package),
         _ => bail!("unexpected manifest ecosystem"),
     }
+}
+
+pub(crate) fn public_dependency(ecosystem: Ecosystem, text: &str, package: &str) -> bool {
+    read(ecosystem, text, package)
+        .is_ok_and(|pins| !pins.is_empty() && pins.iter().all(|pin| !pin.redirected))
 }
 
 pub(super) fn versions(ecosystem: Ecosystem, text: &str, package: &str) -> Result<Vec<String>> {
