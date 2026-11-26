@@ -100,6 +100,12 @@ pub fn check_workspace_sources(
         if !tree.contains(candidate) {
             bail!("review the unavailable Cargo workspace {candidate}");
         }
+        crate::consumer_bump::apply::check_manifest_only(
+            ecosystem,
+            tree,
+            &[(candidate.clone(), String::new())],
+        )
+        .map_err(anyhow::Error::msg)?;
         candidates.push(candidate.clone());
     } else {
         for (end, _) in path.rmatch_indices('/') {

@@ -218,10 +218,15 @@ pub fn scan(
         match read_repo(client, repo, &mut questions)? {
             Some(snapshot) => {
                 readable += 1;
-                let refs = checked_refs(&snapshot.manifests, &snapshot.tree, package, ecosystem)?;
-                if pins::handles(ecosystem) && !refs.is_empty() {
+                let mut refs =
+                    checked_refs(&snapshot.manifests, &snapshot.tree, package, ecosystem)?;
+                if pins::handles(ecosystem) && (snapshot.incomplete || !refs.is_empty()) {
                     let guard = if snapshot.incomplete {
-                        Err("the repository scan was incomplete".to_owned())
+                        let reason = "the repository tree or manifest contents were incomplete";
+                        for (_, current) in &mut refs {
+                            *current = format!("manual: {reason}");
+                        }
+                        Err(reason.to_owned())
                     } else {
                         crate::consumer_bump::apply::check_manifest_only(
                             ecosystem,

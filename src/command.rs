@@ -238,13 +238,14 @@ fn scan_repo_with_tree(
         ));
     }
     let blobs = client.blobs(slug, sha, &paths)?;
+    let incomplete = truncated || cut || blobs.len() != paths.len();
     let manifests = blobs
         .into_iter()
         .map(|(path, text)| (slug.to_string(), path, text))
         .collect();
     Ok(RepoSnapshot {
         tree,
-        incomplete: cut || truncated,
+        incomplete,
         manifests,
     })
 }

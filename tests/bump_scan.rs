@@ -544,3 +544,51 @@ fn workspace_sources_affect_only_the_selected_package_and_members() {
         );
     }
 }
+
+#[test]
+fn incomplete_manifest_scans_cannot_schedule_a_partial_update() {
+    let mut files = BTreeMap::new();
+    files.insert(
+        "Cargo.toml".to_owned(),
+        "[dependencies]\nexample='=1.0.0'".to_owned(),
+    );
+    for i in 0..pipetrain::publishers::MAX_MANIFESTS_PER_REPO {
+        files.insert(
+            format!("crates/{i}/Cargo.toml"),
+            "[package]\nname='example'".to_owned(),
+        );
+    }
+    let server = serve([("acme/app".to_owned(), files)].into());
+    let scan = bump::scan(
+        &mut client(&server),
+        &names(&["acme/app"]),
+        "example",
+        Ecosystem::Cargo,
+    )
+    .unwrap();
+    let report = Report::build("example", Ecosystem::Cargo, "2.0.0", &scan.repos);
+    assert_eq!(report.count(Status::Range), 1);
+    assert_eq!(report.count(Status::Change), 0);
+    assert!(scan.warnings.iter().any(|w| w.contains("incomplete")));
+}
+
+#[test]
+fn explicit_workspace_checks_its_own_lock_and_source_configuration() {
+    let member = "[package]\nworkspace='../workspace'\n[dependencies]\nexample='=1.0.0'";
+    for file in ["Cargo.lock", ".cargo/config.toml"] {
+        let files = vec![
+            "member/Cargo.toml".to_owned(),
+            "workspace/Cargo.toml".to_owned(),
+            format!("workspace/{file}"),
+        ];
+        let result = bump::check_workspace_sources(
+            Ecosystem::Cargo,
+            "example",
+            "member/Cargo.toml",
+            member,
+            &files,
+            |_| Ok("[workspace]".to_owned()),
+        );
+        assert!(result.unwrap_err().to_string().contains(file));
+    }
+}
