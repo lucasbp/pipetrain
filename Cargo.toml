@@ -36,6 +36,10 @@ ureq = { version = "3.5.0", features = ["json"] }
 yaml-rust2 = "0.13.0"
 zip = { version = "9.2.1", default-features = false, features = ["deflate-flate2"] }
 
+[dev-dependencies]
+proc-macro2 = { version = "1", features = ["span-locations"] }
+syn = { version = "2", features = ["full", "visit"] }
+
 [profile.release]
 lto = true
 codegen-units = 1

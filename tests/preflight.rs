@@ -119,6 +119,31 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn queue_keeps_an_open_question_on_stderr_and_returns_three() {
+    let mut pr = node(1, "CLEAN", "main");
+    pr["body"] = json!("Depends-On: acme/api#1");
+    let fixture = Fixture::new(vec![pr]);
+    let output = fixture.run("plan", &[1], &["--emit", "queue"]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(3), "{stderr}");
+    assert!(
+        stdout.lines().any(|line| line == "merge:acme/api#1"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.lines().any(|line| line.starts_with("? ")),
+        "{stdout}"
+    );
+    assert!(
+        stderr
+            .lines()
+            .any(|line| line == "? acme/api#1: Depends-On points to the PR itself"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn blocked_dirty_unstable_draft_and_behind_are_explained_and_excluded_from_queue() {
     for state in ["BLOCKED", "DIRTY", "UNSTABLE", "DRAFT", "BEHIND"] {
         let fixture = Fixture::new(vec![node(1, state, "main")]);

@@ -6,13 +6,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
 
-use super::apply::{Gate, deploy_pr_body, gate, tint};
+use super::apply::{Gate, deploy_pr_body, gate};
 use super::build_plan_with_prepare;
 use super::order::requests_line;
 use crate::bundle::{base_suffix, is_stacked, is_train_branch};
 use crate::command::PlanOptions;
 use crate::config::Config;
-use crate::deploy_wait::{DeployClock, waiting_for_runner};
 use crate::emit;
 use crate::github::{Client, LivePr, PrWrite};
 use crate::merge::category;
@@ -24,13 +23,14 @@ use crate::merge::{
 use crate::model::{PrKey, PrState};
 use crate::plan::Plan;
 use crate::planner::Item;
-use crate::style::{bold, dim, green, red, yellow};
 use crate::workflows::{self, PushRuns};
 
 mod admin;
 pub mod behind;
 pub mod bump;
 pub mod compact;
+mod deploy;
+mod estimate;
 mod failure;
 mod gates;
 mod package;
@@ -38,6 +38,9 @@ mod parallel;
 mod recovery;
 mod settle;
 mod stacked;
+mod verbose;
+
+pub use verbose::{render, render_final};
 
 const MERGEABILITY_TIMEOUT: Duration = Duration::from_secs(60);
 const MERGEABILITY_PAUSE: Duration = Duration::from_secs(5);
@@ -145,24 +148,6 @@ impl Env<'_> {
             .insert(cache_key, reading.clone());
         reading
     }
-}
-
-struct Limits {
-    timeout: Duration,
-    queued_ceiling: Duration,
-    poll: Duration,
-    poll_ceiling: Duration,
-    grace: Duration,
-}
-
-enum Deploy {
-    Passed(usize),
-    Skipped(usize),
-    Failed(String),
-    TimedOut(String),
-    QueuedTooLong(String),
-    NoRun(Duration),
-    Unreadable(String),
 }
 
 fn short(sha: &str) -> String {
@@ -357,370 +342,6 @@ fn settled_live(
             MERGEABILITY_PAUSE.min(remaining).as_secs_f64()
         ));
         (hooks.sleep)(MERGEABILITY_PAUSE.min(remaining));
-    }
-}
-
-fn wait_for_deploy(
-    client: &mut Client,
-    slug: &str,
-    sha: &str,
-    limits: &Limits,
-    hooks: &mut Hooks,
-    prediction: Option<&PushRuns>,
-    report: &mut StepReport,
-) -> (Deploy, Vec<String>) {
-    let expected = prediction.filter(|value| matches!(value, PushRuns::Expected { .. }));
-    let workflows = match expected {
-        Some(PushRuns::Expected {
-            workflows,
-            chained_workflows,
-            ..
-        }) => workflows
-            .iter()
-            .chain(chained_workflows)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(", "),
-        _ => "legacy workflow runs".to_string(),
-    };
-    let mut emit =
-        |message: &str| (hooks.progress)(&format!("waiting for deploy: {workflows}; {message}"));
-    let poll = limits.poll.max(Duration::from_millis(1));
-    let mut clock = DeployClock::new((hooks.now)(), limits.timeout, limits.queued_ceiling);
-    let mut sleeps = 0u64;
-    let mut consecutive_errors = 0;
-    let mut settled: Option<usize> = None;
-    let mut last = "no workflow run yet".to_string();
-    let mut auxiliary_failures = std::collections::BTreeSet::new();
-    let mut known: Vec<crate::github::Run> = Vec::new();
-    let outcome = loop {
-        let now = (hooks.now)();
-        if clock.ceiling_hit(now) {
-            break Deploy::QueuedTooLong(last);
-        }
-        if clock.timed_out(now) {
-            break Deploy::TimedOut(last);
-        }
-        let reading = if settled.is_none() && follow_by_id(expected, &known) {
-            client.refresh_runs(slug, &known).map(|runs| (runs, true))
-        } else {
-            client.workflow_runs(slug, sha, expected.is_none())
-        };
-        let (runs, complete) = match reading {
-            Ok((runs, complete)) => {
-                consecutive_errors = 0;
-                if complete {
-                    known.clone_from(&runs);
-                } else {
-                    known.clear();
-                }
-                (runs, complete)
-            }
-            Err(error) if transient_read(&error) => {
-                consecutive_errors += 1;
-                settled = None;
-                last = format!("transient workflow read error: {error}");
-                let remaining = clock.remaining((hooks.now)());
-                if remaining.is_zero() {
-                    break if clock.queued() {
-                        Deploy::QueuedTooLong(last)
-                    } else {
-                        Deploy::TimedOut(last)
-                    };
-                }
-                if consecutive_errors > 3 {
-                    break Deploy::Unreadable(format!("{error}; exhausted 3 consecutive retries"));
-                }
-                emit(&format!("{last}; retry {consecutive_errors}/3"));
-                (hooks.sleep)(poll.min(remaining));
-                continue;
-            }
-            Err(error) => break Deploy::Unreadable(error.to_string()),
-        };
-        let now = (hooks.now)();
-        let waiting = {
-            let tracked: Vec<&crate::github::Run> = match expected {
-                Some(PushRuns::Expected {
-                    workflows,
-                    chained_workflows,
-                    ..
-                }) => runs
-                    .iter()
-                    .filter(|run| {
-                        workflows.contains(&run.path) || chained_workflows.contains(&run.path)
-                    })
-                    .collect(),
-                _ => runs.iter().collect(),
-            };
-            waiting_for_runner(&tracked)
-        };
-        if waiting != clock.queued() {
-            if waiting {
-                clock.observe(now, true);
-                if let Some(runner) = hooks.runner.as_mut() {
-                    runner(true);
-                }
-                emit("deploy is queued, waiting for a runner");
-            } else {
-                if let Some(runner) = hooks.runner.as_mut() {
-                    runner(false);
-                }
-                clock.observe((hooks.now)(), false);
-            }
-        }
-        let now = (hooks.now)();
-        if clock.ceiling_hit(now) {
-            break Deploy::QueuedTooLong(last);
-        }
-        if clock.timed_out(now) {
-            break Deploy::TimedOut(last);
-        }
-        let elapsed = clock.elapsed(now);
-        let observed = runs
-            .iter()
-            .map(|run| format!("{}: {}", run.name, run.url))
-            .collect::<Vec<_>>()
-            .join("; ");
-        emit(&format!(
-            "deploy {slug} at SHA {sha}: {}",
-            if observed.is_empty() {
-                "no run yet"
-            } else {
-                &observed
-            }
-        ));
-        let mut verdict = if let Some(prediction) = expected {
-            if let PushRuns::Expected {
-                workflows,
-                chained_workflows,
-                ..
-            } = prediction
-            {
-                let is_expected =
-                    |path: &String| workflows.contains(path) || chained_workflows.contains(path);
-                report.expected_runs = runs
-                    .iter()
-                    .filter(|run| is_expected(&run.path))
-                    .map(crate::merge::ExpectedRun::from)
-                    .collect();
-                for run in runs.iter().filter(|run| !is_expected(&run.path)) {
-                    if let Verdict::Failed(text) = judge(std::slice::from_ref(run)) {
-                        auxiliary_failures
-                            .insert(format!("auxiliary {text} (does not decide deploy)"));
-                    }
-                }
-            }
-            judge_expected(&runs, prediction)
-        } else {
-            judge(&runs)
-        };
-        if !complete && !matches!(verdict, Verdict::Failed(_)) {
-            verdict = Verdict::Waiting(
-                "workflow run response is incomplete; cannot confirm deploy".to_string(),
-            );
-        }
-        let no_runs = matches!(verdict, Verdict::NoRuns);
-        match verdict {
-            Verdict::Failed(text) => break Deploy::Failed(text),
-            verdict @ (Verdict::Passed(count) | Verdict::Skipped(count)) => {
-                let skipped = matches!(verdict, Verdict::Skipped(_));
-                if settled == Some(count) {
-                    break if skipped {
-                        Deploy::Skipped(count)
-                    } else {
-                        Deploy::Passed(count)
-                    };
-                }
-                settled = Some(count);
-                let conclusion = if skipped { "skipped" } else { "passed" };
-                emit(&format!(
-                    "deploy {slug}: {count} workflows {conclusion}, confirming completion"
-                ));
-            }
-            Verdict::Waiting(text) => {
-                settled = None;
-                emit(&format!("deploy {slug}: {text}"));
-                last = format!("{text}; SHA {sha}; {observed}");
-            }
-            Verdict::NoRuns => {
-                settled = None;
-                emit(&format!("deploy {slug}: waiting for a workflow to start"));
-                if elapsed >= limits.grace {
-                    break Deploy::NoRun(limits.grace);
-                }
-            }
-        }
-        let remaining = clock.remaining((hooks.now)());
-        let remaining = if no_runs {
-            remaining.min(limits.grace.saturating_sub(elapsed))
-        } else {
-            remaining
-        };
-        let delay = crate::merge::poll_delay(poll, limits.poll_ceiling, sleeps);
-        let delay = match client.below_reserve() {
-            Some(below) => {
-                let slow = crate::quota::backoff(delay, limits.poll_ceiling, &below, sleeps);
-                emit(&format!(
-                    "GitHub {} quota is below the reserve ({} left of {}): following the deploy every {}s",
-                    below.resource,
-                    below.left,
-                    below.floor,
-                    slow.as_secs()
-                ));
-                slow
-            }
-            None => delay,
-        };
-        (hooks.sleep)(delay.min(remaining));
-        sleeps += 1;
-    };
-    if clock.queued() {
-        clock.observe((hooks.now)(), false);
-        if let Some(runner) = hooks.runner.as_mut() {
-            runner(false);
-        }
-    }
-    (outcome, auxiliary_failures.into_iter().collect())
-}
-
-fn follow_by_id(expected: Option<&PushRuns>, known: &[crate::github::Run]) -> bool {
-    let Some(PushRuns::Expected {
-        workflows,
-        chained_workflows,
-        ..
-    }) = expected
-    else {
-        return false;
-    };
-    chained_workflows.is_empty()
-        && workflows
-            .iter()
-            .all(|path| known.iter().any(|run| &run.path == path))
-        && known.iter().all(|run| run.id != 0)
-        && known.iter().filter(|run| run.status != "completed").count() == 1
-}
-
-fn transient_read(error: &crate::github::ApiError) -> bool {
-    match error {
-        crate::github::ApiError::Network => true,
-        crate::github::ApiError::Other { message } => message
-            .strip_prefix("GitHub answered ")
-            .and_then(|text| text.split_whitespace().next())
-            .and_then(|status| status.parse::<u16>().ok())
-            .is_some_and(|status| (500..600).contains(&status)),
-        _ => false,
-    }
-}
-
-fn deploy_phase(
-    env: &Env,
-    client: &mut Client,
-    hooks: &mut Hooks,
-    slug: &str,
-    base: &str,
-    sha: &str,
-    report: &mut StepReport,
-) -> (Status, String) {
-    (hooks.progress)(&format!("checking deploy workflows for {slug}@{base}"));
-    if !env.cfg.merge.waits_for_deploy(slug) {
-        report.deploy_outcome = Some(DeployOutcome::Dispensed);
-        return (
-            Status::Done,
-            "not waited: the repo is listed in merge.no_deploy_repos".to_string(),
-        );
-    }
-    let saved_prediction = report.deploy_prediction.clone();
-    let prediction = saved_prediction.as_ref();
-    let legacy = if prediction.is_none() && is_stacked(base, &env.cfg.train_prefix) {
-        Some(match workflows::read(client, slug, sha) {
-            Ok(files) => workflows::branch_push_runs(&files, base),
-            Err(error) => PushRuns::indeterminate(format!("{error:#}")),
-        })
-    } else {
-        None
-    };
-    let display_prediction = prediction.or(legacy.as_ref());
-    let note = display_prediction.map(|reading| reading.detail(base));
-    if matches!(display_prediction, Some(PushRuns::Dispensed { .. })) {
-        report.deploy_outcome = Some(DeployOutcome::Dispensed);
-        return (
-            Status::Done,
-            format!("not waited: {}", note.unwrap_or_default()),
-        );
-    }
-    let timeout = env
-        .settings
-        .timeout
-        .unwrap_or_else(|| env.cfg.merge.timeout_for(slug));
-    let limits = Limits {
-        timeout,
-        queued_ceiling: env.cfg.merge.queued_ceiling(),
-        poll: Duration::from_secs(env.cfg.merge.poll_seconds.max(1)),
-        poll_ceiling: Duration::from_secs(env.cfg.merge.poll_max_seconds),
-        grace: Duration::from_secs(env.cfg.merge.no_run_grace_seconds),
-    };
-    let (outcome, auxiliary_failures) =
-        wait_for_deploy(client, slug, sha, &limits, hooks, prediction, report);
-    report.deploy_outcome = Some(match &outcome {
-        Deploy::Passed(_) if matches!(display_prediction, Some(PushRuns::Indeterminate { .. })) => {
-            DeployOutcome::Indeterminate
-        }
-        Deploy::Passed(_) => DeployOutcome::Confirmed,
-        Deploy::Skipped(_) => DeployOutcome::Skipped,
-        Deploy::Failed(_) => DeployOutcome::Failed,
-        _ => DeployOutcome::Indeterminate,
-    });
-    let said = |text: String| {
-        let mut parts: Vec<String> = note.iter().cloned().collect();
-        parts.push(format!("SHA {sha}: {text}"));
-        parts.extend(report.expected_runs.iter().map(|run| {
-            format!(
-                "expected workflow {} ({}): {}",
-                run.name, run.path, run.html_url
-            )
-        }));
-        parts.extend(auxiliary_failures.iter().cloned());
-        parts.join("; ")
-    };
-    match outcome {
-        Deploy::Passed(count) => (
-            Status::Done,
-            said(format!("deploy passed ({count} workflow runs)")),
-        ),
-        Deploy::Skipped(count) => (
-            Status::Skipped,
-            said(format!(
-                "deploy skipped (all {count} workflow runs were skipped)"
-            )),
-        ),
-        Deploy::Failed(text) => (Status::Failed, said(format!("deploy failed: {text}"))),
-        Deploy::TimedOut(last) => (
-            Status::Stopped,
-            said(format!(
-                "still deploying after {} minutes ({last}); run again to keep waiting",
-                timeout.as_secs() / 60
-            )),
-        ),
-        Deploy::QueuedTooLong(last) => (
-            Status::Stopped,
-            said(format!(
-                "deploy still queued for a runner after {} minutes ({last}); run again to keep waiting",
-                limits.queued_ceiling.as_secs() / 60
-            )),
-        ),
-        Deploy::NoRun(grace) => (
-            Status::Stopped,
-            said(format!(
-                "no workflow run appeared for the push in {}s; run again to check once more",
-                grace.as_secs()
-            )),
-        ),
-        Deploy::Unreadable(error) => (
-            Status::Stopped,
-            said(format!(
-                "could not read the workflow runs ({error}); run again to resume"
-            )),
-        ),
     }
 }
 
@@ -1041,7 +662,7 @@ fn finish_deploy(
         base,
         sha,
     } = *landed;
-    let (status, text) = deploy_phase(env, client, hooks, slug, base, sha, report);
+    let (status, text) = deploy::track(env, client, hooks, slug, base, sha, report);
     report.deploy = Some(text);
     report.status = status;
     if report.deploy_outcome == Some(DeployOutcome::Confirmed) {
@@ -1572,7 +1193,7 @@ fn merge_plan_inner(
     };
     let requests = client.requests();
     let mut report = Report {
-        api_estimate: estimate(plan, cfg, settings, store, requests, &[]),
+        api_estimate: estimate::requests(plan, cfg, settings, store, requests, &[]),
         api_usage: client.usage(),
         max_parallel: cfg.max_parallel,
         summary: Summary::default(),
@@ -1622,7 +1243,8 @@ fn merge_plan_inner(
         let bundles = arrange(&mut report, plan, store, settings, client);
         set_aside_inherited(&mut report, plan, &bundles, store, client);
         settle::annotate(&mut report.steps, plan, cfg, &store.state);
-        report.api_estimate = estimate(plan, cfg, settings, store, requests, &report.steps);
+        report.api_estimate =
+            estimate::requests(plan, cfg, settings, store, requests, &report.steps);
         if let Some(notice) = gates::preview(plan, &report.steps, settings.gates_confirmed) {
             report.notices.push(notice);
         }
@@ -1912,305 +1534,6 @@ fn merge_plan_inner(
     })
 }
 
-fn deploy_polls(cfg: &Config, settings: &Settings, slug: &str) -> u64 {
-    let timeout = settings
-        .timeout
-        .unwrap_or_else(|| cfg.merge.timeout_for(slug));
-    crate::merge::estimated_polls(
-        timeout,
-        Duration::from_secs(cfg.merge.poll_seconds.max(1)),
-        Duration::from_secs(cfg.merge.poll_max_seconds),
-    )
-}
-
-fn estimate(
-    plan: &Plan,
-    cfg: &Config,
-    settings: &Settings,
-    store: &Store,
-    requests: u32,
-    evaluated: &[StepReport],
-) -> crate::merge::ApiEstimate {
-    let mut discovery = u64::from(requests.max(plan.stats.requests));
-    let mut checks = 0u64;
-    let mut polls = 0u64;
-    for step in planned_steps(plan, cfg) {
-        if step.kind != Kind::Merge {
-            continue;
-        }
-        let Some(item) = plan.items.iter().find(|item| item.id == step.target) else {
-            continue;
-        };
-        let slug = format!("{}/{}", item.org, item.repo);
-        checks = checks.saturating_add(3);
-        if plan.items.iter().any(|child| {
-            child.org.eq_ignore_ascii_case(&item.org)
-                && child.repo.eq_ignore_ascii_case(&item.repo)
-                && child.base == item.head
-        }) {
-            checks = checks.saturating_add(3);
-        }
-        if cfg.merge.waits_for_deploy(&slug) {
-            discovery = discovery.saturating_add(7);
-            if !evaluated.iter().any(|step| {
-                step.target == item.id
-                    && matches!(step.deploy_prediction, Some(PushRuns::Dispensed { .. }))
-            }) {
-                polls = polls.saturating_add(deploy_polls(cfg, settings, &slug));
-            }
-        }
-    }
-    for pending in &store.state.pending {
-        checks = checks.saturating_add(4 + u64::from(pending.sha.is_none()));
-        if cfg.merge.waits_for_deploy(&pending.repo)
-            && !matches!(pending.deploy_prediction, Some(PushRuns::Dispensed { .. }))
-        {
-            polls = polls.saturating_add(deploy_polls(cfg, settings, &pending.repo));
-        }
-    }
-    let total = discovery.saturating_add(checks).saturating_add(polls);
-    let exceeds_budget = total > u64::from(cfg.api.max_requests);
-    let rate_remaining = plan.stats.rate_remaining;
-    crate::merge::ApiEstimate {
-        discovery,
-        checks,
-        deploy_polls: polls,
-        total,
-        budget: cfg.api.max_requests,
-        exceeds_budget,
-        rate_remaining,
-        warn: exceeds_budget || rate_remaining.is_some_and(|left| total > left / 2),
-    }
-}
-
-fn step_text(step: &StepReport, color: bool) -> String {
-    let what = match step.kind {
-        Kind::Resume => format!("wait for the deploy of {}", step.target),
-        Kind::Bump => format!("prepare dependency bump for {}", step.target),
-        Kind::Merge => format!("merge {}", step.target),
-        Kind::Gate => format!("gate: {}", step.target),
-        Kind::Wait => format!("wait: {}", step.target),
-        Kind::OpenPr => format!("open the deploy PR {}", step.target),
-    };
-    let what = if step.kind == Kind::Merge {
-        tint(color, bold, &what)
-    } else {
-        what
-    };
-    let suffix = if step.detail.is_empty() {
-        String::new()
-    } else {
-        format!(" ({})", step.detail)
-    };
-    let deploy = step
-        .deploy
-        .as_ref()
-        .map(|text| format!("; {text}"))
-        .unwrap_or_default();
-    match step.status {
-        Status::Planned => {
-            let prediction = step
-                .deploy_prediction
-                .as_ref()
-                .map(|reading| {
-                    let branch = step
-                        .detail
-                        .strip_prefix("into ")
-                        .and_then(|detail| detail.split(';').next())
-                        .unwrap_or("the saved base");
-                    format!("; {}", reading.detail(branch))
-                })
-                .unwrap_or_default();
-            let settling = step
-                .settle_seconds
-                .map(|seconds| format!("; settling {seconds}s"))
-                .unwrap_or_default();
-            format!("{what}{suffix}{deploy}{prediction}{settling}")
-        }
-        Status::Done => format!("{} {what}{suffix}{deploy}", tint(color, green, "done:")),
-        Status::Skipped if step.kind == Kind::Bump && step.blocked_by.is_none() => {
-            format!("{} {what}{suffix}", tint(color, yellow, "waiting:"))
-        }
-        Status::Skipped => format!(
-            "{} {what}{suffix}{deploy}",
-            tint(
-                color,
-                if step.blocked_by.is_some() {
-                    yellow
-                } else {
-                    dim
-                },
-                "skipped:"
-            )
-        ),
-        Status::Failed => format!("{} {what}{suffix}{deploy}", tint(color, red, "failed:")),
-        Status::Stopped => format!("{} {what}{suffix}{deploy}", tint(color, yellow, "stopped:")),
-    }
-}
-
-pub fn render(report: &Report, color: bool) -> String {
-    render_with_steps(report, color, true)
-}
-
-fn usage_line(usage: &crate::github::Usage) -> String {
-    if usage.spent() == 0 && usage.cache_hits == 0 && usage.not_modified == 0 {
-        return String::new();
-    }
-    format!(
-        "API used: core {}, graphql {}, search {}; {} from cache, {} not modified\n",
-        usage.core, usage.graphql, usage.search, usage.cache_hits, usage.not_modified
-    )
-}
-
-pub fn render_final(report: &Report, color: bool) -> String {
-    render_with_steps(report, color, !report.applied)
-}
-
-fn render_with_steps(report: &Report, color: bool, include_steps: bool) -> String {
-    let mut out = String::new();
-    if !report.applied && !report.requested && report.stopped.is_none() {
-        let banner = "dry run, nothing was merged; pass --apply to do it";
-        out.push_str(&format!("{}\n\n", tint(color, yellow, banner)));
-    }
-    if include_steps {
-        out.push_str(&format!(
-            "up to {} PRs at a time, one per repository (including different bases)\n",
-            report.max_parallel
-        ));
-        out.push_str(&report.state.render());
-        for notice in &report.notices {
-            out.push_str(&format!("{}\n", tint(color, yellow, notice)));
-        }
-        let estimate = &report.api_estimate;
-        out.push_str(&format!("estimated API requests: {} (discovery {}, checks and merges {}, deploy polls {}); budget {}\n", estimate.total, estimate.discovery, estimate.checks, estimate.deploy_polls, estimate.budget));
-        if let Some(warning) = estimate.warning() {
-            out.push_str(&format!("{warning}\n"));
-        }
-        for pr in &report.preflight {
-            for line in pr.lines() {
-                out.push_str(&format!("{line}\n"));
-            }
-        }
-    }
-    if report.bump_enabled && include_steps {
-        out.push_str("--bump enabled: with --apply this run may create isolated bump branches and draft PRs targeting consumer heads, then block those consumers for CI and review. Dry runs perform no writes.\n");
-        for target in &report.bump_candidates {
-            out.push_str(&format!("potential dependency bump: {target} (only after a new publication is verified; no version chosen yet)\n"));
-        }
-        out.push('\n');
-    }
-    out.push_str(&usage_line(&report.api_usage));
-    if report.steps.is_empty() {
-        out.push_str(&format!("{}\n", tint(color, dim, "nothing to merge")));
-    }
-    if include_steps {
-        if report.requested && !report.applied {
-            out.push_str(&admin::notice(&report.steps));
-        }
-        let overridden: Vec<_> = report
-            .steps
-            .iter()
-            .filter(|step| step.kind == Kind::Merge && step.admin_override.is_some())
-            .collect();
-        if !report.requested && !overridden.is_empty() {
-            out.push_str(&format!(
-                "--admin: {} PR(s) would be merged past a missing review:\n",
-                overridden.len()
-            ));
-            for step in overridden {
-                out.push_str(&format!("  {}\n", step.target));
-            }
-        }
-        for step in &report.steps {
-            out.push_str(&format!("{}\n", step_text(step, color)));
-            if let Some(admin) = &step.admin_override {
-                out.push_str(&format!(
-                    "  admin override: merges past {} as {}\n",
-                    admin.reason, admin.requested_by
-                ));
-            }
-        }
-    }
-    if report
-        .steps
-        .iter()
-        .any(|step| step.detail.contains(TRAIN_NOTICE))
-    {
-        out.push_str(&format!(
-            "\n{}\n",
-            tint(color, yellow, "warning: this queue includes intermediate train branches. Their names are not today's date or proof of deployment. Promotion requires a separate reviewed PR; --open-pr only attempts to prepare it and never merges it.")
-        ));
-    }
-    if !report.not_merging.is_empty() {
-        out.push_str(&format!(
-            "\n{}\n",
-            tint(
-                color,
-                dim,
-                "not merging, the plan marks these as not ready:"
-            )
-        ));
-        for skipped in &report.not_merging {
-            let label = skipped.state.as_str();
-            let label = match skipped.state {
-                category::Category::Waiting => tint(color, yellow, label),
-                category::Category::Blocked => tint(color, red, label),
-            };
-            out.push_str(&format!(
-                "  {} ({label}): {}\n",
-                skipped.id,
-                skipped.reasons.join(", ")
-            ));
-        }
-        out.push_str(&format!("{}\n", compact::footer_counts(report, color)));
-    }
-    for question in &report.questions {
-        out.push_str(&format!("{question}\n"));
-    }
-    if let Some(reason) = &report.stopped {
-        out.push_str(&format!("\n{}\n", tint(color, yellow, reason)));
-    }
-    if report.applied {
-        for step in &report.steps {
-            if step.merge_sha.is_some()
-                && let Some(admin) = &step.admin_override
-                && admin.at.is_some()
-            {
-                out.push_str(&format!(
-                    "merged by admin override: {} ({})\n",
-                    step.target, admin.reason
-                ));
-            }
-        }
-        for step in report.steps.iter().filter(|step| is_kept(step)) {
-            out.push_str(&format!("{KEPT}: {}\n", step.target));
-        }
-        let summary = &report.summary;
-        out.push_str(&format!(
-            "\n{} PRs merged, {} earlier merges checked\n",
-            summary.merged, summary.earlier_merges_checked,
-        ));
-        out.push_str(&format!(
-            "deploys: {} confirmed, {} dispensed, {} indeterminate, {} resolved by later deploy, {} skipped, {} failed\n",
-            summary.deploy_confirmed, summary.deploy_dispensed, summary.deploy_indeterminate,
-            summary.deploy_resolved, summary.deploy_skipped, summary.deploy_failed,
-        ));
-        out.push_str(&format!(
-            "\n{} done, {} skipped, {} failed, {} stopped\n",
-            report.count(Status::Done),
-            report.count(Status::Skipped),
-            report.count(Status::Failed),
-            report.count(Status::Stopped)
-        ));
-        if report.steps.iter().any(|step| {
-            step.merge_sha.is_some() && matches!(step.status, Status::Failed | Status::Stopped)
-        }) {
-            out.push_str("The PR is already merged and its deploy is still pending in the state file. Inspect it with pipetrain state show. Repeat the command with the same --state to resume. Resume checks the saved SHA and run, then a later deploy containing that SHA if the saved deploy failed. Repeating without a changed run or a later successful deploy will not fix a failed deploy. An intentional local discard requires pipetrain state discard with a reason. The merge will not be repeated.\n");
-        }
-    }
-    out
-}
-
 fn ask(question: &str, prompt: &str) -> String {
     anstream::eprintln!("{question}");
     eprint!("{prompt}");
@@ -2361,7 +1684,7 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
             return;
         }
         if full {
-            crate::progress::line(&step_text(step, true));
+            crate::progress::line(&verbose::step_text(step, true));
         } else {
             crate::progress::line(&compact::finished_line(step, true));
         }
@@ -2425,7 +1748,7 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
             "{}",
             requests_line(client.requests(), client.cache_hits(), started.elapsed())
         );
-        let usage = usage_line(&outcome.report.api_usage);
+        let usage = verbose::usage_line(&outcome.report.api_usage);
         if !usage.is_empty() {
             eprint!("{usage}");
         }
