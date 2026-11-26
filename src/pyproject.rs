@@ -30,7 +30,7 @@ fn regex(cell: &'static OnceLock<Regex>, pattern: &str) -> &'static Regex {
     cell.get_or_init(|| Regex::new(pattern).expect("valid regex"))
 }
 
-fn normalise(name: &str) -> String {
+pub(crate) fn normalise(name: &str) -> String {
     let mut out = String::new();
     for c in name.trim().to_lowercase().chars() {
         if matches!(c, '-' | '_' | '.') {

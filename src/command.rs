@@ -201,6 +201,21 @@ pub(crate) fn scan_repo(
     sha: &str,
     questions: &mut Vec<Question>,
 ) -> Result<Vec<(String, String, String)>> {
+    Ok(scan_repo_with_tree(client, slug, sha, questions)?.manifests)
+}
+
+pub(crate) struct RepoSnapshot {
+    tree: Vec<String>,
+    incomplete: bool,
+    manifests: Vec<(String, String, String)>,
+}
+
+fn scan_repo_with_tree(
+    client: &mut Client,
+    slug: &str,
+    sha: &str,
+    questions: &mut Vec<Question>,
+) -> Result<RepoSnapshot> {
     let (tree, truncated) = client.tree(slug, sha)?;
     if truncated {
         questions.push(Question::new(
@@ -223,10 +238,15 @@ pub(crate) fn scan_repo(
         ));
     }
     let blobs = client.blobs(slug, sha, &paths)?;
-    Ok(blobs
+    let manifests = blobs
         .into_iter()
         .map(|(path, text)| (slug.to_string(), path, text))
-        .collect())
+        .collect();
+    Ok(RepoSnapshot {
+        tree,
+        incomplete: cut || truncated,
+        manifests,
+    })
 }
 
 fn scan_publishers(
