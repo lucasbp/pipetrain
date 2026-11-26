@@ -1,3 +1,5 @@
+pub(crate) mod registry;
+
 use std::cmp::Ordering;
 use std::time::Duration;
 

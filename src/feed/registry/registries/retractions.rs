@@ -66,7 +66,7 @@ fn ranges(text: &str, package: &str) -> Result<Vec<(semver::Version, semver::Ver
     Ok(found)
 }
 
-pub(in crate::command::feed) fn exclude_go_retractions(
+pub(crate) fn exclude_go_retractions(
     session: &Session,
     package: &str,
     fetched: Fetched,

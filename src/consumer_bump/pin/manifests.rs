@@ -10,6 +10,7 @@ use crate::feed::Ecosystem;
 mod go;
 mod toml;
 mod workspace;
+pub(crate) use workspace::check_manifest_only;
 pub use workspace::check_workspace_sources;
 
 struct Pin {
@@ -35,7 +36,7 @@ impl Pin {
     }
 }
 
-pub(super) fn handles(ecosystem: Ecosystem) -> bool {
+pub(crate) fn handles(ecosystem: Ecosystem) -> bool {
     matches!(
         ecosystem,
         Ecosystem::Cargo | Ecosystem::Pypi | Ecosystem::Go
@@ -55,7 +56,7 @@ pub(crate) fn public_dependency(ecosystem: Ecosystem, text: &str, package: &str)
         .is_ok_and(|pins| !pins.is_empty() && pins.iter().all(|pin| !pin.redirected))
 }
 
-pub(super) fn versions(ecosystem: Ecosystem, text: &str, package: &str) -> Result<Vec<String>> {
+pub(crate) fn versions(ecosystem: Ecosystem, text: &str, package: &str) -> Result<Vec<String>> {
     Ok(read(ecosystem, text, package)?
         .into_iter()
         .map(|pin| pin.current)
@@ -77,7 +78,7 @@ fn version_part(ecosystem: Ecosystem, current: &str) -> Option<&str> {
     }
 }
 
-pub(super) fn valid_version(ecosystem: Ecosystem, package: &str, version: &str) -> bool {
+pub(crate) fn valid_version(ecosystem: Ecosystem, package: &str, version: &str) -> bool {
     if version.trim() != version || version.is_empty() {
         return false;
     }
@@ -111,7 +112,7 @@ pub(super) fn valid_version(ecosystem: Ecosystem, package: &str, version: &str) 
     }
 }
 
-pub(super) fn classify(ecosystem: Ecosystem, package: &str, current: &str, target: &str) -> Status {
+pub(crate) fn classify(ecosystem: Ecosystem, package: &str, current: &str, target: &str) -> Status {
     let Some(version) = version_part(ecosystem, current) else {
         return Status::Range;
     };
@@ -125,7 +126,7 @@ pub(super) fn classify(ecosystem: Ecosystem, package: &str, current: &str, targe
     }
 }
 
-pub(super) fn level(ecosystem: Ecosystem, current: &str, target: &str) -> Level {
+pub(crate) fn level(ecosystem: Ecosystem, current: &str, target: &str) -> Level {
     let current = version_part(ecosystem, current).unwrap_or(current);
     if ecosystem == Ecosystem::Pypi
         && let (Ok(from), Ok(to)) = (

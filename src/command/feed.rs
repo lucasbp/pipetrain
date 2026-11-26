@@ -1,23 +1,17 @@
-use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
-use serde_json::Value;
-use ureq::Agent;
 
-use crate::feed::{self, Attempt, Coordinate, Ecosystem, Report, WaitEnd, WaitPlan, Waited};
-use crate::github;
-use crate::hint;
+use crate::feed::registry::{self, Fetched, Session, short_reason};
+pub use crate::feed::registry::{Check, Checker};
+use crate::feed::{self, Attempt, Ecosystem, Report, WaitEnd, WaitPlan, Waited};
 use crate::plan::Plan;
 use crate::planner::{Dependency, Rule};
 use crate::progress;
 
-mod registries;
 mod sources;
 pub(super) use sources::Restrictions;
-
-const NPM_ACCEPT: &str = "application/vnd.npm.install-v1+json";
 
 pub struct FeedOptions {
     pub package: String,
@@ -28,247 +22,15 @@ pub struct FeedOptions {
     pub json: bool,
 }
 
-enum Outcome<T = Value> {
-    Body(T),
-    NotFound,
-    Refused { had_token: bool },
-}
-
-struct Session {
-    agent: Agent,
-    token: OnceCell<Option<String>>,
-}
-
-impl Session {
-    fn new() -> Self {
-        let config = Agent::config_builder()
-            .http_status_as_error(false)
-            .timeout_global(Some(Duration::from_secs(40)))
-            .user_agent(concat!("pipetrain/", env!("CARGO_PKG_VERSION")))
-            .build();
-        Self {
-            agent: config.into(),
-            token: OnceCell::new(),
-        }
-    }
-
-    fn token(&self) -> Option<&str> {
-        self.token
-            .get_or_init(|| github::lookup().ok().map(github::Lookup::into_token))
-            .as_deref()
-    }
-
-    fn authorization(&self, ecosystem: Ecosystem, url: &str) -> Option<String> {
-        if !feed::is_github_packages(url) {
-            return None;
-        }
-        match ecosystem {
-            Ecosystem::Npm => self.token().map(feed::bearer),
-            Ecosystem::Nuget => self.token().map(feed::basic),
-            _ => None,
-        }
-    }
-
-    fn get(&self, ecosystem: Ecosystem, url: &str) -> Result<Outcome> {
-        self.get_body(ecosystem, url, |body| {
-            body.read_json()
-                .map_err(|_| anyhow::anyhow!("{} did not answer with valid JSON", feed::host(url)))
-        })
-    }
-
-    fn get_body<T>(
-        &self,
-        ecosystem: Ecosystem,
-        url: &str,
-        decode: impl FnOnce(&mut ureq::Body) -> Result<T>,
-    ) -> Result<Outcome<T>> {
-        let authorization = self.authorization(ecosystem, url);
-        let mut request = self.agent.get(url);
-        if ecosystem == Ecosystem::Npm {
-            request = request.header("Accept", NPM_ACCEPT);
-        }
-        if let Some(value) = &authorization {
-            request = request.header("Authorization", value);
-        }
-        let host = feed::host(url);
-        let mut response = match request.call() {
-            Ok(response) => response,
-            Err(
-                ureq::Error::Timeout(_)
-                | ureq::Error::HostNotFound
-                | ureq::Error::ConnectionFailed
-                | ureq::Error::Io(_),
-            ) => bail!("cannot reach {host}. {}", hint::connectivity_fix()),
-            Err(other) => bail!("request failed: {host}: {other}"),
-        };
-        match response.status().as_u16() {
-            200..=299 => decode(response.body_mut()).map(Outcome::Body),
-            404 => Ok(Outcome::NotFound),
-            410 if ecosystem == Ecosystem::Go => Ok(Outcome::NotFound),
-            401 | 403 => Ok(Outcome::Refused {
-                had_token: authorization.is_some(),
-            }),
-            status => bail!("{host} answered with status {status}"),
-        }
-    }
-}
-
-enum Fetched {
-    Found { feed: String, versions: Vec<String> },
-    NotFound { feed: String },
-    Refused { had_token: bool },
-}
-
-fn fetch_npm(session: &Session, opts: &FeedOptions) -> Result<Fetched> {
-    let base = feed::npm_base(&opts.package, opts.org.as_deref(), opts.registry.as_deref());
-    let url = feed::npm_url(&base, &opts.package);
-    Ok(match session.get(Ecosystem::Npm, &url)? {
-        Outcome::Body(body) => Fetched::Found {
-            feed: base,
-            versions: feed::npm_versions(&body),
-        },
-        Outcome::NotFound => Fetched::NotFound { feed: base },
-        Outcome::Refused { had_token } => Fetched::Refused { had_token },
-    })
-}
-
-fn fetch_nuget(session: &Session, opts: &FeedOptions) -> Result<Fetched> {
-    let Some(index_url) = feed::nuget_index_url(opts.org.as_deref(), opts.registry.as_deref())
-    else {
-        bail!("--org is required for nuget unless --registry is given");
-    };
-    let index = match session.get(Ecosystem::Nuget, &index_url)? {
-        Outcome::Body(body) => body,
-        Outcome::NotFound => bail!(
-            "the NuGet service index was not found at {}",
-            feed::host(&index_url)
-        ),
-        Outcome::Refused { had_token } => return Ok(Fetched::Refused { had_token }),
-    };
-    let Some(base) = feed::nuget_base_address(&index) else {
-        bail!(
-            "the NuGet service index at {} has no PackageBaseAddress resource",
-            feed::host(&index_url)
-        );
-    };
-    let url = feed::nuget_versions_url(&base, &opts.package);
-    Ok(match session.get(Ecosystem::Nuget, &url)? {
-        Outcome::Body(body) => Fetched::Found {
-            feed: index_url,
-            versions: feed::nuget_versions(&body),
-        },
-        Outcome::NotFound => Fetched::NotFound { feed: index_url },
-        Outcome::Refused { had_token } => Fetched::Refused { had_token },
-    })
-}
-
 fn fetch(session: &Session, ecosystem: Ecosystem, opts: &FeedOptions) -> Result<Fetched> {
-    registries::validate_version(ecosystem, opts.version.as_deref())?;
-    match ecosystem {
-        Ecosystem::Npm => fetch_npm(session, opts),
-        Ecosystem::Nuget => fetch_nuget(session, opts),
-        Ecosystem::Cargo | Ecosystem::Pypi | Ecosystem::Go => {
-            registries::fetch(session, ecosystem, opts)
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Check {
-    Published,
-    Absent,
-    Failed(String),
-}
-
-pub struct Checker {
-    session: Session,
-    registry: Option<String>,
-    memo: BTreeMap<(Coordinate, Option<String>), Check>,
-}
-
-impl Default for Checker {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-fn short_reason(error: &anyhow::Error) -> String {
-    let text = error.to_string();
-    let line = text.lines().next().unwrap_or_default();
-    match line.split_once(". ") {
-        Some((first, _)) => first.to_string(),
-        None => line.trim_end_matches('.').to_string(),
-    }
-}
-
-impl Checker {
-    pub fn new() -> Self {
-        Self::with_registry(None)
-    }
-
-    pub fn with_registry(registry: Option<String>) -> Self {
-        Self {
-            session: Session::new(),
-            registry,
-            memo: BTreeMap::new(),
-        }
-    }
-
-    pub fn check(&mut self, package: &str, version: &str, org: Option<&str>) -> Check {
-        let coordinate = Coordinate {
-            ecosystem: Ecosystem::default_for(package),
-            package: package.to_string(),
-            version: version.to_string(),
-        };
-        self.check_coordinate(&coordinate, org)
-    }
-
-    fn check_coordinate(&mut self, coordinate: &Coordinate, org: Option<&str>) -> Check {
-        let key = (coordinate.clone(), org.map(str::to_owned));
-        if let Some(known) = self.memo.get(&key) {
-            return known.clone();
-        }
-        let outcome = self.lookup(coordinate, org);
-        self.memo.insert(key, outcome.clone());
-        outcome
-    }
-
-    fn lookup(&self, coordinate: &Coordinate, org: Option<&str>) -> Check {
-        let ecosystem = coordinate.ecosystem;
-        let package = coordinate.package.as_str();
-        let version = coordinate.version.as_str();
-        if ecosystem == Ecosystem::Nuget && org.is_none() && self.registry.is_none() {
-            return Check::Failed("no producer PR names the org that publishes it".to_string());
-        }
-        let opts = FeedOptions {
-            package: package.to_string(),
-            version: Some(version.to_string()),
-            ecosystem: None,
-            org: org.map(str::to_string),
-            registry: self.registry.clone(),
-            json: false,
-        };
-        match fetch(&self.session, ecosystem, &opts) {
-            Err(error) => Check::Failed(short_reason(&error)),
-            Ok(Fetched::Refused { .. })
-                if matches!(ecosystem, Ecosystem::Nuget | Ecosystem::Npm) =>
-            {
-                Check::Failed("the feed refused the request (401/403): needs read:packages".into())
-            }
-            Ok(Fetched::Refused { .. }) => {
-                Check::Failed("the registry refused the request (401/403)".into())
-            }
-            Ok(Fetched::NotFound { feed }) => Check::Failed(feed::not_found_message(&feed)),
-            Ok(Fetched::Found { feed, versions }) => {
-                let report = Report::build(package, ecosystem, &feed, Some(version), &versions);
-                if report.published == Some(true) {
-                    Check::Published
-                } else {
-                    Check::Absent
-                }
-            }
-        }
-    }
+    registry::fetch(
+        session,
+        ecosystem,
+        &opts.package,
+        opts.version.as_deref(),
+        opts.org.as_deref(),
+        opts.registry.as_deref(),
+    )
 }
 
 pub(crate) fn publishing_org(package: &str, producers: &[String]) -> Option<String> {
@@ -366,7 +128,7 @@ fn lookup(
     let session = Session::new();
     let fetched = fetch(&session, ecosystem, opts)?;
     let fetched = if selecting_target && ecosystem == Ecosystem::Go {
-        registries::exclude_go_retractions(&session, &opts.package, fetched)?
+        registry::exclude_go_retractions(&session, &opts.package, fetched)?
     } else {
         fetched
     };
@@ -538,7 +300,7 @@ pub fn wait_for(
     {
         bail!("--org is required for nuget unless --registry is given");
     }
-    registries::validate_version(ecosystem, opts.version.as_deref())?;
+    registry::validate_version(ecosystem, opts.version.as_deref())?;
     let session = Session::new();
     Ok(feed::wait_loop(
         plan,

@@ -74,7 +74,7 @@ Validate the local implementation with the acceptance tests above, formatting, c
 | Dependency audit | [CI job](.github/workflows/ci.yml) and [known-advisory failure fixture](docs/dependency-audit.md) | Pending |
 | Compact plan | [CLI checks for compact text, verbose detail, JSON and queue](tests/preflight.rs) and [gate and feed rendering](tests/render.rs) | Pending |
 
-Local status on 2026-11-26: all three items are implemented and validated on Windows. Formatting and clippy passed. The locked suite passed 1,596 tests and skipped the eight opt-in tests that write to GitHub sandboxes. The application lockfile passed the audit, and the isolated known-advisory fixture returned exit code 1. Hosted PR checks and publication are still pending.
+Local status on 2026-11-26: all three items are implemented and validated on Windows. Formatting and clippy passed. The locked suite passed 1,599 tests and skipped the eight opt-in tests that write to GitHub sandboxes. The application lockfile passed the audit, and the isolated known-advisory fixture returned exit code 1. The pull request records hosted checks for each revision. The published version is recorded in the table when a release contains the changes.
 
 ## Later
 

@@ -287,14 +287,17 @@ fn feed_reads_a_fake_registry_and_returns_the_command_json() {
     let fake = serve();
     let mut session = start(&fake, &[]);
     session.handshake();
-    let answer = session.tool(
-        "feed",
-        json!({ "package": "@acme/ui", "version": "1.2.0", "registry": fake.base }),
-    );
-    assert_eq!(answer["result"]["isError"], false, "{answer}");
-    let report: Value = serde_json::from_str(&first_text(&answer)).unwrap();
-    assert_eq!(report["schema"], 1);
-    assert_eq!(report["published"], true);
+    for (version, published) in [("1.2.0", true), ("9.9.9", false)] {
+        let answer = session.tool(
+            "feed",
+            json!({ "package": "@acme/ui", "version": version, "registry": fake.base }),
+        );
+        assert_eq!(answer["result"]["isError"], false, "{answer}");
+        let report: Value = serde_json::from_str(&first_text(&answer)).unwrap();
+        assert_eq!(report["schema"], 1);
+        assert_eq!(report["version"], version);
+        assert_eq!(report["published"], published);
+    }
 }
 
 #[test]

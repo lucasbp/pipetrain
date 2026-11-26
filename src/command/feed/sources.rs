@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use crate::command::{RepoSnapshot, bump};
+use crate::command::RepoSnapshot;
+use crate::consumer_bump::pin::manifests;
 use crate::detect;
 use crate::feed::{Coordinate, Ecosystem};
 use crate::model::Pr;
@@ -139,13 +140,13 @@ fn source_issue(snapshot: &RepoSnapshot, path: &str, c: &Coordinate) -> Option<S
     let Some(body) = read(path) else {
         return Some(format!("cannot verify registry source in {path}"));
     };
-    if !bump::public_dependency(c.ecosystem, body, &c.package) {
+    if !manifests::public_dependency(c.ecosystem, body, &c.package) {
         return Some(format!(
             "{path} has no unambiguous public source for {}",
             c.package
         ));
     }
-    bump::check_workspace_sources(c.ecosystem, &c.package, path, body, &snapshot.tree, |p| {
+    manifests::check_workspace_sources(c.ecosystem, &c.package, path, body, &snapshot.tree, |p| {
         read(p)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("could not read {p}"))

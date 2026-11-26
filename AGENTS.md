@@ -16,6 +16,21 @@ pipetrain is a Rust CLI that plans and executes merge queues across repositories
 - `src/mcp/` exposes read-only tools using the command implementations. Keep reusable output in a function returning it and print in the command's `run` path.
 - `docs/` holds contracts and design notes; `tests/` holds integration tests. See [docs/architecture.md](docs/architecture.md) for the full module map and design decisions.
 
+## Architecture review
+
+- Start with the closest workflow in [the module map](docs/architecture.md). Keep a rule with the data and tests that explain it. Split a module when two parts change for different reasons and the caller can pass a small, explicit input or result across the boundary. File length alone does not justify a split.
+- Keep flag parsing, terminal output and exit handling at the CLI boundary. MCP handlers adapt the same application operation to their read-only protocol. Commands coordinate policy and I/O. Keep planner rules, verdicts and value comparisons callable with in-memory inputs. Put HTTP, Git and filesystem operations in the adapter for that resource.
+- Trace the current callers before sharing or moving code. If two paths enforce the same rule, put it in their common domain module and import it from there. Keep genuinely different rules explicit, such as expected workflow verdicts and legacy verdicts. Prefer private modules and retain published paths through re-exports when moving library types.
+- In review, trace a changed behavior from its CLI or MCP entry point to the rule and any external effect. Use the tests for that boundary. For a move, check existing imports, serialized fields, stdout/stderr, exit codes and dry-run behavior where affected. Add focused coverage when an affected contract has no regression test. Run the validation below.
+
+### Automated dependency check
+
+`cargo test --locked --test architecture` checks the production source of `planner`, plan assembly (`plan`), workflow verdicts (`merge::verdict`) and the plan renderer (`render`), including their inline and conventional file submodules. Pass data such as `github::Run` to these modules. Move command orchestration and network reads to a caller or adapter.
+
+The check parses Rust paths and grouped, renamed or block-local imports. It flags direct dependencies on `crate::command`, `github::Client`, registry sessions and checkers, the `ureq` transport API and standard network sockets. It accepts passive types such as `ureq::http::StatusCode` and `std::net::IpAddr`. Use explicit imports from namespaces whose glob would expose a forbidden dependency. Diagnostics identify the source line and resolved path.
+
+This is a source check. It skips `#[cfg(test)]` items and test functions. It inspects expression-list macro arguments but does not expand macros, infer receiver types or trace calls through other modules. Review indirect effects, additional transports and module cohesion in the PR.
+
 ## Validation
 
 Before saying a change works, run exactly these checks:
@@ -26,7 +41,7 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 ```
 
-The crate uses edition 2024. CI uses the newest stable Rust through `dtolnay/rust-toolchain@stable` and runs clippy and tests on Linux, macOS and Windows for pushes to `main` and pull requests. CI does not run fmt. New stable toolchains have flagged new lints before, so run `rustup update stable` before trusting a local clippy run.
+The crate uses edition 2024. CI runs the format check on Linux and runs Clippy with fatal warnings and the locked test suite on Linux, macOS and Windows for pushes to `main` and pull requests. The suite includes the dependency check above and the CLI/MCP contract tests. A separate Linux job checks Cargo.lock against the RustSec advisory database as described in [Dependency audit](docs/dependency-audit.md). CI uses the newest stable Rust through `dtolnay/rust-toolchain@stable`, so run `rustup update stable` before trusting a local Clippy run.
 
 ## Rules
 

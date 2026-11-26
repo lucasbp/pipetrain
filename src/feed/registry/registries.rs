@@ -2,10 +2,10 @@ use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
-use super::{Ecosystem, FeedOptions, Fetched, Outcome, Session};
+use super::{Ecosystem, Fetched, Outcome, Session};
 
 mod retractions;
-pub(super) use retractions::exclude_go_retractions;
+pub(crate) use retractions::exclude_go_retractions;
 
 #[derive(Deserialize)]
 struct CrateRelease {
@@ -115,7 +115,7 @@ struct GoInfo {
     version: String,
 }
 
-pub(super) fn validate_version(ecosystem: Ecosystem, version: Option<&str>) -> Result<()> {
+pub(crate) fn validate_version(ecosystem: Ecosystem, version: Option<&str>) -> Result<()> {
     let Some(version) = version else {
         return Ok(());
     };
@@ -138,10 +138,15 @@ pub(super) fn validate_version(ecosystem: Ecosystem, version: Option<&str>) -> R
     Ok(())
 }
 
-fn go_versions(session: &Session, base: &str, opts: &FeedOptions) -> Result<Outcome<Vec<String>>> {
-    let module = go_path(&opts.package)?;
+fn go_versions(
+    session: &Session,
+    base: &str,
+    package: &str,
+    version: Option<&str>,
+) -> Result<Outcome<Vec<String>>> {
+    let module = go_path(package)?;
     let root = format!("{base}/{module}");
-    let requested = opts.version.as_deref().map(|v| {
+    let requested = version.map(|v| {
         if v.starts_with('v') {
             v.to_string()
         } else {
@@ -174,8 +179,7 @@ fn go_versions(session: &Session, base: &str, opts: &FeedOptions) -> Result<Outc
             Outcome::Body(info) => {
                 go_version(&info.version)?;
                 ensure!(
-                    opts.version
-                        .as_deref()
+                    version
                         .is_none_or(|v| Ecosystem::Go.compare_versions(&info.version, v).is_eq()),
                     "Go proxy returned a different version"
                 );
@@ -192,7 +196,9 @@ fn go_versions(session: &Session, base: &str, opts: &FeedOptions) -> Result<Outc
 pub(super) fn fetch(
     session: &Session,
     ecosystem: Ecosystem,
-    opts: &FeedOptions,
+    package: &str,
+    version: Option<&str>,
+    registry: Option<&str>,
 ) -> Result<Fetched> {
     let default = match ecosystem {
         Ecosystem::Cargo => "https://index.crates.io",
@@ -200,20 +206,16 @@ pub(super) fn fetch(
         Ecosystem::Go => "https://proxy.golang.org",
         _ => unreachable!(),
     };
-    let base = opts
-        .registry
-        .as_deref()
-        .unwrap_or(default)
-        .trim_end_matches('/');
+    let base = registry.unwrap_or(default).trim_end_matches('/');
     let response = match ecosystem {
         Ecosystem::Cargo => {
-            let path = cargo_path(&opts.package)?;
+            let path = cargo_path(package)?;
             session.get_body(ecosystem, &format!("{base}/{path}"), |body| {
-                cargo_versions(&opts.package, &body.read_to_string()?)
+                cargo_versions(package, &body.read_to_string()?)
             })?
         }
         Ecosystem::Pypi => {
-            let name = python_name(&opts.package)?;
+            let name = python_name(package)?;
             session.get_body(ecosystem, &format!("{base}/pypi/{name}/json"), |body| {
                 let project: PythonProject =
                     body.read_json().context("invalid PyPI project metadata")?;
@@ -228,7 +230,7 @@ pub(super) fn fetch(
                     .collect())
             })?
         }
-        Ecosystem::Go => go_versions(session, base, opts)?,
+        Ecosystem::Go => go_versions(session, base, package, version)?,
         _ => unreachable!(),
     };
     Ok(match response {

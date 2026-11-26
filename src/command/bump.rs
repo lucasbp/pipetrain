@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
-use clap::ValueEnum;
 use serde_json::{Value, json};
 
 use super::apply::tint;
@@ -12,16 +11,16 @@ use super::order::{Names, configured, names_of, read_repo, requests_line};
 use super::resolve;
 use crate::cache::{Cache, CacheMode};
 use crate::config::ApiConfig;
+use crate::consumer_bump::pin::manifests as pins;
+pub use crate::consumer_bump::pin::{Level, Status, classify, level_of};
 use crate::consumer_bump::{RestoreMode, RestoreSettings};
 use crate::elapsed;
-use crate::feed::{self, Ecosystem};
+use crate::feed::Ecosystem;
 use crate::github::{self, Client};
 use crate::manifest;
 use crate::progress::{self, Progress};
 use crate::style::{bold, dim, green, yellow};
 
-mod pins;
-pub(crate) use pins::public_dependency;
 pub use pins::{check_workspace_sources, pin_manifest};
 
 pub struct BumpOptions {
@@ -45,82 +44,6 @@ pub struct BumpOptions {
     pub prerelease: bool,
     pub restore_mode: Option<RestoreMode>,
     pub solution: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum Level {
-    Major,
-    Minor,
-    Patch,
-}
-
-impl Level {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Major => "major",
-            Self::Minor => "minor",
-            Self::Patch => "patch",
-        }
-    }
-}
-
-pub fn level_of(current: &str, target: &str) -> Level {
-    let from = feed::Version::parse(current);
-    let to = feed::Version::parse(target);
-    let (from, to) = (from.numbers(), to.numbers());
-    for index in 0..from.len().max(to.len()) {
-        if from.get(index).unwrap_or(&0) != to.get(index).unwrap_or(&0) {
-            return match index {
-                0 => Level::Major,
-                1 => Level::Minor,
-                _ => Level::Patch,
-            };
-        }
-    }
-    Level::Patch
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Status {
-    Change,
-    UpToDate,
-    Ahead,
-    Range,
-    OtherLevel,
-}
-
-impl Status {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Change => "change",
-            Self::UpToDate => "up_to_date",
-            Self::Ahead => "ahead",
-            Self::Range => "range",
-            Self::OtherLevel => "other_level",
-        }
-    }
-}
-
-fn is_exact(spec: &str) -> bool {
-    let core = spec.split(['-', '+']).next().unwrap_or_default();
-    !core.is_empty()
-        && core
-            .split('.')
-            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
-        && spec
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+'))
-}
-
-pub fn classify(current: &str, target: &str) -> Status {
-    if !is_exact(current) {
-        return Status::Range;
-    }
-    match feed::compare(current, target) {
-        std::cmp::Ordering::Equal => Status::UpToDate,
-        std::cmp::Ordering::Less => Status::Change,
-        std::cmp::Ordering::Greater => Status::Ahead,
-    }
 }
 
 pub fn target_version(
@@ -240,11 +163,7 @@ fn scan_at_heads(
                         }
                         Err(reason.to_owned())
                     } else {
-                        crate::consumer_bump::apply::check_manifest_only(
-                            ecosystem,
-                            &snapshot.tree,
-                            &refs,
-                        )
+                        pins::check_manifest_only(ecosystem, &snapshot.tree, &refs)
                     };
                     if let Err(reason) = guard {
                         found.warnings.push(format!(

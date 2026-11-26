@@ -7,6 +7,7 @@ use std::path::{Component, Path};
 pub mod apply;
 pub mod backend;
 pub mod journal;
+pub(crate) mod pin;
 
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum, serde::Deserialize, Serialize,

@@ -16,7 +16,7 @@ Paths below are relative to the repository root. Each line identifies a source m
 - `src/command/authors.rs`: configured and command-line author filters, including the authenticated login.
 - `src/command/apply.rs`: bundle execution, initial confirmation gate, GitHub writes and action reports.
 - `src/command/checklist.rs`: live bundle action checklist.
-- `src/command/feed.rs`: feed lookup, authentication, wait orchestration and CLI output.
+- `src/command/feed.rs`: feed command options, plan annotations, wait orchestration and CLI output.
 - `src/command/bump.rs`: read-only default-branch manifest scan and proposed version-change reports.
 - `src/command/order.rs`: manifest-backed repository order suggestions and TOML output.
 - `src/command/order/graph.rs`: repository dependency analysis for order suggestions.
@@ -56,21 +56,29 @@ Paths below are relative to the repository root. Each line identifies a source m
 - `src/pyproject.rs`: Python manifest publication, references and diff versions.
 - `src/gomod.rs`: Go module publication, references and diff versions.
 - `src/publishers.rs`: manifest candidate selection and publisher/reference maps.
-- `src/feed.rs`: NuGet/npm feed data, version comparison, wait loop and report rendering.
+- `src/feed.rs` and `src/feed/ecosystem.rs` model feed coordinates and versions, compare releases and render reports for NuGet, npm, Cargo, PyPI and Go.
+- `src/feed/registry.rs` and its submodules own registry HTTP requests, authentication, exact-version lookups and Go module retractions. Commands pass the ecosystem, package, optional version and selected registry. Publication verification uses the same adapter.
 - `src/publication.rs`: exact new-publication verification and opaque publication evidence.
 - `src/publication/backend.rs`: GitHub workflow/job/log collection and exact NuGet feed adapter.
 - `src/consumer_bump.rs`: evidence-backed pin preparation through the bump gateway.
+- `src/consumer_bump/pin.rs` and its manifest submodules classify pins and check workspace sources, companion files and exact edits for both the bump preview and consumer preparation.
 - `src/consumer_bump/journal.rs`: durable publisher inputs, consumer contracts and preparation markers.
 - `src/consumer_bump/backend.rs`: isolated Git workspaces, pin edits, restore checks, branch reservation and draft PR operations.
 - `src/consumer_bump/backend/process.rs`: owned subprocess trees and platform-specific termination.
 
 ### Merge execution and recovery
 
-- `src/merge.rs`: queue-step parsing, deploy verdicts, state/report types, store operations and summaries.
+- `src/merge.rs` parses queue steps, owns state types and store operations, and re-exports the merge API.
+- `src/merge/verdict.rs` judges observed runs against legacy or expected workflow rules.
+- `src/merge/report.rs` defines the serialized report, step details, summaries and exit status.
+- `src/merge/estimate.rs` defines the API estimate, budget warnings and polling schedule used by both the estimate and the executor.
 - `src/merge/storage.rs`: state paths, schema loading, previews, exclusive locking and atomic saves.
 - `src/workflows.rs`: push-filter evaluation, expected workflow paths, chained workflows and conservative predictions.
 - `src/merge_scheduler.rs`: dependency-aware worker scheduling, repository exclusion, barriers and failure policies.
-- `src/command/merge.rs`: merge CLI orchestration, live revalidation, merge requests, deploy polling and reports.
+- `src/command/merge.rs`: merge CLI orchestration, live revalidation and merge requests.
+- `src/command/merge/deploy.rs` tracks a deployment at the merged SHA. It applies the workflow verdict to the step report and handles polling, retries and runner waits.
+- `src/command/merge/compact.rs` and `src/command/merge/verbose.rs` render compact and detailed merge reports.
+- `src/command/merge/estimate.rs` calculates projected API requests from the plan, pending deploys and deploy predictions.
 - `src/command/merge/parallel.rs`: queue-to-job translation, worker clients and coordinator-owned state/progress.
 - `src/command/merge/stacked.rs`: in-invocation child evidence and verification of a changed parent head.
 - `src/command/merge/failure.rs`: failed-deploy dependency closure and independence checks for continuation.
@@ -130,11 +138,19 @@ Paths below are relative to the repository root. Each line identifies a source m
 - `src/update/notice.rs`: cached, bounded and suppressible update notices.
 - `src/update/error.rs`: update error types.
 
+## Boundaries to watch in review
+
+| Area | Evidence and review guidance |
+| --- | --- |
+| Merge execution | `merge_one` and `merge_plan_inner` still coordinate GitHub writes, durable checkpoints and recovery in `src/command/merge.rs`. A deeper split needs an explicit owner for the intent saved before a merge and the SHA recorded afterwards. Exercise both resume and parallel-worker tests when changing that sequence. |
+| Bundle and merge output | In `src/command/apply.rs`, `run_step` writes to GitHub while `live_rows` and `render_actions` present the result. In `src/command/merge/compact.rs`, `enrich` reads failed-job details from GitHub. Keep those reads out of rendering when extending the reports. |
+| Large cohesive files | `src/main.rs` declares and binds clap arguments. `src/render.rs` renders a plan from memory. `tests/merge_run.rs` exercises the executor against a local test server, including lost approvals and stacked heads. Their sizes reflect three different jobs. Review changes against each file's job. |
+
 ## Design decisions
 
 ### Durable state has its own identity, schema and lock
 
-`src/merge.rs` separates state schema 2 from report schema 1. `src/merge/storage.rs` accepts older state in memory and refuses newer schemas before writing. State identity persists across invocations and completed queues; timestamps and pending ages preserve unknown legacy values. Named profiles select separate durable queue paths. The rationale for the particular profile-directory layout is not stated (reason not documented). Exact path precedence, legacy protection and field contracts are in [merge state](merge.md#resuming) and [state inspection](state.md).
+State schema 2 lives in `src/merge.rs`. Report schema 1 lives in `src/merge/report.rs`. `src/merge/storage.rs` accepts older state in memory and refuses newer schemas before writing. State identity persists across invocations and completed queues; timestamps and pending ages preserve unknown legacy values. Named profiles select separate durable queue paths. The rationale for the particular profile-directory layout is not stated (reason not documented). Exact path precedence, legacy protection and field contracts are in [merge state](merge.md#resuming) and [state inspection](state.md).
 
 The intent is durable recovery after the process ends between a GitHub write and its reply or between merge and deployment confirmation. Intent is recorded before merging, so resume can reconcile an unknown SHA without assuming the request failed. The exclusive OS lock spans apply; reloading under it replaces the pre-lock snapshot. Unique temporary siblings and atomic replacement preserve the previous state on failed saves. The queue ID names the persistent queue, not a particular selection. The choice of its particular ID construction algorithm has no stated rationale (reason not documented).
 
@@ -144,7 +160,7 @@ The intent is durable recovery after the process ends between a GitHub write and
 
 `src/workflows.rs` produces `expected`, `dispensed` or `indeterminate`. Push branch and path filters must both match, and rename sources count as changed paths. Execution reads workflows at the merge SHA, while dry-run prediction uses the planned head. The explicit repository exemption precedes prediction. Complete exclusions can dispense waiting; unreadable or unsupported inputs retain polling.
 
-Expected-path tracking in `src/merge.rs` requires the expected push and resolved `workflow_run` chain paths at the merge SHA. Auxiliary green jobs cannot stand in for deployment; unresolved chains cannot silently confirm it. Two complete polls with a stable run count settle successful observations. These choices prevent unrelated or early-finishing runs from providing false deploy evidence and preserve waiting under uncertainty. Saved predictions keep resume tied to the same expectation. Legacy records retain their older verdict rules. Supported filters, completeness limits and all verdict details live in [merge.md](merge.md#what-it-waits-for).
+Expected-path tracking in `src/merge/verdict.rs` requires the expected push and resolved `workflow_run` chain paths at the merge SHA. Auxiliary green jobs cannot stand in for deployment; unresolved chains cannot silently confirm it. Two complete polls with a stable run count settle successful observations. These choices prevent unrelated or early-finishing runs from providing false deploy evidence and preserve waiting under uncertainty. Saved predictions keep resume tied to the same expectation. Legacy records retain their older verdict rules. Supported filters, completeness limits and all verdict details live in [merge.md](merge.md#what-it-waits-for).
 
 ### Plan and merge share one readiness policy
 
@@ -162,7 +178,7 @@ The planner only adds ordering constraints: waiting is cheaper than a wrong para
 
 ### Read retries, immutable cache keys and secret redaction
 
-`src/github/client.rs` routes reads through the bounded policy in `src/github/retry.rs`; writes take the single-attempt path. Selected server errors and secondary rate limits use backoff and jitter, while exhausted primary quotas are reported. `src/command/merge.rs` additionally bounds deploy polling and retry work by execution deadlines. The rationale for applying automatic client retries only to reads is not explicitly stated (reason not documented). Transport failures still return from the client's read call; deploy polling has its own recovery. Policy limits and request accounting are described in the README's [API budget](../README.md#api-budget).
+`src/github/client.rs` routes reads through the bounded policy in `src/github/retry.rs`; writes take the single-attempt path. Selected server errors and secondary rate limits use backoff and jitter, while exhausted primary quotas are reported. `src/command/merge/deploy.rs` additionally bounds deploy polling and retry work by execution deadlines. The rationale for applying automatic client retries only to reads is not explicitly stated (reason not documented). Transport failures still return from the client's read call; deploy polling has its own recovery. Policy limits and request accounting are described in the README's [API budget](../README.md#api-budget).
 
 `src/github/endpoints.rs` and `src/github/cached.rs` cache SHA-bound data; mutable PR lists, reviews, checks and branch tips are fetched again. This reduces repeated requests without freezing readiness. Cache files omit tokens, headers and patches; patch-bearing manifest changes are fetched again. Entry corruption or an unsupported cache version becomes a miss. Storage keys, bounds and pruning stay local to `src/cache/`. User controls and cache contents live in the README's [local cache](../README.md#local-cache).
 
@@ -170,7 +186,7 @@ The planner only adds ordering constraints: waiting is cheaper than a wrong para
 
 ### Writable consumer preparation requires publication proof
 
-`src/publication.rs` exposes opaque evidence only after checking execution identity, a matching new NuGet push and the exact feed version. `src/consumer_bump.rs` consumes that evidence; its backend creates isolated workspaces, verifies pins and restores, reserves a fresh remote branch and opens a draft against the consumer head. The journal marks intent before side effects so uncertain partial operations stop for inspection. The reason is to avoid inventing versions, treating duplicate pushes as new publication, changing existing checkouts or bypassing review. Standalone `bump` remains a read-only report. Full constraints and recovery belong to [publication-bump.md](publication-bump.md).
+`src/publication.rs` exposes opaque evidence only after checking execution identity, a matching new NuGet push and the exact feed version. `src/consumer_bump.rs` consumes that evidence; its backend creates isolated workspaces, verifies pins and restores, reserves a fresh remote branch and opens a draft against the consumer head. The journal marks intent before side effects so uncertain partial operations stop for inspection. The reason is to avoid inventing versions, treating duplicate pushes as new publication, changing existing checkouts or bypassing review. Standalone `bump` previews changes by default. With `--apply` it proves the target version before preparing isolated consumer drafts. Full constraints and recovery belong to [publication-bump.md](publication-bump.md).
 
 ### MCP reuses commands and exposes no execution writes
 
