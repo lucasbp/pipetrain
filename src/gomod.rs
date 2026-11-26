@@ -52,7 +52,7 @@ fn requirement(line: &str) -> Option<(String, String)> {
         return None;
     }
     let caps = pair.captures(line)?;
-    Some((module_name(&caps[1]), caps[2].to_string()))
+    Some((caps[1].trim_matches('"').to_string(), caps[2].to_string()))
 }
 
 fn walk<'a>(
@@ -98,12 +98,12 @@ fn walk<'a>(
 pub fn references(text: &str) -> BTreeSet<String> {
     let mut found = BTreeSet::new();
     walk(text.lines().map(|line| (true, line)), |_, name, _| {
-        found.insert(name);
+        found.insert(name.to_lowercase());
     });
     found
 }
 
-fn readable(version: &str) -> String {
+pub(crate) fn readable(version: &str) -> String {
     static PSEUDO: OnceLock<Regex> = OnceLock::new();
     let pseudo = regex(&PSEUDO, r"-\d{14}-[0-9a-f]{12}$");
     if pseudo.is_match(version) {
@@ -116,10 +116,17 @@ fn readable(version: &str) -> String {
 }
 
 pub fn bumped(patch: &str, prefix: char) -> BTreeMap<String, String> {
+    bumped_names(patch, prefix)
+        .into_iter()
+        .map(|(name, v)| (name.to_lowercase(), readable(&v)))
+        .collect()
+}
+
+pub(crate) fn bumped_names(patch: &str, prefix: char) -> BTreeMap<String, String> {
     let mut found = BTreeMap::new();
     walk(side_lines(patch, prefix), |changed, name, version| {
         if changed {
-            found.insert(name, readable(&version));
+            found.insert(name, version);
         }
     });
     found

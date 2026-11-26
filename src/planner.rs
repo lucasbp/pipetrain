@@ -64,6 +64,8 @@ pub struct Dependency {
     pub published: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub feed_error: Option<String>,
+    #[serde(skip)]
+    pub feed_coordinate: Option<crate::feed::Coordinate>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -150,6 +152,7 @@ struct Edge {
     reason: String,
     package: Option<String>,
     version: Option<String>,
+    feed_coordinate: Option<crate::feed::Coordinate>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -203,6 +206,7 @@ impl Graph {
             reason,
             package: None,
             version: None,
+            feed_coordinate: None,
         });
         self.succs[from].push(to);
         Added::Yes
@@ -315,7 +319,7 @@ impl<'a> Builder<'a> {
         rule: Rule,
         reason: String,
         package: &str,
-        version: Option<&str>,
+        bump: Option<&detect::Bump>,
     ) {
         self.link(from, to, rule, reason, true);
         let tagged = self.graph.preds[to]
@@ -323,7 +327,8 @@ impl<'a> Builder<'a> {
             .find(|e| e.from == from && e.package.is_none());
         if let Some(edge) = tagged {
             edge.package = Some(package.to_string());
-            edge.version = version.map(str::to_string);
+            edge.version = bump.and_then(|b| b.version.clone());
+            edge.feed_coordinate = bump.and_then(|b| b.feed.clone());
         }
     }
 
@@ -413,8 +418,7 @@ impl<'a> Builder<'a> {
         }
         for i in 0..self.prs.len() {
             let own = self.prs[i].key.slug().to_lowercase();
-            let versions = detect::bumped_versions(&self.prs[i].files);
-            for package in detect::bumped_packages(&self.prs[i].files) {
+            for (package, bump) in detect::bumps(&self.prs[i].files) {
                 let Some(repos) = publishers.get(&package) else {
                     continue;
                 };
@@ -436,8 +440,7 @@ impl<'a> Builder<'a> {
                     for j in targets {
                         let reason =
                             format!("{} bumps {package}, published by {repo}", self.ids[i]);
-                        let version = versions.get(&package).map(String::as_str);
-                        self.link_package(j, i, Rule::Package, reason, &package, version);
+                        self.link_package(j, i, Rule::Package, reason, &package, Some(&bump));
                     }
                 }
             }
@@ -678,6 +681,7 @@ pub fn plan(input: PlanInput<'_>) -> Planned {
                         version: e.version.clone(),
                         published: None,
                         feed_error: None,
+                        feed_coordinate: e.feed_coordinate.clone(),
                     }
                 })
                 .collect();

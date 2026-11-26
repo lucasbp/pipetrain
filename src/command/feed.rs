@@ -1,17 +1,19 @@
 use std::cell::OnceCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use serde_json::Value;
 use ureq::Agent;
 
-use crate::feed::{self, Attempt, Ecosystem, Report, WaitEnd, WaitPlan, Waited};
+use crate::feed::{self, Attempt, Coordinate, Ecosystem, Report, WaitEnd, WaitPlan, Waited};
 use crate::github;
 use crate::hint;
 use crate::plan::Plan;
 use crate::planner::{Dependency, Rule};
 use crate::progress;
+
+mod registries;
 
 const NPM_ACCEPT: &str = "application/vnd.npm.install-v1+json";
 
@@ -24,8 +26,8 @@ pub struct FeedOptions {
     pub json: bool,
 }
 
-enum Outcome {
-    Body(Value),
+enum Outcome<T = Value> {
+    Body(T),
     NotFound,
     Refused { had_token: bool },
 }
@@ -58,14 +60,26 @@ impl Session {
         if !feed::is_github_packages(url) {
             return None;
         }
-        let token = self.token()?;
-        Some(match ecosystem {
-            Ecosystem::Npm => feed::bearer(token),
-            Ecosystem::Nuget => feed::basic(token),
-        })
+        match ecosystem {
+            Ecosystem::Npm => self.token().map(feed::bearer),
+            Ecosystem::Nuget => self.token().map(feed::basic),
+            _ => None,
+        }
     }
 
     fn get(&self, ecosystem: Ecosystem, url: &str) -> Result<Outcome> {
+        self.get_body(ecosystem, url, |body| {
+            body.read_json()
+                .map_err(|_| anyhow::anyhow!("{} did not answer with valid JSON", feed::host(url)))
+        })
+    }
+
+    fn get_body<T>(
+        &self,
+        ecosystem: Ecosystem,
+        url: &str,
+        decode: impl FnOnce(&mut ureq::Body) -> Result<T>,
+    ) -> Result<Outcome<T>> {
         let authorization = self.authorization(ecosystem, url);
         let mut request = self.agent.get(url);
         if ecosystem == Ecosystem::Npm {
@@ -86,12 +100,9 @@ impl Session {
             Err(other) => bail!("request failed: {host}: {other}"),
         };
         match response.status().as_u16() {
-            200..=299 => response
-                .body_mut()
-                .read_json::<Value>()
-                .map(Outcome::Body)
-                .map_err(|_| anyhow::anyhow!("{host} did not answer with valid JSON")),
+            200..=299 => decode(response.body_mut()).map(Outcome::Body),
             404 => Ok(Outcome::NotFound),
+            410 if ecosystem == Ecosystem::Go => Ok(Outcome::NotFound),
             401 | 403 => Ok(Outcome::Refused {
                 had_token: authorization.is_some(),
             }),
@@ -153,6 +164,9 @@ fn fetch(session: &Session, ecosystem: Ecosystem, opts: &FeedOptions) -> Result<
     match ecosystem {
         Ecosystem::Npm => fetch_npm(session, opts),
         Ecosystem::Nuget => fetch_nuget(session, opts),
+        Ecosystem::Cargo | Ecosystem::Pypi | Ecosystem::Go => {
+            registries::fetch(session, ecosystem, opts)
+        }
     }
 }
 
@@ -166,7 +180,7 @@ pub enum Check {
 pub struct Checker {
     session: Session,
     registry: Option<String>,
-    memo: BTreeMap<(String, String), Check>,
+    memo: BTreeMap<(Coordinate, Option<String>), Check>,
 }
 
 impl Default for Checker {
@@ -198,17 +212,28 @@ impl Checker {
     }
 
     pub fn check(&mut self, package: &str, version: &str, org: Option<&str>) -> Check {
-        let key = (package.to_string(), version.to_string());
+        let coordinate = Coordinate {
+            ecosystem: Ecosystem::default_for(package),
+            package: package.to_string(),
+            version: version.to_string(),
+        };
+        self.check_coordinate(&coordinate, org)
+    }
+
+    fn check_coordinate(&mut self, coordinate: &Coordinate, org: Option<&str>) -> Check {
+        let key = (coordinate.clone(), org.map(str::to_owned));
         if let Some(known) = self.memo.get(&key) {
             return known.clone();
         }
-        let outcome = self.lookup(package, version, org);
+        let outcome = self.lookup(coordinate, org);
         self.memo.insert(key, outcome.clone());
         outcome
     }
 
-    fn lookup(&self, package: &str, version: &str, org: Option<&str>) -> Check {
-        let ecosystem = Ecosystem::default_for(package);
+    fn lookup(&self, coordinate: &Coordinate, org: Option<&str>) -> Check {
+        let ecosystem = coordinate.ecosystem;
+        let package = coordinate.package.as_str();
+        let version = coordinate.version.as_str();
         if ecosystem == Ecosystem::Nuget && org.is_none() && self.registry.is_none() {
             return Check::Failed("no producer PR names the org that publishes it".to_string());
         }
@@ -222,8 +247,13 @@ impl Checker {
         };
         match fetch(&self.session, ecosystem, &opts) {
             Err(error) => Check::Failed(short_reason(&error)),
-            Ok(Fetched::Refused { .. }) => {
+            Ok(Fetched::Refused { .. })
+                if matches!(ecosystem, Ecosystem::Nuget | Ecosystem::Npm) =>
+            {
                 Check::Failed("the feed refused the request (401/403): needs read:packages".into())
+            }
+            Ok(Fetched::Refused { .. }) => {
+                Check::Failed("the registry refused the request (401/403)".into())
             }
             Ok(Fetched::NotFound { feed }) => Check::Failed(feed::not_found_message(&feed)),
             Ok(Fetched::Found { feed, versions }) => {
@@ -239,7 +269,15 @@ impl Checker {
 }
 
 pub(crate) fn publishing_org(package: &str, producers: &[String]) -> Option<String> {
-    match Ecosystem::default_for(package) {
+    registry_org(Ecosystem::default_for(package), package, producers)
+}
+
+pub(crate) fn registry_org(
+    ecosystem: Ecosystem,
+    package: &str,
+    producers: &[String],
+) -> Option<String> {
+    match ecosystem {
         Ecosystem::Npm => {
             let scope = package
                 .trim_start_matches('@')
@@ -252,6 +290,7 @@ pub(crate) fn publishing_org(package: &str, producers: &[String]) -> Option<Stri
                 .cloned()
         }
         Ecosystem::Nuget => producers.first().cloned(),
+        _ => None,
     }
 }
 
@@ -260,37 +299,37 @@ fn is_checkable(dep: &Dependency) -> bool {
 }
 
 pub fn annotate(plan: &mut Plan, checker: &mut Checker) -> usize {
-    let orgs: BTreeMap<&str, &str> = plan
+    let orgs: BTreeMap<String, String> = plan
         .items
         .iter()
-        .map(|item| (item.id.as_str(), item.org.as_str()))
+        .map(|item| (item.id.clone(), item.org.clone()))
         .collect();
-    let mut wanted: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
-    for dep in plan
+    let query = |dep: &Dependency| {
+        let coordinate = dep.feed_coordinate.clone()?;
+        let org = registry_org(
+            coordinate.ecosystem,
+            &coordinate.package,
+            orgs.get(&dep.id)
+                .map(std::slice::from_ref)
+                .unwrap_or_default(),
+        );
+        Some((coordinate, org))
+    };
+    let wanted: BTreeSet<_> = plan
         .items
         .iter()
-        .flat_map(|item| item.after.iter())
+        .flat_map(|item| &item.after)
         .filter(|dep| is_checkable(dep))
-    {
-        let key = (
-            dep.package.clone().unwrap_or_default(),
-            dep.version.clone().unwrap_or_default(),
-        );
-        let producers = wanted.entry(key).or_default();
-        if let Some(org) = orgs.get(dep.id.as_str()) {
-            producers.push((*org).to_string());
-        }
-    }
+        .filter_map(query)
+        .collect();
     let total = wanted.len();
-    if total == 0 {
-        return 0;
+    let mut results = BTreeMap::new();
+    if total > 0 {
+        progress::phase("checking feeds");
     }
-    progress::phase("checking feeds");
-    let mut results: BTreeMap<(String, String), Check> = BTreeMap::new();
-    for (done, ((package, version), producers)) in wanted.into_iter().enumerate() {
-        let org = publishing_org(&package, &producers);
-        let outcome = checker.check(&package, &version, org.as_deref());
-        results.insert((package, version), outcome);
+    for (done, (coordinate, org)) in wanted.into_iter().enumerate() {
+        let outcome = checker.check_coordinate(&coordinate, org.as_deref());
+        results.insert((coordinate, org), outcome);
         progress::count(done + 1, total);
     }
     for dep in plan
@@ -299,15 +338,14 @@ pub fn annotate(plan: &mut Plan, checker: &mut Checker) -> usize {
         .flat_map(|item| item.after.iter_mut())
         .filter(|dep| is_checkable(dep))
     {
-        let key = (
-            dep.package.clone().unwrap_or_default(),
-            dep.version.clone().unwrap_or_default(),
-        );
-        match results.get(&key) {
+        match query(dep).and_then(|key| results.get(&key)) {
             Some(Check::Published) => dep.published = Some(true),
             Some(Check::Absent) => dep.published = Some(false),
             Some(Check::Failed(reason)) => dep.feed_error = Some(reason.clone()),
-            None => {}
+            None => {
+                dep.feed_error =
+                    Some("cannot identify one registry source for this dependency".to_string())
+            }
         }
     }
     total
@@ -321,7 +359,7 @@ fn lookup(opts: &FeedOptions, notes: &mut Vec<String>) -> Result<Result<Report, 
     let fetched = fetch(&session, ecosystem, opts)?;
     match fetched {
         Fetched::Refused { had_token } => {
-            notes.push(feed::refused_message(had_token));
+            notes.push(refusal(ecosystem, had_token));
             Ok(Err(feed::EXIT_REFUSED))
         }
         Fetched::NotFound { feed } => {
@@ -344,7 +382,7 @@ pub fn versions(opts: &FeedOptions, notes: &mut Vec<String>) -> Result<Result<Ve
         .unwrap_or_else(|| Ecosystem::default_for(&opts.package));
     Ok(match fetch(&Session::new(), ecosystem, opts)? {
         Fetched::Refused { had_token } => {
-            notes.push(feed::refused_message(had_token));
+            notes.push(refusal(ecosystem, had_token));
             Err(feed::EXIT_REFUSED)
         }
         Fetched::NotFound { feed } => {
@@ -518,7 +556,14 @@ pub fn run_wait(opts: FeedOptions, wait: WaitOptions) -> Result<i32> {
     let code = waited.exit_code();
     match &waited.end {
         WaitEnd::Published(report) => print_wait(report, &waited, false, opts.json)?,
-        WaitEnd::Refused { had_token } => eprintln!("{}", feed::refused_message(*had_token)),
+        WaitEnd::Refused { had_token } => eprintln!(
+            "{}",
+            refusal(
+                opts.ecosystem
+                    .unwrap_or_else(|| Ecosystem::default_for(&opts.package)),
+                *had_token
+            )
+        ),
         WaitEnd::TimedOut {
             error: Some(reason),
             ..
@@ -553,6 +598,13 @@ fn print_wait(report: &Report, waited: &Waited, timed_out: bool, json: bool) -> 
         println!("{}", feed::render_text(report));
     }
     Ok(())
+}
+
+pub(crate) fn refusal(ecosystem: Ecosystem, had_token: bool) -> String {
+    match ecosystem {
+        Ecosystem::Nuget | Ecosystem::Npm => feed::refused_message(had_token),
+        _ => "the registry refused the request (401/403)".into(),
+    }
 }
 
 pub struct Rendered {

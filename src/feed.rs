@@ -4,6 +4,8 @@ use std::time::Duration;
 use clap::ValueEnum;
 use serde_json::{Value, json};
 
+mod ecosystem;
+
 pub const NPM_PUBLIC: &str = "https://registry.npmjs.org";
 pub const NPM_GITHUB: &str = "https://npm.pkg.github.com";
 pub const NUGET_GITHUB: &str = "https://nuget.pkg.github.com";
@@ -14,10 +16,21 @@ pub const EXIT_ERROR: i32 = 3;
 pub const DEFAULT_INTERVAL: u64 = 10;
 pub const DEFAULT_TIMEOUT: u64 = 600;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 pub enum Ecosystem {
     Nuget,
     Npm,
+    Cargo,
+    #[value(alias = "python")]
+    Pypi,
+    Go,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Coordinate {
+    pub ecosystem: Ecosystem,
+    pub package: String,
+    pub version: String,
 }
 
 impl Ecosystem {
@@ -25,6 +38,9 @@ impl Ecosystem {
         match self {
             Self::Nuget => "nuget",
             Self::Npm => "npm",
+            Self::Cargo => "cargo",
+            Self::Pypi => "pypi",
+            Self::Go => "go",
         }
     }
 
@@ -239,11 +255,13 @@ impl Report {
         version: Option<&str>,
         found: &[String],
     ) -> Self {
-        let ordered = newest_first(found);
+        let mut ordered = found.to_vec();
+        ordered.sort_by(|a, b| ecosystem.compare_versions(b, a).then_with(|| b.cmp(a)));
+        ordered.dedup_by(|a, b| ecosystem.compare_versions(a, b).is_eq());
         let published = version.map(|wanted| {
             ordered
                 .iter()
-                .any(|have| compare(have, wanted) == Ordering::Equal)
+                .any(|have| ecosystem.compare_versions(have, wanted).is_eq())
         });
         Self {
             package: package.to_string(),
@@ -252,7 +270,10 @@ impl Report {
             version: version.map(str::to_string),
             published,
             latest: ordered.first().cloned(),
-            latest_stable: ordered.iter().find(|v| !is_prerelease(v)).cloned(),
+            latest_stable: ordered
+                .iter()
+                .find(|v| !ecosystem.is_prerelease(v))
+                .cloned(),
             versions: ordered.into_iter().take(RECENT).collect(),
         }
     }

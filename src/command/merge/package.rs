@@ -16,7 +16,7 @@ fn options(env: &Env, target: &str) -> Option<FeedOptions> {
                     .is_some_and(|version| named == format!("{package} {version}"))
             })
     })?;
-    let package = dep.package.clone()?;
+    let coordinate = dep.feed_coordinate.as_ref()?;
     let producers = item
         .after
         .iter()
@@ -29,10 +29,10 @@ fn options(env: &Env, target: &str) -> Option<FeedOptions> {
         .map(|item| item.org.clone())
         .collect::<Vec<_>>();
     Some(FeedOptions {
-        org: feed::publishing_org(&package, &producers),
-        package,
-        version: dep.version.clone(),
-        ecosystem: None,
+        org: feed::registry_org(coordinate.ecosystem, &coordinate.package, &producers),
+        package: coordinate.package.clone(),
+        version: Some(coordinate.version.clone()),
+        ecosystem: Some(coordinate.ecosystem),
         registry: env.settings.feed_registry.clone(),
         json: false,
     })
@@ -71,7 +71,11 @@ pub(super) fn check(env: &Env, hooks: &mut Hooks, report: &mut StepReport) -> bo
             report,
             format!(
                 "{package} {version}: {}",
-                crate::feed::refused_message(had_token)
+                feed::refusal(
+                    opts.ecosystem
+                        .unwrap_or_else(|| crate::feed::Ecosystem::default_for(package)),
+                    had_token
+                )
             ),
         ),
         Ok(WaitEnd::TimedOut {

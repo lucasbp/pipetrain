@@ -60,7 +60,8 @@ pub fn definitions() -> Vec<Value> {
     let profile =
         string_prop("Profile name; default: from the folder, default_profile or the only one");
     let org = list_prop("GitHub orgs, overrides the profile's orgs");
-    let ecosystem = string_prop("nuget or npm; default: npm for @scoped names, else nuget");
+    let ecosystem =
+        string_prop("nuget, npm, cargo, pypi or go; default: npm for @scoped names, else nuget");
     let feed_org = string_prop("GitHub org that owns the feed; needed for nuget without registry");
     let registry = string_prop("Feed URL to ask instead of the default");
     vec![
@@ -80,7 +81,7 @@ pub fn definitions() -> Vec<Value> {
         ),
         tool(
             "feed",
-            "Whether a package version is published in its NuGet or npm feed (feed --json, schema 1). Read-only.",
+            "Whether a package version is published in its registry (feed --json, schema 1). Read-only.",
             json!({
                 "package": string_prop("Package id, e.g. Acme.Util or @acme/ui"),
                 "version": string_prop("Version to look for; empty lists the latest"),
@@ -166,8 +167,9 @@ fn list(args: &Value, key: &str) -> Result<Vec<String>, Failure> {
 fn ecosystem(args: &Value) -> Result<Option<Ecosystem>, Failure> {
     text_arg(args, "ecosystem")?
         .map(|text| {
-            Ecosystem::from_str(&text, true)
-                .map_err(|_| Failure::Invalid("`ecosystem` must be nuget or npm".to_string()))
+            Ecosystem::from_str(&text, true).map_err(|_| {
+                Failure::Invalid("`ecosystem` must be nuget, npm, cargo, pypi or go".to_string())
+            })
         })
         .transpose()
 }

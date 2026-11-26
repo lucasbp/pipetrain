@@ -147,39 +147,106 @@ fn npm_versions(patch: &str, prefix: char) -> BTreeMap<String, String> {
     found
 }
 
-fn bumped_entries(files: &[ChangedFile]) -> Vec<(String, String)> {
-    let mut bumped = Vec::new();
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct Bump {
+    pub version: Option<String>,
+    pub feed: Option<crate::feed::Coordinate>,
+}
+
+pub(crate) fn bumps(files: &[ChangedFile]) -> BTreeMap<String, Bump> {
+    use crate::feed::{Coordinate, Ecosystem};
+    let mut bumped: BTreeMap<String, Bump> = BTreeMap::new();
     for file in files {
         let Some(patch) = file.patch.as_deref() else {
             continue;
         };
-        let (added, removed) = if is_dotnet_manifest(&file.path) {
-            (dotnet_versions(patch, '+'), dotnet_versions(patch, '-'))
+        let (ecosystem, added, removed) = if is_dotnet_manifest(&file.path) {
+            (
+                Ecosystem::Nuget,
+                dotnet_versions(patch, '+'),
+                dotnet_versions(patch, '-'),
+            )
         } else if is_package_json(&file.path) {
-            (npm_versions(patch, '+'), npm_versions(patch, '-'))
+            (
+                Ecosystem::Npm,
+                npm_versions(patch, '+'),
+                npm_versions(patch, '-'),
+            )
         } else if is_cargo_toml(&file.path) {
-            (cargo::bumped(patch, '+'), cargo::bumped(patch, '-'))
+            (
+                Ecosystem::Cargo,
+                cargo::bumped_names(patch, '+'),
+                cargo::bumped_names(patch, '-'),
+            )
         } else if is_pyproject(&file.path) {
-            (pyproject::bumped(patch, '+'), pyproject::bumped(patch, '-'))
+            (
+                Ecosystem::Pypi,
+                pyproject::bumped(patch, '+'),
+                pyproject::bumped(patch, '-'),
+            )
         } else if is_go_mod(&file.path) {
-            (gomod::bumped(patch, '+'), gomod::bumped(patch, '-'))
+            (
+                Ecosystem::Go,
+                gomod::bumped_names(patch, '+'),
+                gomod::bumped_names(patch, '-'),
+            )
         } else {
             continue;
         };
-        for (name, version) in added {
-            if removed.get(&name) != Some(&version) {
-                bumped.push((name, version));
+        for (name, raw) in added {
+            if removed.get(&name) == Some(&raw) {
+                continue;
             }
+            let key = match ecosystem {
+                Ecosystem::Cargo => name.to_lowercase().replace('_', "-"),
+                Ecosystem::Go => name.to_lowercase(),
+                _ => name.clone(),
+            };
+            let version = if ecosystem == Ecosystem::Go {
+                normalise_version(&gomod::readable(&raw))
+            } else {
+                normalise_version(&raw)
+            };
+            let feed = version
+                .as_ref()
+                .filter(|_| !has_source_override(ecosystem, patch))
+                .map(|v| Coordinate {
+                    ecosystem,
+                    package: name,
+                    version: if ecosystem == Ecosystem::Go {
+                        raw
+                    } else {
+                        v.clone()
+                    },
+                });
+            bumped
+                .entry(key)
+                .and_modify(|existing| {
+                    if existing.version != version {
+                        existing.version = None;
+                    }
+                    if existing.feed != feed {
+                        existing.feed = None;
+                    }
+                })
+                .or_insert(Bump { version, feed });
         }
     }
     bumped
 }
 
 pub fn bumped_packages(files: &[ChangedFile]) -> BTreeSet<String> {
-    bumped_entries(files)
-        .into_iter()
-        .map(|(name, _)| name)
-        .collect()
+    bumps(files).into_keys().collect()
+}
+
+fn has_source_override(ecosystem: crate::feed::Ecosystem, patch: &str) -> bool {
+    use crate::feed::Ecosystem;
+    side_lines(patch, '+').any(|(_, line)| match ecosystem {
+        Ecosystem::Cargo => line.contains("registry") || line.trim_start().starts_with("[patch."),
+        Ecosystem::Go => line.trim_start().starts_with("replace ") || line.contains("=>"),
+        Ecosystem::Pypi => line.contains("source") || line.contains("index ="),
+        _ => false,
+    })
 }
 
 fn normalise_version(raw: &str) -> Option<String> {
@@ -208,21 +275,9 @@ fn normalise_version(raw: &str) -> Option<String> {
 }
 
 pub fn bumped_versions(files: &[ChangedFile]) -> BTreeMap<String, String> {
-    let mut seen: BTreeMap<String, Option<String>> = BTreeMap::new();
-    for (name, raw) in bumped_entries(files) {
-        let version = normalise_version(&raw);
-        match seen.get(&name) {
-            Some(existing) if *existing != version => {
-                seen.insert(name, None);
-            }
-            Some(_) => {}
-            None => {
-                seen.insert(name, version);
-            }
-        }
-    }
-    seen.into_iter()
-        .filter_map(|(name, version)| version.map(|v| (name, v)))
+    bumps(files)
+        .into_iter()
+        .filter_map(|(name, bump)| bump.version.map(|v| (name, v)))
         .collect()
 }
 
