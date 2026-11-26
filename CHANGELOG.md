@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.15.3
+
+- Keep `merge --bump --apply` running while a reviewer merges the NuGet bump PR. Pipetrain verifies that each waiting consumer includes the bump and the exact package pin, waits for approval and passing CI on its updated commit, then continues the queue automatically.
+- The wait defaults to 30 minutes. Set `--timeout-minutes` or `merge.timeout_minutes` to change it. After a timeout or interruption, rerun the original command with the same state file to resume.
+
 ## 0.15.2
 
 - When a producer publishes a NuGet package during `merge --bump --apply`, pipetrain identifies queued consumers whose pin reaches their `max-behind` limit, even if the original plan had no package edge. Consumers in the same repository targeting the same base share one draft bump PR for that package and version.
