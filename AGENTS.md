@@ -31,9 +31,19 @@ The check parses Rust paths and grouped, renamed or block-local imports. It flag
 
 This is a source check. It skips `#[cfg(test)]` items and test functions. It inspects expression-list macro arguments but does not expand macros, infer receiver types or trace calls through other modules. Review indirect effects, additional transports and module cohesion in the PR.
 
+## Working on a change
+
+- Start at the affected CLI or MCP entry point and its contract. Use the module map above and search for a flag, symbol, path or test with `rg`. Read callers and larger sections when a dependency or side effect is still unclear.
+- Keep the diff focused on the requested behavior. Use existing abstractions and link the owning document for background. During iteration, run the relevant test and inspect the failing assertion or diff hunk first. Expand the output when it omits evidence needed for a decision.
+- On resuming a change, compare the current revision and working diff with the last validated state. A handoff needs the decision, affected files, checks run and anything still unverified. Run the final validation below on the version being delivered.
+
+## Code comments
+
+Use names and control flow to explain what the code does. Remove narration of types, branches and attributes. Keep a short inline `Why: …` only when a non-obvious constraint is essential to changing that line safely. Put longer rationale in the owning document. A reviewer decides whether the exception earns its place. Preserve public API documentation, operational directives and examples consumed as data.
+
 ## Validation
 
-Before saying a change works, run exactly these checks:
+Run the Rust checks and the comment check before submitting:
 
 ```powershell
 cargo fmt --check
@@ -41,11 +51,20 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 ```
 
+For the comment check, use a Python virtual environment (CI uses 3.12) with PowerShell 7 (`pwsh`) on PATH. Install the pinned development tools once, then run the two Python checks:
+
+```powershell
+python -m pip install -r scripts/comment-check-requirements.txt
+python -m unittest discover -s scripts -p test_check_comments.py
+python scripts/check_comments.py
+```
+
+CI runs these on Linux. The checker reads tracked Rust, Python, shell, PowerShell, TOML and YAML, including supported scripts in Actions `run` steps. Stage new files to include them locally. Documentation, test fixtures, the annotated example config and the generated lockfile are outside the gate. It recognizes directives such as the installers' shebang and `#requires`, and version labels on actions pinned by full SHA. Rustdoc is recognized from declaration syntax in `src/`. Reviewers check the public contract, re-exports and the substance of a one-line `Why:` exception.
+
 The crate uses edition 2024. CI runs the format check on Linux and runs Clippy with fatal warnings and the locked test suite on Linux, macOS and Windows for pushes to `main` and pull requests. The suite includes the dependency check above and the CLI/MCP contract tests. A separate Linux job checks Cargo.lock against the RustSec advisory database as described in [Dependency audit](docs/dependency-audit.md). CI uses the newest stable Rust through `dtolnay/rust-toolchain@stable`, so run `rustup update stable` before trusting a local Clippy run.
 
 ## Rules
 
-- No comments in code. Put the reason in `docs/`.
 - Never run `--apply` against a real repository except the `lucasbp/pipetrain-sandbox-*` repositories through the e2e harness described below.
 - `--json` contracts are versioned. Update the matching contract document in the same change when output changes; preserve existing meanings. Queue output has its own stable contract in [docs/queue-output.md](docs/queue-output.md), and plan JSON is in [docs/plan-json.md](docs/plan-json.md).
 - This is a public repo. No private organization names, private repository names or internal URLs in code, tests or docs. Use placeholders such as `acme/api`.
