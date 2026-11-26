@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.15.1
+
+- Merge tracking and recovery now read paginated GitHub Actions runs for the merge commit. A workflow on a later page is included in the verdict, and an incomplete listing cannot confirm a successful deployment.
+- A recovery regression test interrupts the CLI after GitHub accepts a merge and verifies that the next invocation resumes tracking the saved commit without issuing a second merge request.
+
 ## 0.15.0
 
 - `plan --check-feeds`, `feed` and standalone `bump` now support Cargo, PyPI and Go alongside NuGet and npm. Preview a consumer manifest update with `bump` before using `--apply` to open a draft PR. See [registry support](docs/feed-wait.md).

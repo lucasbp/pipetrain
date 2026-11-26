@@ -1,4 +1,4 @@
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 
 mod common;
 
@@ -24,6 +24,18 @@ fn fetch(reply: Canned) -> (Result<pipetrain::github::Reply, ApiError>, String) 
     let (base, server) = serve(vec![reply]);
     let result = client(&base).get("/repos/acme/api/pulls/7");
     (result, server.join().unwrap().remove(0))
+}
+
+#[test]
+fn connection_closed_before_request_is_not_recorded() {
+    let server = common::serve_handler(|_| (200, json!({})));
+    let address = server.base.strip_prefix("http://").unwrap();
+    drop(TcpStream::connect(address).unwrap());
+    client(&server.base).get("/repos/acme/api").unwrap();
+
+    let seen = server.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert!(seen[0].starts_with("GET /repos/acme/api HTTP/1.1"));
 }
 
 fn failure(reply: Canned) -> ApiError {

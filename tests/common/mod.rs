@@ -171,14 +171,12 @@ pub fn serve_with_headers(
         for stream in listener.incoming() {
             let mut stream = stream.unwrap();
             let request = read_request(&mut stream);
-            let line = request
-                .lines()
-                .next()
-                .unwrap_or_default()
-                .trim_end_matches(" HTTP/1.1")
-                .to_string();
+            let Some(first_line) = request.lines().next() else {
+                continue;
+            };
+            let line = first_line.trim_end_matches(" HTTP/1.1");
             let payload = request.split_once("\r\n\r\n").map_or("", |(_, rest)| rest);
-            let (status, headers, body) = handler(&line, payload, &request);
+            let (status, headers, body) = handler(line, payload, &request);
             record.lock().unwrap().push(request.clone());
             let body = if status == 304 {
                 String::new()
