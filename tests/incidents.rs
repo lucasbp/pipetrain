@@ -29,7 +29,7 @@ fn merged_sha(number: u64) -> String {
 
 fn workflow_run(conclusion: &str) -> Value {
     json!({
-        "name": "deploy", "path": ".github/workflows/deploy.yml",
+        "id": 1, "name": "deploy", "path": ".github/workflows/deploy.yml",
         "status": "completed", "conclusion": conclusion,
         "html_url": "https://example.test/acme/api/actions/runs/1"
     })
@@ -133,13 +133,8 @@ impl Script {
         if line.contains("/compare/") {
             return (200, json!({"status": "ahead", "ahead_by": 1}));
         }
-        if line.contains("/actions/runs?") {
-            if self.deploying {
-                let mut running = workflow_run("success");
-                running["status"] = json!("in_progress");
-                running["conclusion"] = Value::Null;
-                return (200, json!({"total_count": 1, "workflow_runs": [running]}));
-            }
+        let by_id = line.ends_with("/actions/runs/1");
+        if by_id || line.contains("/actions/runs?") {
             let conclusion = if self.failed
                 && !(self.later && line.contains(&format!("head_sha={}", "d".repeat(40))))
             {
@@ -147,10 +142,15 @@ impl Script {
             } else {
                 "success"
             };
-            return (
-                200,
-                json!({"total_count": 1, "workflow_runs": [workflow_run(conclusion)]}),
-            );
+            let mut run = workflow_run(conclusion);
+            if self.deploying {
+                run["status"] = json!("in_progress");
+                run["conclusion"] = Value::Null;
+            }
+            if by_id {
+                return (200, run);
+            }
+            return (200, json!({"total_count": 1, "workflow_runs": [run]}));
         }
         if let Some(number) = line
             .rsplit('/')

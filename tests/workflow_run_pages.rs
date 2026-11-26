@@ -147,6 +147,21 @@ fn a_changed_total_overlap_or_unreadable_tail_cannot_confirm_the_first_page() {
 }
 
 #[test]
+fn a_single_page_requires_a_positive_run_id() {
+    for id in [None, Some(json!(0))] {
+        let mut body = page(1, 1, Some(1));
+        let run = body["workflow_runs"][0].as_object_mut().unwrap();
+        match id {
+            Some(id) => run.insert("id".into(), id),
+            None => run.remove("id"),
+        };
+        let (result, paths) = read(vec![(200, body)], false, 1);
+        assert!(!result.unwrap().1);
+        assert_eq!(paths, expected_paths(1, false));
+    }
+}
+
+#[test]
 fn a_short_page_disagreeing_with_its_total_is_incomplete() {
     let (result, paths) = read(vec![(200, page(1, 3, Some(101)))], false, 2);
     let (runs, complete) = result.unwrap();
