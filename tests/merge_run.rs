@@ -507,13 +507,30 @@ fn respond(script: &Mutex<Script>, line: &str, payload: &str) -> (u16, Value) {
     let line = normalized.as_deref().unwrap_or(line);
     if line == "POST /graphql" {
         let body: Value = serde_json::from_str(payload).unwrap();
+        if body.pointer("/variables/q0").is_some() {
+            let comparisons = body["variables"].as_object().unwrap().keys()
+                .filter_map(|name| name.strip_prefix('q'))
+                .map(|index| (format!("t{index}"), json!({"ref": {"compare": {"aheadBy": 1, "behindBy": 0, "status": "AHEAD"}}})))
+                .collect::<serde_json::Map<_, _>>();
+            return (200, json!({"data": comparisons}));
+        }
+        if body["query"]
+            .as_str()
+            .unwrap()
+            .contains("defaultBranchRef { target { oid } }")
+        {
+            return (
+                200,
+                json!({"data": {"repository": {"defaultBranchRef": {"target": {"oid": "b".repeat(40)}}}}}),
+            );
+        }
         if body.pointer("/variables/e0").is_some() {
             return (200, script.blobs());
         }
         let number = body
             .pointer("/variables/n")
             .and_then(Value::as_u64)
-            .unwrap();
+            .unwrap_or_else(|| panic!("unexpected query: {body}"));
         let mut node = script.node(number);
         if let Some(remaining) = script.unknown_reads.get_mut(&number)
             && *remaining > 0
@@ -4686,6 +4703,106 @@ fn package_plan(package: &str, version: Option<&str>, published: Option<bool>) -
     });
     dependency.published = published;
     plan
+}
+
+#[test]
+fn cli_keeps_a_package_consumer_behind_its_publisher_and_advances_independent_work() {
+    let rig = Rig::new("");
+    rig.script().tree_body = Some(json!({"sha": "b".repeat(40), "tree": [], "truncated": false}));
+    rig.script().files_by_pr.insert(
+        2,
+        vec![json!({
+            "filename": "package.json",
+            "status": "modified",
+            "patch": "-    \"@acme/kit\": \"^1.0.0\",\n+    \"@acme/kit\": \"^1.1.0\","
+        })],
+    );
+    let directory = common::TempDir::new("mixed-queue");
+    std::fs::write(
+        directory.join("config.toml"),
+        r#"
+orgs = ["acme"]
+max_parallel = 2
+[[layer]]
+name = "services"
+repos = ["acme/*"]
+[packages]
+"@acme/kit" = "acme/kit"
+[api]
+max_per_minute = 10000
+max_per_second = 1000
+min_remaining = 0
+[merge]
+no_deploy_repos = ["acme/kit", "acme/app", "acme/docs"]
+state_file = "state.json"
+"#,
+    )
+    .unwrap();
+    let cli = |command: &str, flags: &[&str]| {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_pipetrain"))
+            .args([command, "acme/app#2", "acme/kit#1", "acme/docs#3"])
+            .args([
+                "--config",
+                "config.toml",
+                "--no-cache",
+                "--no-progress",
+                "--json",
+            ])
+            .args(flags)
+            .current_dir(directory.path())
+            .env("GH_TOKEN", "ghp_FAKE0123456789")
+            .env("PIPETRAIN_API_URL", &rig.server.base)
+            .env("PIPETRAIN_NO_UPDATE_CHECK", "1")
+            .env("PIPETRAIN_LOG", "0")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    let plan = cli("plan", &[]);
+    let stages = plan["stages"].as_array().unwrap();
+    assert_eq!(stages.len(), 2, "{plan}");
+    let ready = stages[0]["together"].as_array().unwrap();
+    assert_eq!(ready.len(), 2, "{plan}");
+    assert!(ready.contains(&json!("acme/docs#3")) && ready.contains(&json!("acme/kit#1")));
+    assert_eq!(stages[1]["together"], json!(["acme/app#2"]));
+    assert_eq!(stages[1]["waits"][0]["reason"], "package");
+    assert_eq!(stages[1]["waits"][0]["behind"], json!(["acme/kit#1"]));
+    let preview = cli("merge", &[]);
+    let steps = preview["steps"].as_array().unwrap();
+    let index = |target: &str| {
+        steps
+            .iter()
+            .position(|step| step["target"] == target)
+            .unwrap()
+    };
+    let wait = index("package @acme/kit 1.1.0 from acme/kit#1 must be published before acme/app#2");
+    assert_eq!(steps[wait]["kind"], "wait");
+    assert!(index("acme/kit#1") < wait && wait < index("acme/app#2"));
+    assert!(rig.puts().is_empty());
+
+    rig.script().graphql_states.insert(1, "DIRTY".into());
+    let blocked = cli("plan", &[]);
+    let consumer = blocked["skipped"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == "acme/app#2")
+        .unwrap();
+    assert_eq!(consumer["blocked_by"][0]["rule"], "package");
+    assert_eq!(consumer["blocked_by"][0]["id"], "acme/kit#1");
+    let applied = cli("merge", &["--apply", "--yes"]);
+    let held = applied["not_merging"].as_array().unwrap();
+    let outcome = |id: &str| held.iter().find(|item| item["id"] == id).unwrap();
+    assert_eq!(outcome("acme/kit#1")["state"], "blocked");
+    assert_eq!(outcome("acme/app#2")["state"], "waiting");
+    assert_eq!(applied["steps"][0]["status"], "done");
+    assert_eq!(rig.puts(), ["PUT /repos/acme/docs/pulls/3/merge"]);
 }
 
 fn package_feed_rig(
