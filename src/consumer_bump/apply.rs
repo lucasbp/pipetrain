@@ -8,7 +8,7 @@ use super::backend::{ConsumerRemote, GithubRemote};
 use super::{
     BumpGateway, Consumer, RestoreMode, RestoreSettings, ensure_head, pin_commit_push, safe_path,
 };
-use crate::command::bump::{Status, classify};
+use crate::command::bump::{Status, classify, pin_manifest};
 use crate::feed::Ecosystem;
 use crate::github::Client;
 
@@ -98,6 +98,9 @@ pub fn pull_request_body(
         },
         Ecosystem::Npm => {
             "The repository has no npm lock file next to these manifests, so only the manifests changed."
+        }
+        Ecosystem::Cargo | Ecosystem::Pypi | Ecosystem::Go => {
+            "Only the selected manifest requirements changed. Review and test the dependency resolution in CI."
         }
     };
     format!(
@@ -200,6 +203,69 @@ pub fn check_npm(tree: &[String], rows: &[(String, String)]) -> Result<(), Strin
     Ok(())
 }
 
+pub(crate) fn check_manifest_only(
+    ecosystem: Ecosystem,
+    tree: &[String],
+    rows: &[(String, String)],
+) -> Result<(), String> {
+    let (manifest, companions): (&str, &[&str]) = match ecosystem {
+        Ecosystem::Cargo => (
+            "Cargo.toml",
+            &["Cargo.lock", ".cargo/config.toml", ".cargo/config"],
+        ),
+        Ecosystem::Pypi => (
+            "pyproject.toml",
+            &[
+                "uv.lock",
+                "poetry.lock",
+                "pdm.lock",
+                "Pipfile.lock",
+                "pylock.toml",
+            ],
+        ),
+        Ecosystem::Go => (
+            "go.mod",
+            &["go.sum", "go.work", "go.work.sum", "vendor/modules.txt"],
+        ),
+        _ => return Err("unsupported manifest-only ecosystem".into()),
+    };
+    let paths: BTreeSet<&str> = tree.iter().map(String::as_str).collect();
+    for (path, _) in rows {
+        if path.rsplit('/').next() != Some(manifest) || !paths.contains(path.as_str()) {
+            return Err(format!("expected {manifest} at the selected path {path}"));
+        }
+        let mut parent = directory(path);
+        loop {
+            if let Some(file) = companions
+                .iter()
+                .map(|name| sibling(parent, name))
+                .find(|file| paths.contains(file.as_str()))
+            {
+                return Err(format!(
+                    "review {file} before bumping {path}: the manifest-only update cannot reconcile it"
+                ));
+            }
+            if ecosystem == Ecosystem::Pypi
+                && let Some(file) = paths.iter().find(|file| {
+                    let name = file.rsplit('/').next().unwrap_or_default();
+                    directory(file) == parent
+                        && name.starts_with("pylock.")
+                        && name.ends_with(".toml")
+                })
+            {
+                return Err(format!(
+                    "review {file} before bumping {path}: the manifest-only update cannot reconcile it"
+                ));
+            }
+            if parent.is_empty() {
+                break;
+            }
+            parent = directory(parent);
+        }
+    }
+    Ok(())
+}
+
 pub fn pin_npm_manifest(text: &str, package: &str, version: &str) -> Result<String> {
     let value: Value = serde_json::from_str(text).context("package.json is not valid JSON")?;
     let mut found: BTreeMap<(String, String), usize> = BTreeMap::new();
@@ -241,9 +307,11 @@ pub fn pin_npm_manifest(text: &str, package: &str, version: &str) -> Result<Stri
     Ok(patched)
 }
 
-fn pin_npm_commit_push(
+fn pin_manifest_commit_push(
+    ecosystem: Ecosystem,
     package: &str,
     version: &str,
+    rows: &[(String, String)],
     consumer: &Consumer,
     gateway: &mut impl BumpGateway,
 ) -> Result<Option<String>> {
@@ -255,7 +323,16 @@ fn pin_npm_commit_push(
     let mut patches = BTreeMap::new();
     for path in &consumer.manifests {
         let original = gateway.read(path)?;
-        let patched = pin_npm_manifest(&original, package, version)?;
+        let patched = if ecosystem == Ecosystem::Npm {
+            pin_npm_manifest(&original, package, version)?
+        } else {
+            let expected = rows
+                .iter()
+                .filter(|(file, _)| file == path)
+                .map(|(_, current)| current.clone())
+                .collect::<Vec<_>>();
+            pin_manifest(ecosystem, &original, package, version, &expected)?
+        };
         if patched != original {
             patches.insert(path.clone(), patched);
         }
@@ -298,12 +375,18 @@ pub fn apply_repo(
             Ok(()) => String::new(),
             Err(reason) => return Ok(Applied::Skipped(reason)),
         },
+        other => match check_manifest_only(other, candidate.tree, candidate.rows) {
+            Ok(()) => String::new(),
+            Err(reason) => return Ok(Applied::Skipped(reason)),
+        },
     };
     let branch = branch_name(package, version);
     let files: Vec<String> = candidate
         .rows
         .iter()
         .map(|(path, _)| path.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
         .collect();
     let consumer = Consumer {
         repository: candidate.repo.to_string(),
@@ -323,7 +406,9 @@ pub fn apply_repo(
             )]);
             pin_commit_push(&pins, &consumer, settings.mode, gateway)?.map(|pinned| pinned.commit)
         }
-        Ecosystem::Npm => pin_npm_commit_push(package, version, &consumer, gateway)?,
+        other => {
+            pin_manifest_commit_push(other, package, version, candidate.rows, &consumer, gateway)?
+        }
     };
     let Some(commit) = commit else {
         return Ok(Applied::Skipped(

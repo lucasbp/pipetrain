@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
-use crate::command::bump::{Status as RowStatus, classify, refs_of};
+use crate::command::bump::{Status as RowStatus, classify, in_ecosystem, refs_of};
 use crate::config::Config;
 use crate::consumer_bump::RestoreMode;
 use crate::consumer_bump::apply::{
@@ -294,14 +294,6 @@ pub fn run(needs: &[Need], store: &mut Store, gateway: &mut dyn Gateway) -> Vec<
     steps
 }
 
-fn is_manifest(path: &str, ecosystem: Ecosystem) -> bool {
-    let lower = path.to_lowercase();
-    match ecosystem {
-        Ecosystem::Nuget => lower.ends_with("proj") || lower.ends_with(".props"),
-        Ecosystem::Npm => lower == "package.json" || lower.ends_with("/package.json"),
-    }
-}
-
 pub struct GithubGateway<'a> {
     pub client: &'a mut Client,
     pub cfg: &'a Config,
@@ -378,7 +370,7 @@ impl Gateway for GithubGateway<'_> {
         }
         let wanted: Vec<String> = tree
             .iter()
-            .filter(|path| is_manifest(path, ecosystem))
+            .filter(|path| in_ecosystem(path, ecosystem))
             .cloned()
             .collect();
         let mut manifests = Vec::new();
