@@ -80,6 +80,7 @@ struct Fake {
     skipped: bool,
     fail: bool,
     incorporated: bool,
+    reverted: bool,
     up_to_date: bool,
     generation: u64,
     publication_calls: usize,
@@ -179,6 +180,14 @@ impl Gateway for Fake {
     fn incorporated(&mut self, _: &Preparation, _: &Item) -> Result<bool> {
         Ok(self.incorporated)
     }
+    fn confirm_pins(
+        &mut self,
+        _: &Item,
+        _: &std::collections::BTreeMap<String, String>,
+    ) -> Result<()> {
+        anyhow::ensure!(!self.reverted, "reviewed pin reverted");
+        Ok(())
+    }
 }
 
 #[test]
@@ -251,7 +260,7 @@ fn new_publication_saves_inputs_and_pre_effect_marker_then_reuses_the_review_pr(
         ),
         Outcome::Skipped { .. }
     ));
-    assert_eq!(gateway.preparations, 2);
+    assert_eq!(gateway.preparations, 1);
 }
 
 #[test]
@@ -369,7 +378,7 @@ fn newly_published_inputs_invalidate_completed_and_incorporated_preparations() {
 }
 
 #[test]
-fn incorporated_bump_with_reverted_pin_is_prepared_again_instead_of_cached_skip() {
+fn incorporated_bump_with_reverted_pin_never_opens_a_second_draft() {
     let mut journal = journal();
     let mut gateway = Fake::default();
     let saved = gateway.marker_saved.clone();
@@ -382,6 +391,7 @@ fn incorporated_bump_with_reverted_pin_is_prepared_again_instead_of_cached_skip(
     ));
     let original_branch = journal.consumers[&item().id].bump_branch.clone();
     gateway.incorporated = true;
+    gateway.reverted = true;
     let mut changed = item();
     changed.sha = "5".repeat(40);
     let saved = gateway.marker_saved.clone();
@@ -396,9 +406,9 @@ fn incorporated_bump_with_reverted_pin_is_prepared_again_instead_of_cached_skip(
                 Ok(())
             }
         ),
-        Outcome::NeedsReview { .. }
+        Outcome::Attention { .. }
     ));
-    assert_eq!(gateway.preparations, 2);
-    assert_ne!(journal.consumers[&item().id].bump_branch, original_branch);
-    assert_eq!(journal.consumers[&item().id].head_sha, changed.sha);
+    assert_eq!(gateway.preparations, 1);
+    assert_eq!(journal.consumers[&item().id].bump_branch, original_branch);
+    assert_eq!(journal.consumers[&item().id].head_sha, item().sha);
 }

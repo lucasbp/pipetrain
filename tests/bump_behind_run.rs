@@ -23,15 +23,30 @@ const CAUSE: &str = "needs a bump of Acme.Core to 1.4.0";
 
 #[test]
 fn missing_commit_comparison_does_not_write_an_update_or_release_the_pr() {
-    rejected_publication(false, "ancestry was not reported");
+    held_publication(Hold::UnknownAncestry, "ancestry was not reported");
 }
 
 #[test]
 fn existing_multi_commit_pr_is_not_adopted_or_updated() {
-    rejected_publication(true, "does not contain exactly one commit");
+    held_publication(Hold::MultipleCommits, "does not contain exactly one commit");
 }
 
-fn rejected_publication(existing: bool, expected: &str) {
+#[test]
+fn two_packages_on_one_consumer_head_share_the_recorded_branch_update() {
+    held_publication(
+        Hold::PriorUpdate,
+        "base update already requested for this head",
+    );
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Hold {
+    UnknownAncestry,
+    MultipleCommits,
+    PriorUpdate,
+}
+
+fn held_publication(hold: Hold, expected: &str) {
     use pipetrain::command::merge::behind::{GithubGateway, published};
     use pipetrain::planner::behind::QueuedBump;
 
@@ -40,6 +55,7 @@ fn rejected_publication(existing: bool, expected: &str) {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let observed = requests.clone();
     let branch = "pipetrain/bump/acme.core-1.4.0";
+    let existing = hold == Hold::MultipleCommits;
     let server = serve_requests(move |line, payload| {
         observed.lock().unwrap().push(line.to_owned());
         match line {
@@ -75,6 +91,9 @@ fn rejected_publication(existing: bool, expected: &str) {
                 200,
                 json!({"truncated":false,"tree":[{"type":"blob","path":"App.csproj"}]}),
             ),
+            _ if line.contains("/compare/") && hold == Hold::PriorUpdate => {
+                (200, json!({"status":"diverged"}))
+            }
             _ if line.contains("/compare/") => (200, json!({})),
             _ => (404, json!({})),
         }
@@ -120,11 +139,32 @@ fn rejected_publication(existing: bool, expected: &str) {
     else {
         panic!("expected publication proof")
     };
+    let mut store = Store::in_memory();
+    if hold == Hold::PriorUpdate {
+        store.state.bump_behind.push(BumpBehind {
+            id: pr.key.to_string(),
+            package: "Acme.Other".into(),
+            from: "3.0.0".into(),
+            to: "3.0.1".into(),
+            number: 20,
+            pull_request_url: "https://github.com/acme/web/pull/20".into(),
+            branch: "bump/other".into(),
+            recorded_at: "2026-11-26T12:00:00Z".into(),
+            publication: Some(pipetrain::merge::PublishedTarget {
+                base: pr.base_ref.clone(),
+                head: pr.head_ref.clone(),
+                commit: Some(sha(20)),
+                update_requested_at: Some(pr.head_sha.clone()),
+                update_base: Some(sha(1)),
+                update_rejection: None,
+            }),
+        });
+    }
     let (step, ready) = published(
         &contract,
         &evidence,
         &pr,
-        &mut Store::in_memory(),
+        &mut store,
         &mut GithubGateway {
             client: &mut client,
             cfg: &cfg,
@@ -132,6 +172,11 @@ fn rejected_publication(existing: bool, expected: &str) {
         },
     );
     assert!(!ready);
+    if hold == Hold::PriorUpdate {
+        assert!(
+            matches!(step.wait, Some(pipetrain::merge::BumpWait::Update {ref key, ref sha}) if key == &pr.key && sha == &pr.head_sha)
+        );
+    }
     assert!(step.detail.contains(expected), "{}", step.detail);
     assert!(
         requests

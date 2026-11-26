@@ -34,6 +34,14 @@ pub struct Preparation {
     pub number: u64,
     pub head_branch: String,
     pub head_sha: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pins: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepared_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_head: Option<String>,
     pub bump_branch: String,
     pub workspace_root: String,
     pub completed: bool,

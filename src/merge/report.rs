@@ -50,6 +50,24 @@ pub enum Status {
     Stopped,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum BumpWait {
+    Draft {
+        key: crate::model::PrKey,
+        base: String,
+        head: String,
+        sha: String,
+    },
+    Update {
+        key: crate::model::PrKey,
+        sha: String,
+    },
+    Readiness {
+        key: crate::model::PrKey,
+        sha: String,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepReport {
     pub kind: Kind,
@@ -78,6 +96,8 @@ pub struct StepReport {
     pub settle_seconds: Option<u64>,
     #[serde(skip)]
     pub inherited: bool,
+    #[serde(skip)]
+    pub wait: Option<BumpWait>,
 }
 
 impl StepReport {
@@ -98,6 +118,7 @@ impl StepReport {
             deploy_outcome: None,
             settle_seconds: None,
             inherited: false,
+            wait: None,
         }
     }
 }

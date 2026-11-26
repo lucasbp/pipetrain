@@ -17,13 +17,13 @@ progress count.
 For a planned package edge:
 
 - The consumer has a package edge from a publisher in the same queue (the planner
-  saw its manifest diff bump the package the publisher releases), the publisher's
+  associated that consumer with the publisher through a manifest diff or a repository-level dependency), the publisher's
   execution is recorded in the journal as published in this execution, and the push
   step and exact feed version are proven.
 - NuGet only: literal `Version` attributes of `PackageReference` and
   `PackageVersion` in `.csproj` and `.props`, exactly one `.sln` or `.slnx`, and
   `packages.lock.json` files, restored with `--use-lock-file` and `--locked-mode`.
-- The draft PR targets the consumer PR's head branch. Nothing is merged.
+- The draft PR targets the consumer PR's head branch. A person reviews and integrates it.
 
 For a version gate crossed by the queue:
 
@@ -42,15 +42,15 @@ For a version gate crossed by the queue:
   including closed PRs, before creating anything. A changed branch or closed
   draft requires inspection. The queue leaves bump candidates for separate
   review and integration even if one becomes ready and appears in the selection.
-- After review, merge the bump into the base and repeat the original merge
-  command with the same state file. Pipetrain checks the merged commit and exact
-  pin on the base, then requests an update for each stale consumer head. Repeat
-  after CI finishes. Each consumer must contain the bump and pin at its planned
-  head and pass normal merge readiness. Independent queue items may proceed.
+- After review, merge the bump into the base while the command is running. Pipetrain verifies the merged commit and exact pin on the base, then requests a branch update for each stale consumer. Each updated head must incorporate the bump, retain the exact pin and pass its review and CI checks. Independent items can proceed during the wait.
 
 ```powershell
 pipetrain merge 'acme/sdk#1' 'acme/web#2' 'acme/web#3' --bump --apply --state queue.json
 ```
+
+Leave this process running while a reviewer marks the bump ready and merges it. Pipetrain polls each shared draft once per interval. A transition triggers a new evaluation of the affected PRs from the confirmed selection. It waits for a current approval and successful checks reported for the updated commit, then runs normal readiness, merge and deployment checks. The process never approves or merges the bump draft.
+
+The wait uses `merge.poll_seconds` and backs off up to `merge.poll_max_seconds`. Its time budget starts when the queue first waits on a bump and uses `--timeout-minutes` or `merge.timeout_minutes` (30 by default). A zero budget returns the current result immediately. After a timeout or interruption, rerun the original command with the same state file. A closed or changed draft, conflicting update, failing checks or unexpected consumer commit requires inspection.
 
 Prerequisites on the machine that runs `merge --bump --apply`: `git` on the path
 with credentials that can fetch and push to the consumer repository, a git commit
@@ -216,22 +216,14 @@ Historical consumer/package contracts allow verification when the merged publish
 is absent from the rebuilt plan; current contracts take priority for the same
 package. No dependency edge is removed from the scheduler graph.
 
-Before preparation has side effects, the journal saves the consumer head, planned
-bump branch, nonce and workspace root. It stores the resulting PR URL and commit
-after success. A partial marker stops that consumer for inspection, without
-repeating a push or opening a duplicate PR. A completed draft is reused until it
-is merged into the consumer head and its merge commit is contained in the newly
-planned head. The newly planned head is rechecked through publication verification and pin
-inspection even when the bump merge remains in its ancestry, so a later pin revert
-can produce a corrective draft. Normal readiness, CI and review checks still run
-before merging the consumer. Publication fingerprints invalidate completed/up-to-date markers when
-new publisher inputs or contracts appear, so another publication is reevaluated
-and can produce another reviewed bump.
+Before creating a consumer-branch draft, the journal records its target branch, planned consumer head, package versions and workspace. It then records the prepared commit before pushing the branch. After a lost creation response, a new invocation can adopt a single PR with the recorded repository, branches and exact commit. A missing or ambiguous match leaves the operation held for inspection.
+
+Once a person integrates the draft into the consumer branch, the executor verifies that the consumer head is the draft's merge commit and that the matching manifests still pin the reviewed versions. A different head or a reverted pin requires inspection. Checks must be green for that exact head and approval must still be current. For a shared draft into the base, the corresponding proof is the base update on each consumer. If another package reaches the base after that update, an additional incorporation can require manual inspection.
 
 Each preparation emits an auditable `kind: bump` step and structured `bump`
 outcome. Normal skips are gray. A prepared draft or uncertain operation is yellow
 and blocks that consumer and its descendants while independent jobs continue.
-These attention steps make the invocation exit with 5. Events are streamed when
+Unresolved attention steps yield exit code 5. A wait resolved during the invocation is replaced by its final outcome. Events are streamed when
 they occur and appended to the JSON report after the fixed scheduler steps, so
 scheduler indices remain stable. No bump draft or consumer PR is auto-approved
 or auto-merged by preparation.

@@ -285,11 +285,9 @@ pub(crate) fn pin_commit_push(
     }))
 }
 
-pub fn prepare_many(
+pub(crate) fn published_packages(
     publications: &[PublicationResult],
-    consumer: &Consumer,
-    gateway: &mut impl BumpGateway,
-) -> Result<PrepareResult> {
+) -> Result<BTreeMap<String, &PublicationEvidence>> {
     let mut evidence_by_package: BTreeMap<String, &PublicationEvidence> = BTreeMap::new();
     for result in publications {
         if let PublicationResult::Published { evidence } = result {
@@ -301,6 +299,15 @@ pub fn prepare_many(
             }
         }
     }
+    Ok(evidence_by_package)
+}
+
+pub fn prepare_many(
+    publications: &[PublicationResult],
+    consumer: &Consumer,
+    gateway: &mut impl BumpGateway,
+) -> Result<PrepareResult> {
+    let evidence_by_package = published_packages(publications)?;
     if evidence_by_package.is_empty() {
         return Ok(PrepareResult::Skipped {
             reason: "publisher did not produce a new package in this execution".into(),

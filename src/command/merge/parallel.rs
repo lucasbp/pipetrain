@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
 enum Checkpoint {
-    State(StoreOperation),
-    Finished(StepReport),
+    State(Box<StoreOperation>),
+    Finished(Box<StepReport>),
 }
 
 struct Coordinator<'a, 'h> {
@@ -128,6 +128,12 @@ impl scheduler::Coordinator for Coordinator<'_, '_> {
         }
         if self.env.settings.bump
             || !self.env.queued_bumps.is_empty()
+            || self
+                .store
+                .state
+                .bump
+                .as_ref()
+                .is_some_and(|journal| !journal.consumers.is_empty())
             || !self.store.state.bump_behind.is_empty()
         {
             let target = match self.steps[index].kind {
@@ -143,9 +149,24 @@ impl scheduler::Coordinator for Coordinator<'_, '_> {
             else {
                 return Ok(None);
             };
-            if queued::candidate_draft(item, self.env.queued_bumps, self.store) {
+            if queued::candidate_draft(item, self.env.queued_bumps, self.store)
+                || bump::is_review_draft(item, self.store)
+            {
                 return Ok(Some(scheduler::Status::Blocked(
                     "review and merge the shared bump separately, then resume this queue".into(),
+                )));
+            }
+            if !self.env.settings.bump
+                && self
+                    .store
+                    .state
+                    .bump
+                    .as_ref()
+                    .and_then(|journal| journal.consumers.get(&item.id))
+                    .is_some_and(|marker| marker.prepared.is_some() || !marker.completed)
+            {
+                return Ok(Some(scheduler::Status::Blocked(
+                    "inspect the recorded bump and resume with --bump and the same state".into(),
                 )));
             }
             if let Some(reason) = self.bump_checked.get(&item.id) {
@@ -196,6 +217,9 @@ impl scheduler::Coordinator for Coordinator<'_, '_> {
                     }
                 };
                 let mut event = StepReport::new(Kind::Bump, &item.id, status, &detail);
+                if matches!(outcome, bump::Outcome::NeedsReview { .. }) {
+                    event.wait = bump::draft_wait(item, self.store);
+                }
                 event.bump =
                     Some(serde_json::to_value(outcome).map_err(|error| error.to_string())?);
                 (self.hooks.observe)(&event);
@@ -255,6 +279,7 @@ impl scheduler::Coordinator for Coordinator<'_, '_> {
         let target = &self.steps[index].target;
         match checkpoint {
             Checkpoint::State(operation) => {
+                let operation = *operation;
                 let valid = match &operation {
                     StoreOperation::Add(pending) => pending.id == *target,
                     StoreOperation::Archive(entry) => entry.id == *target,
@@ -278,7 +303,7 @@ impl scheduler::Coordinator for Coordinator<'_, '_> {
                     .is_some_and(|journal| journal.publishers.contains_key(target));
                 if self.env.settings.bump || resuming_publisher {
                     bump::track(
-                        self.env.plan,
+                        self.env.execution.selection,
                         self.store,
                         &self.env.settings.bump_options,
                         &operation,
@@ -314,7 +339,7 @@ impl scheduler::Coordinator for Coordinator<'_, '_> {
                     self.failures
                         .record(pending, self.env.plan, step.kind == Kind::Resume);
                 }
-                self.steps[index] = step;
+                self.steps[index] = *step;
                 Ok(())
             }
         }
@@ -475,6 +500,7 @@ pub(super) fn execute(
         events: Vec::new(),
         bump_checked: BTreeMap::new(),
     };
+    let execution = env.execution;
     let plan = env.plan;
     let cfg = env.cfg;
     let settings = env.settings;
@@ -510,10 +536,11 @@ pub(super) fn execute(
             let mut client = client.fork();
             let sender = progress.clone();
             let mut local = Store::remote(initial_state.clone(), move |operation| {
-                let data = serde_json::to_string(&Checkpoint::State(operation))?;
+                let data = serde_json::to_string(&Checkpoint::State(Box::new(operation)))?;
                 sender.checkpoint(data).map_err(anyhow::Error::msg)
             });
             let env = Env {
+                execution,
                 plan,
                 cfg,
                 settings,
@@ -600,9 +627,11 @@ pub(super) fn execute(
                 Ok(Completion::Done)
             };
             let data =
-                serde_json::to_string(&Checkpoint::Finished(step)).map_err(|error| Failure {
-                    message: error.to_string(),
-                    fatal: true,
+                serde_json::to_string(&Checkpoint::Finished(Box::new(step))).map_err(|error| {
+                    Failure {
+                        message: error.to_string(),
+                        fatal: true,
+                    }
                 })?;
             progress.checkpoint(data).map_err(|message| Failure {
                 message,

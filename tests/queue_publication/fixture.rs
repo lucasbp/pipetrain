@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 pub const REVIEW_URL: &str = "https://github.com/acme/web/pull/99";
 const PROJECT: &str = r#"<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net8.0</TargetFramework><IsPackable>false</IsPackable></PropertyGroup><ItemGroup><PackageReference Include="Acme.Core" Version="1.0.0" /></ItemGroup></Project>"#;
-const CONFIG: &str = "orgs = ['acme']\n[api]\nmax_requests = 2000\nmax_per_second = 1000\nmax_per_minute = 10000\nmin_remaining = 0\n[merge]\npackage_max_behind = 1\npoll_seconds = 1\ntimeout_minutes = 1\nno_deploy_repos = ['acme/web','acme/other']\n";
+const CONFIG: &str = "orgs = ['acme']\n[api]\nmax_requests = 2000\nmax_per_second = 1000\nmax_per_minute = 10000\nmin_remaining = 0\n[merge]\npackage_max_behind = 1\npoll_seconds = 1\ntimeout_minutes = 0\nrepo_timeout_minutes = { 'acme/sdk' = 1 }\nno_deploy_repos = ['acme/web','acme/other','acme/portal','acme/reports','acme/export','acme/late']\n";
 
 fn dotnet_env(command: &mut Command, dir: &TempDir) {
     command
@@ -133,16 +133,20 @@ impl Fixture {
         self.merge_expecting(extra, &[0, 5])
     }
 
-    pub fn merge_expecting(&self, extra: &[&str], codes: &[i32]) -> String {
+    pub fn command(&self, extra: &[&str]) -> Command {
+        self.selected_command(
+            &["acme/sdk#1", "acme/web#2", "acme/web#3", "acme/other#4"],
+            extra,
+        )
+    }
+
+    pub fn selected_command(&self, selection: &[&str], extra: &[&str]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_pipetrain"));
         dotnet_env(&mut command, &self.dir);
-        let output = command
+        command
+            .arg("merge")
+            .args(selection)
             .args([
-                "merge",
-                "acme/sdk#1",
-                "acme/web#2",
-                "acme/web#3",
-                "acme/other#4",
                 "--bump",
                 "--no-progress",
                 "--dependency-failure",
@@ -172,9 +176,12 @@ impl Fixture {
             .env("HTTPS_PROXY", &self.server.base)
             .env("HTTP_PROXY", &self.server.base)
             .env("NO_PROXY", "127.0.0.1,localhost,::1")
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .output()
-            .unwrap();
+            .env("GIT_TERMINAL_PROMPT", "0");
+        command
+    }
+
+    pub fn merge_expecting(&self, extra: &[&str], codes: &[i32]) -> String {
+        let output = self.command(extra).output().unwrap();
         let text = String::from_utf8(output.stdout).unwrap();
         assert!(
             output

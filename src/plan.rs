@@ -98,6 +98,8 @@ pub struct Plan {
     pub bumps: Vec<behind::Need>,
     #[serde(skip)]
     pub queued_bumps: Vec<behind::QueuedBump>,
+    #[serde(skip)]
+    pub(crate) selected_dependencies: BTreeMap<String, Vec<planner::Dependency>>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub deploy_resources: BTreeMap<String, Vec<String>>,
     pub stages: Vec<StageView>,
@@ -195,7 +197,11 @@ fn finished_work(reasons: &[String]) -> bool {
     })
 }
 
-fn hold_dependents(rules: &Rules, gathered: &mut Gathered) -> BTreeMap<String, Vec<Blocker>> {
+fn hold_dependents(
+    rules: &Rules,
+    gathered: &mut Gathered,
+    dependencies: &mut BTreeMap<String, Vec<planner::Dependency>>,
+) -> BTreeMap<String, Vec<Blocker>> {
     let mut blockers: BTreeMap<String, Vec<Blocker>> = BTreeMap::new();
     let parents: Vec<Pr> = gathered
         .skipped
@@ -203,7 +209,7 @@ fn hold_dependents(rules: &Rules, gathered: &mut Gathered) -> BTreeMap<String, V
         .filter(|skipped| !finished_work(&skipped.reasons))
         .map(|skipped| skipped.pr.clone())
         .collect();
-    if parents.is_empty() || gathered.ready.is_empty() {
+    if parents.is_empty() {
         return blockers;
     }
     let mut everyone = gathered.ready.clone();
@@ -219,6 +225,16 @@ fn hold_dependents(rules: &Rules, gathered: &mut Gathered) -> BTreeMap<String, V
         publishers: gathered.publishers.clone(),
         references: gathered.references.clone(),
     });
+    for item in &planned.items {
+        dependencies.insert(
+            item.id.clone(),
+            item.after
+                .iter()
+                .filter(|dep| DEPENDENCY_RULES.contains(&dep.rule))
+                .cloned()
+                .collect(),
+        );
+    }
     let mut left_out: BTreeMap<String, Category> = gathered
         .skipped
         .iter()
@@ -299,7 +315,8 @@ fn hold_dependents(rules: &Rules, gathered: &mut Gathered) -> BTreeMap<String, V
 }
 
 pub fn build(rules: &Rules, mut gathered: Gathered) -> Plan {
-    let blockers = hold_dependents(rules, &mut gathered);
+    let mut selected_dependencies = BTreeMap::new();
+    let blockers = hold_dependents(rules, &mut gathered, &mut selected_dependencies);
     let snapshots = snapshots(&gathered.ready);
     let selected: Vec<&Pr> = gathered
         .ready
@@ -330,6 +347,16 @@ pub fn build(rules: &Rules, mut gathered: Gathered) -> Plan {
         publishers: gathered.publishers,
         references: gathered.references,
     });
+    for item in &planned.items {
+        let dependencies = selected_dependencies.entry(item.id.clone()).or_default();
+        for edge in &item.after {
+            if !dependencies.iter().any(|dep| {
+                dep.id == edge.id && dep.rule == edge.rule && dep.package == edge.package
+            }) {
+                dependencies.push(edge.clone());
+            }
+        }
+    }
     let questions = merged(gathered.questions, planned.questions);
     let skipped = skipped_out(gathered.skipped, blockers);
     for readiness in &mut preflight {
@@ -390,6 +417,7 @@ pub fn build(rules: &Rules, mut gathered: Gathered) -> Plan {
         questions,
         notes: planned.notes,
         bumps: Vec::new(),
+        selected_dependencies,
         queued_bumps: Vec::new(),
         deploy_resources: BTreeMap::new(),
         stages: Vec::new(),

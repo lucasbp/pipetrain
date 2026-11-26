@@ -576,14 +576,14 @@ for proof requirements, workspace limits and partial-operation recovery.
 The JSON report adds `bump_enabled` when enabled, optional `bump_candidates`, and
 `kind: bump` events with a structured `bump` outcome. These additive fields retain
 schema 1. Events are appended after fixed queue steps and streamed at preparation
-time. A draft requiring review or a partial operation contributes a stopped
-attention event and exit code 5 without changing the dependency graph.
+time. An open draft is monitored in the same invocation. A timeout or unresolved
+partial operation contributes a stopped event and exit code 5.
 
 ## PRs that need a bump first
 
-The dry run shows a bump step and the consumers held at their configured `max-behind` limit. Use `--bump-behind` for named feed targets. If a queued release crosses the limit, `merge --bump --apply` can prepare a shared draft for the proved version on the selected consumers' base. Resume with the original command and state after integration. Pipetrain verifies the base and requests updates for stale consumer branches. The next plan and fresh readiness checks govern their merges. See [version-gate bumps](bump-in-merge.md).
+The dry run shows a bump step and the consumers held at their configured `max-behind` limit. Use `--bump-behind` for named feed targets. If a queued release crosses the limit, `merge --bump --apply` can prepare a shared draft for the proved version on the selected consumers' base. With the command running, a person integrates the draft. Pipetrain verifies the base, requests updates for stale consumer branches and continues when their updated heads pass review and CI. Reuse the original command and state after a timeout or interruption. See [version-gate bumps](bump-in-merge.md).
 
-Publication-backed version-gate steps use `kind: bump` and identify the consumer in `target`. The structured `bump` object includes `source: "queue_publication"`, `package`, `base`, `publishers`, `version` (null while unproved), `ready`, and the draft's `pull_request_url` when known. The outcome is `attention` while held and `incorporated` when the planned head includes the verified pin. Waiting for publication, integration or a branch update contributes a stopped event (exit 5). The plan and queue schemas are unchanged.
+Publication-backed version-gate steps use `kind: bump` and identify the consumer in `target`. The structured `bump` object includes `source: "queue_publication"`, `package`, `base`, `publishers`, `version` (null while unproved), `ready`, and the draft's `pull_request_url` when known. The outcome is `attention` while held and `incorporated` when the planned head includes the verified pin. An unresolved publication or a timed-out wait contributes a stopped event (exit 5). The plan and queue schemas are unchanged.
 
 ## Shared preflight
 
