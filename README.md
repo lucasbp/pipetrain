@@ -877,7 +877,7 @@ pipetrain does not approve, comment, label or re-run checks, and it does not exe
 
 Use the [architecture review criteria](AGENTS.md#architecture-review) when placing new code or reviewing a pull request.
 
-CI runs clippy and tests on Linux, macOS and Windows for every push to `main` and every pull request; it does not run fmt. See [AGENTS.md](AGENTS.md#validation) for the local validation commands and stable-toolchain update requirement.
+The [validation guide](AGENTS.md#validation) lists the CI checks, local commands and stable-toolchain requirement.
 
 ## License
 
