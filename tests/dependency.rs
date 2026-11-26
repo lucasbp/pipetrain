@@ -84,30 +84,30 @@ fn codes(planned: &Planned) -> Vec<&str> {
 }
 
 fn build(cfg: &Config, prs: Vec<Pr>, manifests: &[Manifest]) -> plan::Plan {
-    let rules = Rules::new(cfg).unwrap();
+    plan::build(&Rules::new(cfg).unwrap(), gathered(prs, manifests))
+}
+
+fn gathered(prs: Vec<Pr>, manifests: &[Manifest]) -> Gathered {
     let (publishers, references) = scan(manifests);
-    plan::build(
-        &rules,
-        Gathered {
-            generated_at: "2026-10-30T09:00:00-03:00".to_string(),
-            train: "deploy/30-10-2026".to_string(),
-            deploy_branch: "deploy/30-10-2026".to_string(),
-            train_prefix: "deploy/".to_string(),
-            orgs: vec!["acme".to_string()],
-            ready: prs
-                .into_iter()
-                .map(|p| (p, "explicit".to_string()))
-                .collect(),
-            skipped: Vec::new(),
-            questions: Vec::new(),
-            external: BTreeMap::new(),
-            publishers,
-            references,
-            max_parallel: 4,
-            requests: 1,
-            rate_remaining: Some(4000),
-        },
-    )
+    Gathered {
+        generated_at: "2026-10-30T09:00:00-03:00".to_string(),
+        train: "deploy/30-10-2026".to_string(),
+        deploy_branch: "deploy/30-10-2026".to_string(),
+        train_prefix: "deploy/".to_string(),
+        orgs: vec!["acme".to_string()],
+        ready: prs
+            .into_iter()
+            .map(|p| (p, "explicit".to_string()))
+            .collect(),
+        skipped: Vec::new(),
+        questions: Vec::new(),
+        external: BTreeMap::new(),
+        publishers,
+        references,
+        max_parallel: 4,
+        requests: 1,
+        rate_remaining: Some(4000),
+    }
 }
 
 fn queue(cfg: &Config, prs: Vec<Pr>, manifests: &[Manifest]) -> Vec<String> {
@@ -128,6 +128,52 @@ fn util_and_sdk_prs() -> Vec<Pr> {
     ]
 }
 
+fn record_util_merge(plan: &plan::Plan) -> Store {
+    let mut store = Store::in_memory();
+    bump::track(
+        plan,
+        &mut store,
+        &bump::Options::default(),
+        &StoreOperation::Add(Pending {
+            recorded_at: None,
+            id: "acme/util#2".into(),
+            repo: "acme/util".into(),
+            base: "master".into(),
+            sha: None,
+            admin_override: None,
+            continuation: None,
+            deploy_prediction: None,
+        }),
+    );
+    store
+}
+
+#[test]
+fn resuming_a_held_publisher_retains_the_package_contract_for_its_selected_dependent() {
+    use pipetrain::discovery::{Scope, Skipped};
+    let mut initial = gathered(util_and_sdk_prs(), &util_and_sdk());
+    let index = initial
+        .ready
+        .iter()
+        .position(|(pr, _)| pr.key.repo == "util")
+        .unwrap();
+    let (publisher, _) = initial.ready.remove(index);
+    initial.skipped.push(Skipped {
+        pr: publisher,
+        scope: Scope::Explicit,
+        reasons: vec!["waiting: needs a bump of acme.core".into()],
+    });
+    let plan = plan::build(&Rules::new(&config("")).unwrap(), initial);
+    assert!(plan.items.is_empty());
+    let store = record_util_merge(&plan);
+    let journal = store.state.bump.unwrap();
+    assert_eq!(journal.publishers["acme/util#2"].packages, ["acme.util"]);
+    assert_eq!(
+        journal.contracts["acme/sdk#1"][0].publisher_id,
+        "acme/util#2"
+    );
+}
+
 fn assert_package_survives_winning_rule(cfg: &Config, prs: Vec<Pr>, rule: &str) {
     let plan = build(cfg, prs, &util_and_sdk());
     let consumer = plan
@@ -146,22 +192,7 @@ fn assert_package_survives_winning_rule(cfg: &Config, prs: Vec<Pr>, rule: &str) 
     assert!(bump::applicable(consumer, None));
     let lines = emit::queue_lines(&plan);
     assert!(position(&lines, "acme/util#2") < position(&lines, "acme/sdk#1"));
-    let mut store = Store::in_memory();
-    bump::track(
-        &plan,
-        &mut store,
-        &bump::Options::default(),
-        &StoreOperation::Add(Pending {
-            recorded_at: None,
-            id: "acme/util#2".into(),
-            repo: "acme/util".into(),
-            base: "master".into(),
-            sha: None,
-            admin_override: None,
-            continuation: None,
-            deploy_prediction: None,
-        }),
-    );
+    let store = record_util_merge(&plan);
     let journal = store.state.bump.unwrap();
     assert_eq!(journal.publishers["acme/util#2"].packages, ["acme.util"]);
     assert_eq!(journal.contracts[&consumer.id].len(), 1);

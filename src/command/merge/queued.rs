@@ -2,8 +2,8 @@ use anyhow::{Context, Result, ensure};
 
 use super::{Env, behind, bump};
 use crate::github::Client;
-use crate::merge::{Kind, Report, Status, StepReport, Store};
-use crate::model::PrKey;
+use crate::merge::{BumpWait, Kind, Report, Status, StepReport, Store};
+use crate::model::{Checks, Pr, PrKey, PrState, Review};
 use crate::planner::{Item, behind::QueuedBump};
 
 pub(super) fn candidate_draft(item: &Item, contracts: &[QueuedBump], store: &Store) -> bool {
@@ -50,6 +50,59 @@ pub(super) fn summary(report: &Report, command: &str) -> String {
     out
 }
 
+pub(super) fn readiness_after_bump(pr: &Pr, check_head: Option<&str>) -> Result<Option<String>> {
+    ensure!(pr.state == PrState::Open, "consumer PR is no longer open");
+    ensure!(!pr.is_draft, "consumer PR is a draft");
+    ensure!(
+        !pr.conflicting && pr.merge_state_status != "DIRTY",
+        "consumer has a merge conflict"
+    );
+    ensure!(
+        !pr.behind && pr.merge_state_status != "BEHIND",
+        "consumer is behind its base after incorporation"
+    );
+    ensure!(
+        pr.review != Review::ChangesRequested,
+        "consumer has changes requested"
+    );
+    let current = check_head == Some(pr.head_sha.as_str());
+    ensure!(
+        !current || pr.checks != Checks::Failure,
+        "consumer checks failing on {}",
+        pr.head_sha
+    );
+    let mut waiting = Vec::new();
+    if !current || pr.checks != Checks::Success {
+        waiting.push("green checks");
+    }
+    if pr.review != Review::Approved {
+        waiting.push("approval");
+    }
+    match pr.merge_state_status.as_str() {
+        "BLOCKED" | "UNSTABLE" if !waiting.is_empty() => {}
+        "CLEAN" | "HAS_HOOKS" => {}
+        "UNKNOWN" | "" => waiting.push("GitHub mergeability"),
+        other => anyhow::bail!("GitHub blocks the consumer ({other})"),
+    }
+    if pr.mergeable_unknown && !waiting.contains(&"GitHub mergeability") {
+        waiting.push("GitHub mergeability");
+    }
+    Ok((!waiting.is_empty()).then(|| {
+        format!(
+            "waiting for {} on consumer head {}",
+            waiting.join(" and "),
+            pr.head_sha
+        )
+    }))
+}
+
+pub(super) fn pending_signal(reason: &str) -> bool {
+    matches!(
+        reason,
+        "checks pending" | "no checks reported" | "not approved" | "review required"
+    )
+}
+
 pub(super) fn prepare(
     env: &Env,
     contract: &QueuedBump,
@@ -70,7 +123,9 @@ pub(super) fn prepare(
         let evidence = bump::queued::publication(contract, client, options, store)?;
         version = Some(evidence.version().to_owned());
         let key = PrKey::parse(&contract.id).context("invalid consumer PR id")?;
-        let pr = client.pr(&key)?.context("consumer PR is unavailable")?;
+        let (pr, check_head) = client
+            .pr_with_check_head(&key)?
+            .context("consumer PR is unavailable")?;
         ensure!(
             pr.key == key && pr.base_ref == contract.base && pr.head_ref == contract.head,
             "consumer branch or base changed, inspect the saved bump before continuing"
@@ -88,8 +143,15 @@ pub(super) fn prepare(
                     .find(|planned| planned.id == contract.id)
                     .map(|planned| &planned.sha)
             });
+        let updating = behind::requested_update(store, contract).is_some();
+        let new_head = pr.head_sha != contract.sha;
         ensure!(
-            planned_sha.is_none_or(|sha| sha == &pr.head_sha),
+            !new_head || updating,
+            "consumer head changed outside the requested base update"
+        );
+        let stale_plan = planned_sha.is_some_and(|sha| sha != &pr.head_sha);
+        ensure!(
+            !stale_plan || (updating && new_head),
             "consumer head changed since planning"
         );
         let blockers: Vec<_> = env
@@ -98,17 +160,24 @@ pub(super) fn prepare(
             .into_iter()
             .filter(|reason| reason != "branch behind its base, update it")
             .collect();
-        ensure!(
-            blockers.is_empty(),
-            "consumer is not ready: {}",
-            blockers.join(", ")
-        );
+        if new_head {
+            readiness_after_bump(&pr, check_head.as_deref())?;
+        } else {
+            ensure!(
+                blockers.is_empty(),
+                "consumer is not ready: {}",
+                blockers.join(", ")
+            );
+        }
+        let mut replan_readiness = false;
         if let Some(skipped) = env
             .plan
             .skipped
             .iter()
             .find(|entry| entry.id == contract.id)
         {
+            replan_readiness =
+                new_head && skipped.reasons.iter().any(|reason| pending_signal(reason));
             let others: Vec<_> = skipped
                 .reasons
                 .iter()
@@ -116,6 +185,14 @@ pub(super) fn prepare(
                     !reason.starts_with(crate::planner::behind::PREFIX)
                         && !reason.starts_with(crate::merge::category::DEPENDS_PREFIX)
                         && reason.as_str() != "branch behind its base, update it"
+                        && !(new_head && blockers.contains(reason))
+                        && !(replan_readiness
+                            && (pending_signal(reason)
+                                || matches!(
+                                    reason.as_str(),
+                                    "branch protection blocks merge (BLOCKED)"
+                                        | "checks are not passing (UNSTABLE)"
+                                )))
                 })
                 .cloned()
                 .collect();
@@ -130,13 +207,46 @@ pub(super) fn prepare(
             cfg: env.cfg,
             options: &options.behind,
         };
-        Ok(behind::published(
-            contract,
-            &evidence,
-            &pr,
-            store,
-            &mut gateway,
-        ))
+        let (mut step, incorporated) =
+            behind::published(contract, &evidence, &pr, store, &mut gateway);
+        if !incorporated {
+            return Ok((step, false));
+        }
+        let readiness = readiness_after_bump(&pr, check_head.as_deref())?.or_else(|| {
+            replan_readiness.then(|| {
+                "consumer approval and checks cleared since planning; replan the verified head"
+                    .into()
+            })
+        });
+        let pending = if let Some(reason) = readiness {
+            Some((
+                BumpWait::Readiness {
+                    key,
+                    sha: pr.head_sha.clone(),
+                },
+                reason,
+            ))
+        } else {
+            planned_sha.filter(|_| stale_plan).map(|old| {
+                (
+                    BumpWait::Update {
+                        key,
+                        sha: old.clone(),
+                    },
+                    "replan for the verified updated consumer head".into(),
+                )
+            })
+        };
+        if let Some((wait, reason)) = pending {
+            step.status = Status::Stopped;
+            step.detail = reason;
+            step.wait = Some(wait);
+            if let Some(data) = &mut step.bump {
+                data["outcome"] = "attention".into();
+            }
+        }
+        let ready = step.status == Status::Done;
+        Ok((step, ready))
     })();
     let (mut step, ready) = result.unwrap_or_else(|error| {
         (
@@ -183,4 +293,30 @@ pub(super) fn prepare(
         bump["pull_request_url"] = entry.pull_request_url.clone().into();
     }
     (step, ready)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn incorporated_consumers_distinguish_pending_signals_from_terminal_blockers() {
+        let mut pr = crate::github::parse_pr(&serde_json::json!({
+            "number":2, "repository":{"name":"app","owner":{"login":"acme"}},
+            "state":"OPEN", "headRefOid":"updated", "reviewDecision":"APPROVED",
+            "mergeStateStatus":"CLEAN", "mergeable":"MERGEABLE",
+            "commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"SUCCESS"}}}]}
+        }))
+        .unwrap();
+        let current = Some("updated");
+        assert!(readiness_after_bump(&pr, Some("old")).unwrap().is_some());
+        assert!(readiness_after_bump(&pr, current).unwrap().is_none());
+        pr.review = Review::ReviewRequired;
+        assert!(readiness_after_bump(&pr, current).unwrap().is_some());
+        pr.checks = Checks::Failure;
+        assert!(readiness_after_bump(&pr, current).is_err());
+        pr.checks = Checks::Missing;
+        pr.review = Review::ChangesRequested;
+        assert!(readiness_after_bump(&pr, current).is_err());
+    }
 }

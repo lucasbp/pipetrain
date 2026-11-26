@@ -87,6 +87,14 @@ impl Gateway for ConsumerGateway<'_> {
         self.github.incorporated(preparation, item)
     }
 
+    fn confirm_pins(
+        &mut self,
+        item: &Item,
+        pins: &std::collections::BTreeMap<String, String>,
+    ) -> Result<()> {
+        self.github.confirm_pins(item, pins)
+    }
+
     fn prepare(
         &mut self,
         publications: &[PublicationResult],
@@ -175,7 +183,11 @@ fn requests(server: &Server) -> Vec<String> {
 }
 
 fn consumer_pr(sha: &str) -> Value {
-    json!({"state":"open","head":{"sha":sha,"ref":"feature/app","repo":{"full_name":"Acme/App"}}})
+    json!({"state":"open","number":2,"base":{"ref":"main","repo":{"full_name":"acme/app"}},"head":{"sha":sha,"ref":"feature/app","repo":{"full_name":"Acme/App"}}})
+}
+
+fn review_pull(merged: bool, base: &str, commit: &str, merge: &str, branch: &str) -> Value {
+    json!({"number":9,"state":if merged {"closed"} else {"open"},"merged":merged,"base":{"ref":base,"repo":{"full_name":"acme/app"}},"head":{"ref":branch,"sha":commit,"repo":{"full_name":"acme/app"}},"merge_commit_sha":merge})
 }
 
 fn saved_review(consumer: &Item, commit: &str) -> Journal {
@@ -202,6 +214,48 @@ fn saved_review(consumer: &Item, commit: &str) -> Journal {
         .unwrap()
         .commit = commit.into();
     state
+}
+
+#[test]
+fn a_lost_create_response_recovers_the_same_draft_without_any_writes() {
+    let dir = TempDir::new("lost-consumer-bump");
+    let consumer = item();
+    let commit = "7".repeat(40);
+    let mut journal = saved_review(&consumer, &commit);
+    let marker = journal.consumers.get_mut(&consumer.id).unwrap();
+    marker.prepared_commit = Some(commit.clone());
+    marker.completed = false;
+    let prepared = marker.prepared.take().unwrap();
+    let mut draft = review_pull(false, &consumer.head, &commit, "", &marker.bump_branch);
+    draft["html_url"] = json!(prepared.pull_request_url);
+    let server = serve_handler(move |path| match path {
+        REVIEW => (200, draft.clone()),
+        CONSUMER => (200, consumer_pr(&item().sha)),
+        path if path.starts_with("GET /repos/acme/app/pulls?state=all&head=") => {
+            (200, json!([{"number":9}]))
+        }
+        _ => (404, Value::Null),
+    });
+    save_initial(&dir, journal);
+    for _ in 0..2 {
+        let outcome = resume_saved(&dir, &server, &consumer);
+        assert!(
+            matches!(outcome, Outcome::NeedsReview { pull_request_url, .. } if pull_request_url == prepared.pull_request_url)
+        );
+    }
+    let seen = requests(&server);
+    assert!(seen.iter().all(|line| line.starts_with("GET ")));
+    assert_eq!(
+        seen.iter()
+            .filter(|line| line.contains("state=all"))
+            .count(),
+        1
+    );
+    let store = Store::open(Some(dir.join("state.json"))).unwrap();
+    let journal = store.state.bump.unwrap();
+    let marker = &journal.consumers[&consumer.id];
+    assert!(marker.completed);
+    assert_eq!(marker.prepared.as_ref().unwrap().commit, commit);
 }
 
 #[test]
@@ -240,38 +294,40 @@ fn unexpected_consumer_identity_stops_before_creating_a_workspace_or_writing_to_
 fn a_saved_review_stays_pending_until_its_exact_commit_is_merged_into_the_planned_head() {
     let commit = "2".repeat(40);
     let merge = "3".repeat(40);
-    let compare = format!(
-        "GET /repos/acme/app/compare/{merge}...{}?per_page=1",
-        item().sha
-    );
-    for (merged, base, head, ancestry_checked) in [
-        (false, "feature/app", commit.as_str(), false),
-        (true, "other", commit.as_str(), false),
-        (true, "feature/app", "unexpected", false),
-        (true, "feature/app", commit.as_str(), true),
+    for (state, merged, base, head) in [
+        ("open", false, "feature/app", commit.as_str()),
+        ("closed", false, "feature/app", commit.as_str()),
+        ("closed", true, "other", commit.as_str()),
+        ("closed", true, "feature/app", "unexpected"),
+        ("closed", true, "feature/app", commit.as_str()),
     ] {
         let dir = TempDir::new("pending-review");
-        let pr = json!({"merged":merged,"base":{"ref":base},"head":{"sha":head},"merge_commit_sha":merge});
-        let expected_compare = compare.clone();
+        let journal = saved_review(&item(), &commit);
+        let marker = journal.consumers[&item().id].clone();
+        let mut pr = review_pull(merged, base, head, &merge, &marker.bump_branch);
+        pr["state"] = state.into();
         let server = serve_handler(move |path| {
             if path == REVIEW {
                 (200, pr.clone())
-            } else if path == expected_compare {
-                (200, json!({"status":"diverged"}))
+            } else if path == CONSUMER {
+                (200, consumer_pr(&item().sha))
             } else {
                 (404, Value::Null)
             }
         });
-        let state = saved_review(&item(), &commit);
-        let marker = state.consumers[&item().id].clone();
-        save_initial(&dir, state);
+        save_initial(&dir, journal);
         let before = fs::read(dir.join("state.json")).unwrap();
         for _ in 0..2 {
+            let outcome = resume_saved(&dir, &server, &item());
+            if state == "closed" {
+                assert!(matches!(outcome, Outcome::Attention { .. }), "{outcome:?}");
+                continue;
+            }
             let Outcome::NeedsReview {
                 pull_request_url,
                 branch,
                 consumer_head,
-            } = resume_saved(&dir, &server, &item())
+            } = outcome
             else {
                 panic!("expected the original review")
             };
@@ -282,8 +338,8 @@ fn a_saved_review_stays_pending_until_its_exact_commit_is_merged_into_the_planne
             assert_eq!(branch, marker.bump_branch);
             assert_eq!(consumer_head, marker.head_sha);
         }
-        let expected = if ancestry_checked {
-            vec![REVIEW, compare.as_str()]
+        let expected = if base == "feature/app" && head == commit {
+            vec![REVIEW, CONSUMER]
         } else {
             vec![REVIEW]
         };
@@ -314,24 +370,23 @@ fn incorporated_bump_rechecks_the_pin_once_then_resumes_without_another_branch_o
         &["merge", "--no-ff", "review", "-m", "incorporate bump"],
     );
     let merge = git(&repo, &["rev-parse", "HEAD"]);
-    git(
-        &repo,
-        &["commit", "--allow-empty", "-m", "advance consumer"],
-    );
     let mut consumer = item();
     consumer.sha = git(&repo, &["rev-parse", "HEAD"]);
     let refs = git(&repo, &["show-ref"]);
-    let compare = format!(
-        "GET /repos/acme/app/compare/{merge}...{}?per_page=1",
-        consumer.sha
-    );
     let tree = format!("GET /repos/acme/app/git/trees/{}?recursive=1", consumer.sha);
     let head = consumer.sha.clone();
-    let review = json!({"merged":true,"base":{"ref":consumer.head},"head":{"sha":commit},"merge_commit_sha":merge});
+    let state = saved_review(&planned, &commit);
+    let review = review_pull(
+        true,
+        &consumer.head,
+        &commit,
+        &merge,
+        &state.consumers[&consumer.id].bump_branch,
+    );
+    let merged_draft = review.clone();
     let server = serve_requests(move |path, body| {
         let value = match path {
             REVIEW => review.clone(),
-            path if path == compare => json!({"status":"ahead"}),
             CONSUMER => consumer_pr(&head),
             "GET /repos/acme/app/pulls?state=open&base=feature/app&per_page=1" => json!([]),
             "GET /repos/acme/app" => json!({"default_branch":"main"}),
@@ -351,7 +406,7 @@ fn incorporated_bump_rechecks_the_pin_once_then_resumes_without_another_branch_o
         };
         (200, value)
     });
-    save_initial(&dir, saved_review(&planned, &commit));
+    save_initial(&dir, state);
     let outcome = resume_with_local_publication(&dir, &server, &consumer);
     assert!(matches!(outcome, Outcome::Skipped { .. }), "{outcome:?}");
     let state = Store::open(Some(dir.join("state.json")))
@@ -360,19 +415,18 @@ fn incorporated_bump_rechecks_the_pin_once_then_resumes_without_another_branch_o
         .bump
         .unwrap();
     let marker = &state.consumers[&consumer.id];
-    assert!(marker.completed && marker.prepared.is_none());
-    assert_eq!(marker.head_sha, consumer.sha);
+    assert!(marker.completed && marker.prepared.is_some());
+    assert_eq!(marker.verified_head.as_deref(), Some(consumer.sha.as_str()));
     let first = requests(&server);
     assert!(first.contains(&format!(
-        "GET /repos/acme/app/compare/{merge}...{}?per_page=1",
-        consumer.sha
+        "GET /repos/acme/app/git/trees/{merge}?recursive=1"
     )));
     assert!(
         first
             .iter()
             .all(|req| req.starts_with("GET ") || req == "POST /graphql")
     );
-    assert_eq!(fs::read_dir(dir.join("workspaces")).unwrap().count(), 1);
+    assert!(!dir.join("workspaces").exists());
     let before = fs::read(dir.join("state.json")).unwrap();
     assert!(matches!(
         resume_saved(&dir, &server, &consumer),
@@ -380,7 +434,21 @@ fn incorporated_bump_rechecks_the_pin_once_then_resumes_without_another_branch_o
     ));
     assert_eq!(requests(&server), first);
     assert_eq!(fs::read(dir.join("state.json")).unwrap(), before);
-    assert_eq!(fs::read_dir(dir.join("workspaces")).unwrap().count(), 1);
+    assert!(!dir.join("workspaces").exists());
     assert_eq!(git(&repo, &["show-ref"]), refs);
     assert!(git(&repo, &["status", "--porcelain"]).is_empty());
+    git(&repo, &["commit", "--allow-empty", "-m", "extra change"]);
+    consumer.sha = git(&repo, &["rev-parse", "HEAD"]);
+    let extra_head = consumer.sha.clone();
+    let server = serve_handler(move |path| match path {
+        REVIEW => (200, merged_draft.clone()),
+        CONSUMER => (200, consumer_pr(&extra_head)),
+        _ => (404, Value::Null),
+    });
+    let outcome = resume_saved(&dir, &server, &consumer);
+    assert!(
+        matches!(outcome, Outcome::Attention { reason } if reason.contains("differs from the exact merge commit"))
+    );
+    assert_eq!(requests(&server), [REVIEW, CONSUMER]);
+    assert_eq!(fs::read(dir.join("state.json")).unwrap(), before);
 }

@@ -52,8 +52,8 @@ Optional fields can be added without changing existing meanings.
 | `archived` | ArchivedState[] | Files this command archived beside the state file (see [archiving](merge.md#archiving-a-stale-state-of-another-queue)), oldest name first; always present, empty when none. Each has `path`, `archived_at` (UTC RFC3339 read from the file name) and `pending` (number of pending records in it). Additive, the state schema stays `2`. |
 | `audit` | AuditEntry[] | Discard and later-deploy resolution history, always present, including when empty. |
 | `admin_overrides` | AdminOverrideRecord[], optional | Durable successful admin override history; omitted when empty. |
-| `bump` | object, optional | Publication/consumer journal. Optional `queued_bumps` records the selected consumer, base, head, SHA, exact pin, package owners and publisher PRs before producer merge. |
-| `bump_behind` | array, optional | Per-consumer base-branch bumps. For queue publications, optional `publication` records the base, consumer head branch, prepared commit and consumer SHA for which an update was requested. The number is zero and the URL empty until a draft is identified. |
+| `bump` | object, optional | Publication/consumer journal. Optional `queued_bumps` records the selected consumer, base, head, SHA, exact pin, package owners and publisher PRs before producer merge. For a draft into a consumer branch, optional preparation fields store the base, intended pins, exact prepared commit and verified consumer head. |
+| `bump_behind` | array, optional | Per-consumer base-branch bumps. For queue publications, optional `publication` records the base, consumer head branch, prepared commit, consumer SHA and the base tip for which an update was requested. A definitive update rejection is recorded for that head. The number is zero and the URL empty until a draft is identified. |
 
 Each `PendingInspection` has `id`, `repo`, `base` (strings), `sha` (full saved SHA
 or null), `recorded_at` (RFC3339 string or null), `age_seconds` (nonnegative integer

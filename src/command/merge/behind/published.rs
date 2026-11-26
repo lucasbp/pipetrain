@@ -11,7 +11,7 @@ use crate::consumer_bump::backend::{ConsumerRemote, LocalBackend, ProcessRunner}
 use crate::consumer_bump::{Consumer, pin_manifest};
 use crate::feed::{Ecosystem, Version};
 use crate::github::Client;
-use crate::merge::{BumpBehind, PublishedTarget, Status, StepReport, Store};
+use crate::merge::{BumpBehind, BumpWait, PublishedTarget, Status, StepReport, Store};
 use crate::model::{Pr, PrKey};
 use crate::planner::behind::QueuedBump;
 
@@ -169,6 +169,18 @@ struct Intent<'a> {
 }
 
 impl<'a> Intent<'a> {
+    fn reuse_update(&mut self, target: &QueuedBump) {
+        if self.scope().update_requested_at.is_some() {
+            return;
+        }
+        if let Some(saved) = requested_update(self.store, target).cloned() {
+            let scope = self.scope();
+            scope.update_requested_at = saved.update_requested_at;
+            scope.update_base = saved.update_base;
+            scope.update_rejection = saved.update_rejection;
+        }
+    }
+
     fn track(store: &'a mut Store, target: &QueuedBump, to: &str) -> Result<Self> {
         let entries = &mut store.state.bump_behind;
         if let Some(index) = entries.iter().position(|e| {
@@ -215,6 +227,8 @@ impl<'a> Intent<'a> {
                 head: target.head.clone(),
                 commit: shared.and_then(|e| e.publication.as_ref()?.commit.clone()),
                 update_requested_at: None,
+                update_base: None,
+                update_rejection: None,
             }),
         };
         let index = entries.len();
@@ -243,6 +257,20 @@ impl<'a> Intent<'a> {
         }
         Ok(())
     }
+}
+
+pub(in crate::command::merge) fn requested_update<'a>(
+    store: &'a Store,
+    target: &QueuedBump,
+) -> Option<&'a PublishedTarget> {
+    store.state.bump_behind.iter().find_map(|entry| {
+        let scope = entry.publication.as_ref()?;
+        (entry.id == target.id
+            && scope.base == target.base
+            && scope.head == target.head
+            && scope.update_requested_at.as_deref() == Some(&target.sha))
+        .then_some(scope)
+    })
 }
 
 struct Remote<'a, 'b> {
@@ -358,8 +386,9 @@ fn incorporate(
     intent: &mut Intent<'_>,
     pr: &Pr,
     commit: &str,
+    base_sha: &str,
     pinned: bool,
-) -> Result<(bool, String)> {
+) -> Result<(Option<BumpWait>, String)> {
     let repo = pr.key.slug();
     if client
         .commit_inclusion(&repo, &pr.head_sha, commit)?
@@ -370,27 +399,58 @@ fn incorporate(
             "consumer includes the bump but its pin has changed; inspect its manifests"
         );
         return Ok((
-            true,
+            None,
             "verified the incorporated pin at the planned head".into(),
         ));
     }
+    let wait = BumpWait::Update {
+        key: pr.key.clone(),
+        sha: pr.head_sha.clone(),
+    };
     if intent.scope().update_requested_at.as_deref() == Some(&pr.head_sha) {
+        if let Some(status) = intent.scope().update_rejection {
+            bail!(
+                "GitHub rejected the update of this consumer head (HTTP {status}); resolve the conflict or refusal before resuming"
+            );
+        }
         return Ok((
-            false,
-            "base update already requested for this head; inspect the branch update".into(),
+            Some(wait),
+            "base update already requested for this head; waiting for incorporation".into(),
         ));
     }
     check_consumer(client, pr)?;
+    ensure!(
+        intent.scope().update_requested_at.is_none(),
+        "another bump landed after the recorded base update; the new base needs a separate verified incorporation"
+    );
     intent.scope().update_requested_at = Some(pr.head_sha.clone());
+    intent.scope().update_base = Some(base_sha.to_owned());
     intent.store.save()?;
     let reply = client.put_json(
         &format!("/repos/{repo}/pulls/{}/update-branch", pr.key.number),
         &json!({"expected_head_sha":pr.head_sha}),
-    )?;
+    );
+    let reply = match reply {
+        Ok(reply) => reply,
+        Err(error) => {
+            return Ok((
+                Some(wait),
+                format!("update response was lost; waiting for the consumer head: {error}"),
+            ));
+        }
+    };
     if !(200..300).contains(&reply.status) {
         if (400..500).contains(&reply.status) {
-            intent.scope().update_requested_at = None;
+            intent.scope().update_rejection = Some(reply.status);
             intent.store.save()?;
+        } else if reply.status >= 500 {
+            return Ok((
+                Some(wait),
+                format!(
+                    "update returned HTTP {}; waiting for the consumer head",
+                    reply.status
+                ),
+            ));
         }
         bail!(
             "cannot incorporate the base (HTTP {}): {}",
@@ -399,8 +459,67 @@ fn incorporate(
         );
     }
     Ok((
-        false,
+        Some(wait),
         "requested a branch update; wait for checks on the updated head".into(),
+    ))
+}
+
+fn verify_updated_head(
+    client: &mut Client,
+    intent: &PublishedTarget,
+    pr: &Pr,
+    original: &str,
+) -> Result<()> {
+    if pr.head_sha == original {
+        return Ok(());
+    }
+    ensure!(
+        intent.update_requested_at.as_deref() == Some(original),
+        "consumer head changed outside the requested base update"
+    );
+    let repo = pr.key.slug();
+    let base = match &intent.update_base {
+        Some(base) => base.clone(),
+        None => client
+            .branch_tip(&repo, &pr.base_ref)?
+            .context("missing base of legacy branch update")?,
+    };
+    if pr.head_sha == base {
+        ensure!(
+            client.contains_commit(&repo, &pr.head_sha, original)?,
+            "base update does not contain the selected consumer head"
+        );
+        return Ok(());
+    }
+    let commit = client.rest(&format!("/repos/{repo}/git/commits/{}", pr.head_sha))?;
+    let parents = commit["parents"]
+        .as_array()
+        .context("consumer commit parents are unavailable")?;
+    ensure!(
+        matches!(parents.as_slice(), [first, second] if first["sha"] == original && second["sha"] == base),
+        "consumer head is not the requested merge of the selected head and base"
+    );
+    Ok(())
+}
+
+fn draft_wait(pr: &Pr, intent: &Intent<'_>) -> Result<(Option<BumpWait>, String)> {
+    let entry = intent.entry();
+    let sha = entry
+        .publication
+        .as_ref()
+        .and_then(|scope| scope.commit.clone())
+        .context("missing prepared commit for shared bump PR")?;
+    Ok((
+        Some(BumpWait::Draft {
+            key: PrKey {
+                number: entry.number,
+                ..pr.key.clone()
+            },
+            base: pr.base_ref.clone(),
+            head: entry.branch.clone(),
+            sha,
+        }),
+        "waiting for the bump PR to merge".into(),
     ))
 }
 
@@ -410,8 +529,10 @@ fn reconcile(
     pr: &Pr,
     target: &QueuedBump,
     to: &str,
-) -> Result<(bool, String)> {
+) -> Result<(Option<BumpWait>, String)> {
     check_consumer(gateway.client, pr)?;
+    intent.reuse_update(target);
+    verify_updated_head(gateway.client, intent.scope(), pr, &target.sha)?;
     let repo = pr.key.slug();
     let head_pins = Pins::at(
         gateway.client,
@@ -493,7 +614,7 @@ fn reconcile(
                 pull["state"] == "open",
                 "bump PR closed without merging; inspect it"
             );
-            return Ok((false, "waiting for the bump PR to merge".into()));
+            return draft_wait(pr, intent);
         }
     }
     let base_sha = gateway
@@ -506,10 +627,10 @@ fn reconcile(
             base.changes.is_empty() && gateway.client.contains_commit(&repo, &base_sha, &commit)?,
             "current base lacks the merged bump or the exact pin"
         );
-        return incorporate(gateway.client, intent, pr, &commit, pinned);
+        return incorporate(gateway.client, intent, pr, &commit, &base_sha, pinned);
     }
     if base.changes.is_empty() {
-        return incorporate(gateway.client, intent, pr, &base_sha, pinned);
+        return incorporate(gateway.client, intent, pr, &base_sha, &base_sha, pinned);
     }
     ensure!(
         !pinned && target.sha == pr.head_sha,
@@ -522,7 +643,7 @@ fn reconcile(
         .and_then(|s| s.parse::<u64>().ok())
         .context("bump PR URL lacks its number")?;
     intent.remember(number, &url)?;
-    Ok((false, "waiting for the bump PR to merge".into()))
+    draft_wait(pr, intent)
 }
 
 pub fn published(
@@ -551,7 +672,8 @@ pub fn published(
         url.clone_from(&intent.entry().pull_request_url);
         result
     })();
-    let (ready, reason) = result.unwrap_or_else(|e| (false, format!("{e:#}")));
+    let ready = matches!(result, Ok((None, _)));
+    let (wait, reason) = result.unwrap_or_else(|e| (None, format!("{e:#}")));
     let link = if url.is_empty() {
         String::new()
     } else {
@@ -567,6 +689,7 @@ pub fn published(
         outcome["pull_request_url"] = url.into();
     }
     report.bump = Some(outcome);
+    report.wait = wait;
     (report, ready)
 }
 

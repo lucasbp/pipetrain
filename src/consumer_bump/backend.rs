@@ -111,14 +111,8 @@ pub struct GithubRemote<'a> {
     pub client: &'a mut Client,
 }
 
-impl ConsumerRemote for GithubRemote<'_> {
-    fn reserve_branch(&mut self, repository: &str, branch: &str, source_sha: &str) -> Result<()> {
-        if self.client.create_branch(repository, branch, source_sha)? != BranchWrite::Created {
-            bail!("bump branch already exists; refusing to update it");
-        }
-        Ok(())
-    }
-    fn head(&mut self, consumer: &Consumer) -> Result<String> {
+impl GithubRemote<'_> {
+    pub(crate) fn head_on(&mut self, consumer: &Consumer, base: Option<&str>) -> Result<String> {
         let pr = self.client.rest(&format!(
             "/repos/{}/pulls/{}",
             consumer.repository, consumer.number
@@ -128,13 +122,31 @@ impl ConsumerRemote for GithubRemote<'_> {
             || pr["head"]["repo"]["full_name"]
                 .as_str()
                 .is_none_or(|r| !r.eq_ignore_ascii_case(&consumer.repository))
+            || base.is_some_and(|expected| {
+                pr["base"]["ref"] != expected
+                    || pr["base"]["repo"]["full_name"]
+                        .as_str()
+                        .is_none_or(|r| !r.eq_ignore_ascii_case(&consumer.repository))
+            })
         {
-            bail!("consumer PR must remain open in its own repository and expected head branch");
+            bail!("consumer PR must remain open in its own repository and expected branches");
         }
         Ok(pr["head"]["sha"]
             .as_str()
             .context("missing consumer head SHA")?
-            .to_string())
+            .to_owned())
+    }
+}
+
+impl ConsumerRemote for GithubRemote<'_> {
+    fn reserve_branch(&mut self, repository: &str, branch: &str, source_sha: &str) -> Result<()> {
+        if self.client.create_branch(repository, branch, source_sha)? != BranchWrite::Created {
+            bail!("bump branch already exists; refusing to update it");
+        }
+        Ok(())
+    }
+    fn head(&mut self, consumer: &Consumer) -> Result<String> {
+        self.head_on(consumer, None)
     }
     fn open(&mut self, consumer: &Consumer, commit: &str, body: &str) -> Result<String> {
         if self

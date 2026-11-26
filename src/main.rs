@@ -758,7 +758,7 @@ struct MergeArgs {
     #[arg(
         long,
         conflicts_with = "no_bump",
-        help = "Prepare reviewed consumer bump PRs after a newly published NuGet dependency; requires --apply for writes"
+        help = "Prepare NuGet bump drafts and wait for human integration and consumer CI before continuing the queue; writes require --apply"
     )]
     bump: bool,
 
@@ -809,7 +809,7 @@ struct MergeArgs {
     #[arg(
         long,
         value_name = "MINUTES",
-        help = "How long to wait for each deploy, for every repo (default: merge.timeout_minutes and merge.repo_timeout_minutes in the config)"
+        help = "How long to wait for deployments and active bump monitoring (default: merge.timeout_minutes; merge.repo_timeout_minutes can override deployments)"
     )]
     timeout_minutes: Option<u64>,
 

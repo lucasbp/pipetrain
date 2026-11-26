@@ -51,6 +51,27 @@ fn review_from_latest(reviews: &[&str]) -> Review {
     }
 }
 
+pub(super) fn review_at_head(node: &Value, sha: &str) -> Review {
+    let review = parse_review(node);
+    if review != Review::Approved || node["reviewDecision"] == "APPROVED" {
+        return review;
+    }
+    let approved = !sha.is_empty()
+        && node
+            .pointer("/latestOpinionatedReviews/nodes")
+            .and_then(Value::as_array)
+            .is_some_and(|reviews| {
+                reviews
+                    .iter()
+                    .any(|review| review["state"] == "APPROVED" && review["commit"]["oid"] == sha)
+            });
+    if approved {
+        Review::Approved
+    } else {
+        Review::None
+    }
+}
+
 fn parse_checks(node: &Value) -> Checks {
     match node
         .pointer("/commits/nodes/0/commit/statusCheckRollup/state")
@@ -203,4 +224,22 @@ fn parse_file(f: &Value) -> Option<ChangedFile> {
         None
     };
     Some(ChangedFile { path, patch })
+}
+
+#[cfg(test)]
+mod bump_reviews {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn an_implicit_approval_must_reference_the_current_head() {
+        let mut node = json!({"latestOpinionatedReviews":{"nodes":[{"state":"APPROVED","commit":{"oid":"earlier"}}]}});
+        assert_eq!(parse_review(&node), Review::Approved);
+        assert_eq!(review_at_head(&node, "head"), Review::None);
+        assert_eq!(review_at_head(&node, "earlier"), Review::Approved);
+        node["reviewDecision"] = "APPROVED".into();
+        assert_eq!(review_at_head(&node, "head"), Review::Approved);
+        node["reviewDecision"] = "REVIEW_REQUIRED".into();
+        assert_eq!(review_at_head(&node, "earlier"), Review::ReviewRequired);
+    }
 }

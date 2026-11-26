@@ -16,8 +16,8 @@ mod verdict;
 pub use archive::{Archival, ArchivedState, archived_beside};
 pub use estimate::{ApiEstimate, POLL_FLAT_STEPS, estimated_polls, poll_delay};
 pub use report::{
-    DeployOutcome, ExpectedRun, Kind, NotMerging, REPORT_SCHEMA, Report, Status, StepReport,
-    Summary,
+    BumpWait, DeployOutcome, ExpectedRun, Kind, NotMerging, REPORT_SCHEMA, Report, Status,
+    StepReport, Summary,
 };
 pub use storage::{PendingPreview, StatePreview, resolve_state_path};
 pub(crate) use verdict::settled_ids;
@@ -145,6 +145,10 @@ pub struct PublishedTarget {
     pub head: String,
     pub commit: Option<String>,
     pub update_requested_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_base: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_rejection: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

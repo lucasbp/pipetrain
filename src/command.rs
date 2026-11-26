@@ -561,7 +561,6 @@ fn build_plan_with_prepare(
         &opts.prs,
         &opts.orgs,
     )?;
-    let mut rules = Rules::new(&cfg)?;
     let deploy_branch = deploy_branch_for(&cfg, opts.date.as_deref())?;
     let explicit = explicit_targets(&prs, &cfg)?;
     let train = train_label(&explicit, opts.all, &deploy_branch);
@@ -591,6 +590,40 @@ fn build_plan_with_prepare(
         &selecting,
     )?;
     prepare(&mut client, &cfg, &mut discovered, &deploy_branch)?;
+    let logins = match &opts.authors {
+        AuthorFilter::Only(_) => selecting,
+        other => author_filter::resolve(&other.effective(&cfg), &mut client)?,
+    };
+    let built = plan_discovered(
+        discovered,
+        opts,
+        &cfg,
+        &mut client,
+        &explicit,
+        train,
+        deploy_branch,
+        profile,
+        &logins,
+        started,
+    )?;
+    drop(progress);
+    Ok((built, client, cfg))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_discovered(
+    discovered: Discovered,
+    opts: &PlanOptions,
+    cfg: &Config,
+    client: &mut Client,
+    explicit: &[PrKey],
+    train: String,
+    deploy_branch: String,
+    profile: plan::ProfileInfo,
+    logins: &[String],
+    started: Instant,
+) -> Result<Plan> {
+    let mut rules = Rules::new(cfg)?;
     let Discovered {
         ready,
         mut skipped,
@@ -598,36 +631,23 @@ fn build_plan_with_prepare(
     } = discovered;
 
     progress::phase(&format!("reading {} pull requests", ready.len()));
-    let (mut ready, merged) = contained::filter(&mut client, ready, &deploy_branch)?;
+    let (mut ready, merged) = contained::filter(client, ready, &deploy_branch)?;
     skipped.extend(merged);
 
-    load_files(&mut client, &mut ready)?;
+    load_files(client, &mut ready)?;
 
     progress::phase("checking contents");
-    let (ready, same) = content::filter(&mut client, ready, &deploy_branch)?;
+    let (ready, same) = content::filter(client, ready, &deploy_branch)?;
     skipped.extend(same);
 
-    let (ready, colliding) = collide(&client, ready);
+    let (ready, colliding) = collide(client, ready);
     skipped.extend(colliding);
 
-    let external = external_states(&mut client, &ready)?;
-    let scanned = scan_publishers(
-        &mut client,
-        &rules,
-        &ready,
-        &mut questions,
-        opts.check_feeds,
-    )?;
-    let release_context = release_context(
-        &mut client,
-        &cfg,
-        &rules,
-        &ready,
-        &scanned,
-        opts.check_bumps,
-    )?;
+    let external = external_states(client, &ready)?;
+    let scanned = scan_publishers(client, &rules, &ready, &mut questions, opts.check_feeds)?;
+    let release_context = release_context(client, cfg, &rules, &ready, &scanned, opts.check_bumps)?;
     let heads = if opts.check_bumps {
-        consumer_heads::Heads::read(&mut client, &release_context, &scanned.primary, &ready)
+        consumer_heads::Heads::read(client, &release_context, &scanned.primary, &ready)
     } else {
         Default::default()
     };
@@ -669,7 +689,7 @@ fn build_plan_with_prepare(
         publishers,
         references,
     };
-    let gathered = into_gathered(&cfg, &explicit, train, deploy_branch, &client, collected);
+    let gathered = into_gathered(cfg, explicit, train, deploy_branch, client, collected);
     let mut built = plan::build(&rules, gathered);
     restricted_feeds.apply(&mut built);
     release::annotate_with(
@@ -680,14 +700,11 @@ fn build_plan_with_prepare(
     );
     built.bumps = bumps;
     built.queued_bumps = queued_bumps;
-    built.deploy_resources = detect_deploy_resources(&mut client, &built);
+    built.deploy_resources = detect_deploy_resources(client, &built);
     built.profile = Some(profile);
-    let logins = match &opts.authors {
-        AuthorFilter::Only(_) => selecting,
-        other => author_filter::resolve(&other.effective(&cfg), &mut client)?,
-    };
+
     if !logins.is_empty() {
-        plan::hide_other_authors(&mut built, &logins);
+        plan::hide_other_authors(&mut built, logins);
     }
     if opts.check_feeds {
         built.stats.feed_checks = feed::annotate(&mut built, &mut feed::Checker::new());
@@ -702,6 +719,5 @@ fn build_plan_with_prepare(
     built.stats.cache_hits = client.cache_hits();
     built.stats.cache_misses = client.cache_misses();
     built.stats.elapsed_ms = elapsed::millis(started.elapsed());
-    drop(progress);
-    Ok((built, client, cfg))
+    Ok(built)
 }

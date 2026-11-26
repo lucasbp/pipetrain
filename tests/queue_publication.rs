@@ -1,6 +1,10 @@
 #[path = "queue_publication/api.rs"]
 mod api;
+#[path = "queue_publication/auto_resume.rs"]
+mod auto_resume;
 mod common;
+#[path = "queue_publication/edge_resume.rs"]
+mod edge_resume;
 #[path = "queue_publication/fixture.rs"]
 mod fixture;
 

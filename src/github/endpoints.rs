@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use super::cached;
 use super::client::Client;
 use super::error::ApiError;
-use super::parse::{parse_files, parse_pr, parse_search};
+use super::parse::{parse_files, parse_pr, parse_search, review_at_head};
 use crate::model::{ChangedFile, Pr, PrKey, PrState};
 use crate::planner::DepState;
 
@@ -121,7 +121,7 @@ fn encode_path(text: &str) -> String {
     out
 }
 
-const PR_FIELDS: &str = "number title url body headRefName baseRefName baseRef { target { oid } } headRefOid isDraft state reviewDecision mergeable mergeStateStatus author { login } labels(first: 50) { nodes { name } } repository { name owner { login } defaultBranchRef { name } } latestOpinionatedReviews(first: 20, writersOnly: true) { nodes { state } } commits(last: 1) { nodes { commit { statusCheckRollup { state contexts(first: 100) { nodes { __typename ... on CheckRun { name conclusion status detailsUrl } ... on StatusContext { context state targetUrl } } } } } } }";
+const PR_FIELDS: &str = "number title url body headRefName baseRefName baseRef { target { oid } } headRefOid isDraft state reviewDecision mergeable mergeStateStatus author { login } labels(first: 50) { nodes { name } } repository { name owner { login } defaultBranchRef { name } } latestOpinionatedReviews(first: 20, writersOnly: true) { nodes { state commit { oid } } } commits(last: 1) { nodes { commit { oid statusCheckRollup { state contexts(first: 100) { nodes { __typename ... on CheckRun { name conclusion status detailsUrl } ... on StatusContext { context state targetUrl } } } } } } }";
 
 struct OpenSearch {
     prs: Vec<Pr>,
@@ -391,17 +391,38 @@ impl Client {
     }
 
     pub fn pr(&mut self, key: &PrKey) -> Result<Option<Pr>> {
-        let query = format!(
-            "query($o: String!, $r: String!, $n: Int!) {{ repository(owner: $o, name: $r) {{ pullRequest(number: $n) {{ {PR_FIELDS} }} }} }}"
-        );
-        let response = self.graphql(
-            &format!("read {key}"),
-            &query,
-            json!({ "o": key.org, "r": key.repo, "n": key.number }),
-        )?;
+        let response = self.read_pull(key)?;
         Ok(response
             .pointer("/data/repository/pullRequest")
             .and_then(parse_pr))
+    }
+
+    pub(crate) fn pr_with_check_head(
+        &mut self,
+        key: &PrKey,
+    ) -> Result<Option<(Pr, Option<String>)>> {
+        let response = self.read_pull(key)?;
+        Ok(response
+            .pointer("/data/repository/pullRequest")
+            .and_then(|node| {
+                let mut pr = parse_pr(node)?;
+                pr.review = review_at_head(node, &pr.head_sha);
+                let oid = node
+                    .pointer("/commits/nodes/0/commit/oid")
+                    .and_then(Value::as_str);
+                Some((pr, oid.map(str::to_owned)))
+            }))
+    }
+
+    fn read_pull(&mut self, key: &PrKey) -> Result<Value> {
+        let query = format!(
+            "query($o: String!, $r: String!, $n: Int!) {{ repository(owner: $o, name: $r) {{ pullRequest(number: $n) {{ {PR_FIELDS} }} }} }}"
+        );
+        self.graphql(
+            &format!("read {key}"),
+            &query,
+            json!({ "o": key.org, "r": key.repo, "n": key.number }),
+        )
     }
 
     pub fn repo_in_org(&mut self, org: &str, repo: &str) -> Result<Option<String>> {

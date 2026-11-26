@@ -16,6 +16,7 @@ use crate::merge::{BumpBehind, Kind, Status, StepReport, Store};
 use crate::planner::behind::Need;
 
 mod published;
+pub(super) use published::requested_update;
 pub use published::{is_published_bump, published};
 
 const WORKSPACE_TIMEOUT: Duration = Duration::from_secs(600);

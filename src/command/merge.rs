@@ -37,6 +37,7 @@ mod package;
 mod parallel;
 mod queued;
 mod recovery;
+mod resume;
 mod settle;
 mod stacked;
 mod verbose;
@@ -100,7 +101,13 @@ pub struct Outcome {
 
 type PushReadingKey = (String, String, String, Vec<String>);
 
+struct Execution<'a> {
+    selection: &'a Plan,
+    landings: settle::Landings,
+}
+
 struct Env<'a> {
+    execution: &'a Execution<'a>,
     plan: &'a Plan,
     cfg: &'a Config,
     settings: &'a Settings,
@@ -374,7 +381,13 @@ fn merge_one(
     let proved_head = env
         .queued_bumps
         .iter()
-        .any(|contract| contract.id == item.id);
+        .any(|contract| contract.id == item.id)
+        || store.state.bump.as_ref().is_some_and(|journal| {
+            journal
+                .consumers
+                .get(&item.id)
+                .is_some_and(|entry| entry.prepared.is_some())
+        });
     if proved_head {
         report.admin_override = None;
     }
@@ -392,7 +405,19 @@ fn merge_one(
                 "GitHub mergeability is still unknown after 60s; no merge was attempted, run again to resume",
             );
         }
-        let pr = match client.pr(&key) {
+        let snapshot = if proved_head {
+            client.pr_with_check_head(&key).and_then(|snapshot| {
+                if let Some((pr, oid)) = &snapshot
+                    && let Some(reason) = queued::readiness_after_bump(pr, oid.as_deref())?
+                {
+                    bail!("{reason}");
+                }
+                Ok(snapshot.map(|(pr, _)| pr))
+            })
+        } else {
+            client.pr(&key)
+        };
+        let pr = match snapshot {
             Ok(Some(pr)) => pr,
             Ok(None) => return fail(report, "not found on GitHub"),
             Err(error) => return fail(report, format!("{error:#}")),
@@ -951,9 +976,14 @@ fn arrange(
     store: &Store,
     settings: &Settings,
     client: &mut Client,
+    include_inherited: bool,
 ) -> BTreeMap<String, Bundled> {
-    report.steps.splice(0..0, resume_steps(&store.state));
-    hold_unchanged_resumes(report, store, client);
+    if include_inherited {
+        report.steps.splice(0..0, resume_steps(&store.state));
+        hold_unchanged_resumes(report, store, client);
+    } else {
+        report.held.extend(store.state.pending.iter().cloned());
+    }
     let mut groups: BTreeMap<String, Bundled> = BTreeMap::new();
     if !settings.open_pr {
         return groups;
@@ -1006,7 +1036,7 @@ fn arrange(
             }
         }
     }
-    for recorded in &store.state.deploy_prs {
+    for recorded in store.state.deploy_prs.iter().filter(|_| include_inherited) {
         let target = open_target(&recorded.slug, &recorded.branch);
         if let Some(group) = groups.get_mut(&target) {
             for id in &recorded.ids {
@@ -1168,6 +1198,10 @@ pub fn merge_plan(
         store,
         hooks,
         &BTreeMap::new(),
+        &Execution {
+            selection: plan,
+            landings: Default::default(),
+        },
         false,
     )
 }
@@ -1181,10 +1215,11 @@ fn merge_plan_prepared(
     store: &mut Store,
     hooks: &mut Hooks,
     overrides: &BTreeMap<String, AdminOverride>,
+    execution: &Execution,
     compact: bool,
 ) -> Result<Outcome> {
     let mut outcome = merge_plan_inner(
-        plan, cfg, client, settings, store, hooks, overrides, compact,
+        plan, cfg, client, settings, store, hooks, overrides, execution, compact,
     )?;
     outcome.report.api_usage = client.usage();
     Ok(outcome)
@@ -1199,6 +1234,7 @@ fn merge_plan_inner(
     store: &mut Store,
     hooks: &mut Hooks,
     overrides: &BTreeMap<String, AdminOverride>,
+    execution: &Execution,
     compact: bool,
 ) -> Result<Outcome> {
     let method = method_of(settings, cfg)?;
@@ -1223,13 +1259,14 @@ fn merge_plan_inner(
         .cloned()
         .collect();
     let mut env = Env {
+        execution,
         plan,
         cfg,
         settings,
         method: &method,
         readings: RefCell::new(BTreeMap::new()),
         stacked: stacked::Evidence::default(),
-        landings: settle::Landings::default(),
+        landings: execution.landings.clone(),
         gates: gates::Answers::default(),
         queued_bumps: &queued_bumps,
     };
@@ -1285,7 +1322,7 @@ fn merge_plan_inner(
                     Some(env.push_reading(client, &key, &item.base, &item.sha, &item.sha));
             }
         }
-        let bundles = arrange(&mut report, plan, store, settings, client);
+        let bundles = arrange(&mut report, plan, store, settings, client, true);
         set_aside_inherited(&mut report, plan, &bundles, store, client);
         settle::annotate(&mut report.steps, plan, cfg, &store.state);
         report.api_estimate =
@@ -1331,17 +1368,38 @@ fn merge_plan_inner(
             code: emit::EXIT_QUESTIONS,
         });
     }
-    let bundles = arrange(&mut report, plan, store, settings, client);
+    let first_phase = std::ptr::eq(plan, execution.selection);
+    let bundles = arrange(&mut report, plan, store, settings, client, first_phase);
     set_aside_inherited(&mut report, plan, &bundles, store, client);
     settle::annotate(&mut report.steps, plan, cfg, &store.state);
-    let behind_work = settings.bump_behind.is_some()
+    let behind_work = first_phase
+        && settings.bump_behind.is_some()
         && (!named.is_empty()
             || store
                 .state
                 .bump_behind
                 .iter()
                 .any(|entry| entry.publication.is_none()));
-    if report.steps.is_empty() && !behind_work && queued_bumps.is_empty() {
+    let edge_waiters: Vec<_> = plan
+        .skipped
+        .iter()
+        .filter(|entry| {
+            settings.bump
+                && !entry.hidden
+                && !entry
+                    .reasons
+                    .iter()
+                    .any(|r| r == "already merged" || r.starts_with("already in "))
+                && store.state.bump.as_ref().is_some_and(|journal| {
+                    journal
+                        .consumers
+                        .get(&entry.id)
+                        .is_some_and(|marker| marker.prepared.is_some())
+                })
+        })
+        .collect();
+    if report.steps.is_empty() && !behind_work && queued_bumps.is_empty() && edge_waiters.is_empty()
+    {
         return Ok(Outcome {
             report,
             aborted: false,
@@ -1381,7 +1439,7 @@ fn merge_plan_inner(
     );
     let mut behind_steps = Vec::new();
     let mut behind_halt: Option<String> = None;
-    if let Some(options) = &settings.bump_behind {
+    if first_phase && let Some(options) = &settings.bump_behind {
         let mut gateway = behind::GithubGateway {
             client: &mut *client,
             cfg,
@@ -1435,6 +1493,11 @@ fn merge_plan_inner(
     if cfg.max_parallel > 1
         || settings.bump
         || resuming_publisher
+        || store.state.bump.as_ref().is_some_and(|j| {
+            j.consumers
+                .values()
+                .any(|m| m.prepared.is_some() || !m.completed)
+        })
         || !queued_bumps.is_empty()
         || plan
             .items
@@ -1460,6 +1523,48 @@ fn merge_plan_inner(
                 continue;
             }
             let (step, _) = queued::prepare(&env, contract, client, store, stopped_by.as_deref());
+            (hooks.observe)(&step);
+            report.steps.push(step);
+        }
+        if let Some(blocker) = &stopped_by
+            && report.steps.iter().any(|step| step.wait.is_some())
+        {
+            report.stopped = Some(format!(
+                "the scheduler stopped at {blocker}; resolve it before resuming bump monitoring"
+            ));
+        }
+        for entry in edge_waiters {
+            let id = &entry.id;
+            if stopped_by.is_some() {
+                break;
+            }
+            let mut step = match bump::waiting_consumer(id, store, client, cfg) {
+                Ok(Some(step)) => step,
+                Ok(None) => continue,
+                Err(error) => StepReport::new(
+                    Kind::Bump,
+                    id,
+                    Status::Stopped,
+                    &format!("cannot verify consumer bump: {error:#}"),
+                ),
+            };
+            if matches!(step.wait, Some(crate::merge::BumpWait::Readiness { .. }))
+                && !entry.reasons.iter().all(|reason| {
+                    queued::pending_signal(reason)
+                        || matches!(
+                            reason.as_str(),
+                            "branch protection blocks merge (BLOCKED)"
+                                | "checks are not passing (UNSTABLE)"
+                        )
+                })
+            {
+                step.wait = None;
+                step.detail = format!(
+                    "{}; held by the plan: {}",
+                    step.detail,
+                    entry.reasons.join(", ")
+                );
+            }
             (hooks.observe)(&step);
             report.steps.push(step);
         }
@@ -1635,8 +1740,12 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
     let started = Instant::now();
     let json = opts.plan.json;
     let mut overrides = BTreeMap::new();
+    let mut confirmed_selection = resume::Selection::default();
     let (built, mut client, cfg) =
         build_plan_with_prepare(&opts.plan, |client, cfg, discovered, train| {
+            if opts.bump && opts.apply {
+                confirmed_selection = resume::Selection::capture(discovered);
+            }
             if opts.admin {
                 let method = opts
                     .method
@@ -1706,7 +1815,11 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
     let live = crate::progress::detect(!opts.plan.progress, json, false);
     let display = RefCell::new(None);
     let execution_started = RefCell::new(None);
+    let mut confirmed = false;
     let mut confirm = |text: &str| {
+        if confirmed {
+            return true;
+        }
         if yes && !json && !admin_notice.is_empty() {
             eprint!("{admin_notice}");
         }
@@ -1716,13 +1829,14 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
             Some(ask(
                 text,
                 if opts.bump {
-                    "Merge these PRs and prepare draft dependency bump PRs where publication is proved, blocking consumers for CI and review? Type yes: "
+                    "Merge these PRs and prepare draft dependency bump PRs where publication is proved, then automatically continue these PRs after human bump integration and green consumer CI? Type yes: "
                 } else {
                     "Merge these PRs with the configured parallelism, waiting for each deploy? Type yes: "
                 },
             ))
         };
         let proceed = gate(apply, yes, interactive, answer.as_deref()) == Gate::Proceed;
+        confirmed = proceed;
         if proceed {
             let started = *execution_started
                 .borrow_mut()
@@ -1731,7 +1845,7 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
         }
         proceed
     };
-    let mut at_gate = |text: &str| {
+    let at_gate = |text: &str| {
         display.borrow_mut().take();
         if !interactive {
             return false;
@@ -1761,6 +1875,28 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
         }
         proceed
     };
+    let mut gate_answers = BTreeMap::new();
+    let mut gate_once = |text: &str| {
+        if let Some(answer) = gate_answers.get(text) {
+            return *answer;
+        }
+        if text.starts_with(gates::BATCH)
+            && text
+                .lines()
+                .skip(1)
+                .all(|line| gate_answers.contains_key(&format!("{}{}", gates::ITEM, line.trim())))
+        {
+            return false;
+        }
+        let answer = at_gate(text);
+        gate_answers.insert(text.to_owned(), answer);
+        if answer && text.starts_with(gates::BATCH) {
+            for line in text.lines().skip(1) {
+                gate_answers.insert(format!("{}{}", gates::ITEM, line.trim()), true);
+            }
+        }
+        answer
+    };
     let mut pause = |wait: Duration| std::thread::sleep(wait);
     let full = opts.plan.verbose;
     let mut observe = |step: &StepReport| {
@@ -1776,12 +1912,16 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
     let mut progress = |text: &str| crate::progress::phase(text);
     let mut hooks = Hooks {
         confirm: &mut confirm,
-        gate: &mut at_gate,
+        gate: &mut gate_once,
         sleep: &mut pause,
         now: &Instant::now,
         observe: &mut observe,
         progress: &mut progress,
         runner: None,
+    };
+    let execution = Execution {
+        selection: &built,
+        landings: Default::default(),
     };
     let mut outcome = merge_plan_prepared(
         &built,
@@ -1791,11 +1931,31 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
         &mut store,
         &mut hooks,
         &overrides,
+        &execution,
         !full,
     )?;
+    if settings.apply
+        && settings.bump
+        && outcome.report.applied
+        && let Err(error) = resume::follow(
+            &mut outcome,
+            confirmed_selection,
+            &execution,
+            &opts.plan,
+            &cfg,
+            &mut client,
+            &settings,
+            &mut store,
+            &mut hooks,
+            !full,
+        )
+    {
+        outcome.report.stopped = Some(format!("cannot continue bump monitoring: {error:#}"));
+        outcome.code = crate::merge::EXIT_STOPPED;
+    }
     if opts.plan.strict
         && outcome.code == 0
-        && (!built.has_eligible()
+        && (!built.has_eligible() && outcome.report.summary.merged == 0
             || (!opts.apply
                 && !outcome
                     .report
