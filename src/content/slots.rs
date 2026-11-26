@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use anyhow::Result;
 
@@ -62,19 +62,25 @@ pub fn unknown(slots: &[Slot], readings: &[Reading]) -> Vec<Slot> {
 }
 
 pub fn ask(client: &mut Client, lookups: &[Probe], readings: &mut [Reading]) -> Result<()> {
-    let pending: Vec<usize> = readings
-        .iter()
-        .enumerate()
-        .filter(|(_, reading)| reading.is_none())
-        .map(|(index, _)| index)
-        .collect();
-    for indexes in pending.chunks(MAX_LOOKUPS) {
-        let chunk: Vec<Probe> = indexes.iter().map(|&i| lookups[i].clone()).collect();
-        let (query, variables) = build_query(&chunk);
+    let mut positions = HashMap::<&Probe, Vec<usize>>::new();
+    let mut pending = Vec::new();
+    for (index, probe) in lookups.iter().enumerate() {
+        if readings[index].is_none() {
+            let indexes = positions.entry(probe).or_default();
+            if indexes.is_empty() {
+                pending.push(probe.clone());
+            }
+            indexes.push(index);
+        }
+    }
+    for chunk in pending.chunks(MAX_LOOKUPS) {
+        let (query, variables) = build_query(chunk);
         let response =
             client.graphql("compare PR file content with the base", &query, variables)?;
-        for (&index, reading) in indexes.iter().zip(parse(&response, chunk.len())) {
-            readings[index] = reading;
+        for (probe, reading) in chunk.iter().zip(parse(&response, chunk.len())) {
+            for &index in &positions[probe] {
+                readings[index] = reading.clone();
+            }
         }
     }
     Ok(())

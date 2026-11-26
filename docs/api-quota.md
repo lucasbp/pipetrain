@@ -53,24 +53,23 @@ Exit code 6 is not used by anything else (0 ok, 1 error, 2 usage, 3 questions, 4
 ## Cheap polling
 
 - Reads send `If-None-Match` and `If-Modified-Since` when the cache holds a validator. A `304 Not Modified` is refunded: it does not count against `max_requests` or the spent counters, and it is reported as `not_modified`. It still takes a slot in the `max_per_minute` and `max_per_second` pacing, because the request did reach GitHub and the pacing only bounds the rate of requests sent.
-- While waiting for a deploy, once every expected workflow has a run, only runs that are not `completed` are read, one by id (`GET /repos/{slug}/actions/runs/{id}`) instead of listing the runs of the SHA again. Chained workflows and runs without an id keep the list read.
+- When a complete list covers all expected workflows and exactly one run is still active, polling can read that run by ID. With multiple active runs, chained workflows, missing IDs or a partial list, it reads the list for the SHA. Confirming success or a skipped deploy always reads the list again so that reruns are visible.
 - `api.max_requests` counts every request of the run, polling included, so it bounds a long wait too. The poll interval is adaptive: the configured interval in the normal case, the backoff above when a resource is below the reserve.
 
 ## The persistent cache
 
-Entries live in the user cache directory (`PIPETRAIN_CACHE_DIR` overrides it) under `http/`, next to the older file and tree cache, and are pruned with it (14 days, 32 MiB). It is shared by every command.
+CLI processes and MCP share JSON entries in the user cache directory (`PIPETRAIN_CACHE_DIR` overrides it). Both the HTTP cache and the revision-keyed cache live under `github/<scope>/`. The scope hashes the API base URL, resolved profile name and token. Switching any of them starts a separate cache. Older unscoped entries age out under the same global pruning policy (14 days, 32 MiB of JSON).
 
-- **Key**: method, URL and body. For GraphQL the body is the query plus its variables, so the same query with other variables is another entry. A hash of the token is part of the key, so two accounts never share an entry.
-- **Never stored**: the token and any `Authorization` header. Only status-200 bodies with no GraphQL `errors` and no cut-short search (fewer nodes than `issueCount` with no next page), the `ETag` and the `Last-Modified` are written.
-- **Freshness**:
+- A cached HTTP GET is keyed by its full URL, including query parameters. Entries can contain successful response bodies, ETags and Last-Modified dates. Raw PR file pages can contain patches and are excluded. GitHub tokens and authorization headers are excluded.
+- The revision-keyed cache stores paths, manifest and workflow text, and object IDs as ordinary JSON. A PR file list can be reused when the PR number and both the base and head SHAs match and the planner does not need a manifest patch.
 
 | Kind | Rule |
 |---|---|
-| PR, reviews, checks, PR lists and GraphQL reads while a plan is being built | Fresh for 60 seconds; after that they are revalidated with the validator. |
-| Tree, blob and file by SHA (`/git/trees/<sha>`, `/git/blobs/<sha>`, `/contents/...?ref=<sha>`) | Immutable, never refetched. |
-| Anything read after the plan is built (merge execution, deploy polling, bundle apply) | Never served by TTL: revalidated by `ETag`, or fetched. |
+| PR discovery, reviews, checks, branch tips, comparisons, execution and polling | Each command reads mutable state from GitHub. REST can revalidate with a validator. Live GraphQL requests fetch their result. |
+| Tree, blob and file by SHA (`/git/trees/<sha>`, `/git/blobs/<sha>`, `/contents/...?ref=<sha>`) | Immutable entries can be reused while present. |
+| File-content comparisons | Within a comparison, each repository and Git expression is queried once. Head object IDs tied to a revision can be reused across commands. Branch expressions are evaluated again. |
 
-The last row is why a merge never acts on a minute-old PR state.
+The quota probe calls `GET /rate_limit` directly. It adds a network round trip outside the spent counters. A conditional GET answered with 304 also reaches the server and increments the separate `not_modified` counter.
 
 ## Counters
 

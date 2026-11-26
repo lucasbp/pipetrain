@@ -3556,6 +3556,57 @@ fn workflow_run(path: &str, name: &str, status: &str, conclusion: Option<&str>) 
     run
 }
 
+#[test]
+fn parallel_workflow_polls_discover_reruns_on_confirmation() {
+    for rerun in [false, true] {
+        let mut rig = Rig::new("");
+        rig.script().workflows = vec![
+            ("deploy.yml".into(), "on: push".into()),
+            ("publish.yml".into(), "on: push".into()),
+        ];
+        let script = rig.script.clone();
+        let sample = std::cell::Cell::new(0);
+        rig.server = serve_requests(move |line, payload| {
+            let Some(route) = line.strip_prefix("GET /repos/acme/api/actions/runs") else {
+                return respond(&script, line, payload);
+            };
+            let poll = sample.replace(sample.get() + 1);
+            let mut runs = Vec::new();
+            for (id, name) in [(11_u64, "deploy"), (12, "publish")] {
+                let mut run = if poll == 0 {
+                    run_json(name, "in_progress", None)
+                } else {
+                    run_json(name, "completed", Some("success"))
+                };
+                run["id"] = json!(id);
+                run["path"] = json!(format!(".github/workflows/{name}.yml"));
+                if route == format!("/{id}") {
+                    return (200, run);
+                }
+                runs.push(run);
+            }
+            assert_eq!(route, format!("?head_sha={}&per_page=100", merge_sha(1)));
+            if rerun && poll >= 2 {
+                runs[0]["id"] = json!(13);
+                runs[0]["conclusion"] = json!("failure");
+            }
+            (
+                200,
+                json!({"total_count": runs.len(), "workflow_runs": runs}),
+            )
+        });
+        let run = rig.go(&plan_on(&[1]));
+        let expected = if rerun { Status::Failed } else { Status::Done };
+        assert_eq!(run.step(0).status, expected);
+        assert_eq!(rig.polls(), 3);
+        assert!(
+            rig.lines()
+                .iter()
+                .all(|line| !line.contains("/actions/runs/"))
+        );
+    }
+}
+
 fn short_deploy(rig: &mut Rig) -> Run {
     rig.run(
         &plan_on(&[1]),
@@ -3567,6 +3618,24 @@ fn short_deploy(rig: &mut Rig) -> Run {
         true,
     )
     .unwrap()
+}
+
+#[test]
+fn confirmation_sees_a_failed_rerun_while_an_auxiliary_run_is_active() {
+    let mut rig = Rig::new("");
+    let green = run_with(10, 1, "completed", Some("success"));
+    let mut auxiliary = run_with(11, 2, "in_progress", None);
+    auxiliary["path"] = json!(".github/workflows/lint.yml");
+    rig.script().run_readings = [vec![green, auxiliary.clone()]].into();
+    rig.script().runs = vec![run_with(12, 1, "completed", Some("failure")), auxiliary];
+    let run = short_deploy(&mut rig);
+    assert_eq!(run.step(0).status, Status::Failed);
+    assert_eq!(rig.polls(), 2);
+    assert!(
+        rig.lines()
+            .iter()
+            .all(|line| !line.contains("/actions/runs/"))
+    );
 }
 
 fn chained_workflows(name: &str, trigger: &str) -> Vec<(String, String)> {
@@ -3848,9 +3917,13 @@ fn incomplete_run_response_never_confirms_even_with_expected_green() {
     for read in [1, 100] {
         let mut rig = Rig::new("");
         let state = FilterState::attach(&mut rig);
-        rig.script().runs = (0..read)
-            .map(|_| workflow_run("deploy.yml", "Deploy", "completed", Some("success")))
+        let green: Vec<_> = (1..=read)
+            .map(|id| run_with(id, id, "completed", Some("success")))
             .collect();
+        let mut first = green.clone();
+        first[0] = run_with(1, 1, "in_progress", None);
+        rig.script().run_readings = [first].into();
+        rig.script().runs = green;
         rig.script().run_total = Some(read + 1);
         let run = short_deploy(&mut rig);
         assert_eq!(run.step(0).status, Status::Stopped);
@@ -3859,6 +3932,11 @@ fn incomplete_run_response_never_confirms_even_with_expected_green() {
                 .contains("workflow run response is incomplete; cannot confirm deploy")
         );
         assert_eq!(state.reopen().state.pending.len(), 1);
+        assert!(
+            rig.lines()
+                .iter()
+                .all(|line| !line.contains("/actions/runs/"))
+        );
     }
 }
 

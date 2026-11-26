@@ -503,7 +503,7 @@ pub fn execute(opts: &BumpOptions) -> Result<Outcome> {
         bail!("--to needs a version");
     }
     let mut client = Client::new(github::token()?, &cfg.api, opts.verbose)
-        .with_cache(Cache::at_default(opts.cache));
+        .with_profile_cache(Cache::at_default(opts.cache), &resolved.info.name);
     let progress = Progress::start(opts.progress);
     let scanned = scan(&mut client, &names, &opts.package, ecosystem)?;
     drop(progress);

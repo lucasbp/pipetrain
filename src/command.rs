@@ -521,8 +521,9 @@ fn build_plan_with_prepare(
     let train = train_label(&explicit, opts.all, &deploy_branch);
 
     let mut client = Client::new(github::token()?, &cfg.api, opts.verbose)
-        .with_cache(Cache::at_default(opts.cache))
+        .with_profile_cache(Cache::at_default(opts.cache), &profile.name)
         .with_http_cache();
+    client.set_live(true);
     crate::quota::refuse(
         &mut client,
         &cfg.api,
@@ -623,7 +624,6 @@ fn build_plan_with_prepare(
     built.stats.not_modified = usage.not_modified;
     built.stats.cache_hits = client.cache_hits();
     built.stats.cache_misses = client.cache_misses();
-    client.set_live(true);
     built.stats.elapsed_ms = elapsed::millis(started.elapsed());
     drop(progress);
     Ok((built, client, cfg))
