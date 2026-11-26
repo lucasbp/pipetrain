@@ -42,10 +42,12 @@ fn wait_lines(plan: &Plan, item: &Item) -> Vec<String> {
         if plan.items.iter().any(|i| i.id == dep.id) {
             let wait = waits.entry((package, dep.version.as_deref())).or_default();
             wait.from.insert(dep.id.as_str());
-            if wait.published.is_none() && wait.error.is_none() {
-                wait.published = dep.published;
-                wait.error = dep.feed_error.as_deref();
-            }
+            wait.error = wait.error.or(dep.feed_error.as_deref());
+            wait.published = match (wait.published, dep.published, wait.error) {
+                (_, _, Some(_)) => None,
+                (Some(false), _, _) | (_, Some(false), _) => Some(false),
+                (previous, current, _) => previous.or(current),
+            };
         }
     }
     waits

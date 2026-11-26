@@ -117,16 +117,14 @@ fn report(analysis: &Analysis, names: &Names, questions: &[Question]) -> Suggest
     }
 }
 
-type Manifests = Vec<(String, String, String)>;
-
 pub(crate) fn read_repo(
     client: &mut Client,
     repo: &str,
     questions: &mut Vec<Question>,
-) -> Result<Option<Manifests>> {
+) -> Result<Option<super::RepoSnapshot>> {
     let read = client
         .default_branch_sha(repo)
-        .and_then(|sha| super::scan_repo(client, repo, &sha, questions));
+        .and_then(|sha| super::scan_repo_with_tree(client, repo, &sha, questions));
     match read {
         Ok(manifests) => Ok(Some(manifests)),
         Err(error) if is_not_found(&error) => Ok(None),
@@ -150,7 +148,7 @@ pub fn suggest(client: &mut Client, names: &Names) -> Result<Suggestion> {
     for (index, (slug, repo)) in names.iter().enumerate() {
         match read_repo(client, repo, &mut questions)? {
             Some(found) => {
-                manifests.extend(found);
+                manifests.extend(found.manifests);
                 readable.insert(slug.clone(), repo.clone());
             }
             None => warnings.push(format!(

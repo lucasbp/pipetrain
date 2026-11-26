@@ -321,3 +321,274 @@ fn when_no_repo_can_be_read_the_scan_fails() {
     let error = result.unwrap_err().to_string();
     assert!(error.contains("no repo could be read"), "{error}");
 }
+
+#[test]
+fn manifest_pins_share_the_scan_and_apply_rules() {
+    let cases = [
+        (
+            Ecosystem::Cargo,
+            "demo",
+            "Cargo.toml",
+            "[package]\nname='demo'\nversion='1.0.0'\n[dependencies]\ndemo='=1.0.0'\n[dev-dependencies]\ndemo='1.0.0'\n[target.'cfg(unix)'.dependencies.renamed]\npackage='demo'\nversion='= 1.8.0'\n",
+            "=1.0.0",
+            "2.0.0",
+            2,
+        ),
+        (
+            Ecosystem::Pypi,
+            "Demo_Pkg",
+            "pyproject.toml",
+            "[project]\nname='demo-pkg'\nversion='1.0.0'\ndependencies=['Demo.Pkg[env] (==1.0.0) ; python_version < \"4\"', 'demo_pkg>=1.0.0']\n[tool.poetry.group.dev.dependencies]\ndemo-pkg={version='1.8.0',optional=true}\n",
+            "==1.0.0",
+            "2.0.0rc1",
+            2,
+        ),
+        (
+            Ecosystem::Go,
+            "example.org/Demo",
+            "go.mod",
+            "module example.org/user\r\nrequire (\r\n\texample.org/Demo v1.0.0 // indirect\r\n\texample.org/demo v1.0.0\r\n)\r\n",
+            "v1.0.0",
+            "v1.2.0",
+            1,
+        ),
+    ];
+    for (ecosystem, package, file, manifest, current, target, changes) in cases {
+        let repo = "acme/client";
+        let server = serve([(repo.to_owned(), files(&[(file, manifest)]))].into());
+        let scan = bump::scan(&mut client(&server), &names(&[repo]), package, ecosystem).unwrap();
+        let report = Report::build(package, ecosystem, target, &scan.repos);
+        assert_eq!(report.count(Status::Change), changes);
+        let pinned =
+            bump::pin_manifest(ecosystem, manifest, package, target, &[current.to_owned()])
+                .unwrap();
+        let expected = match ecosystem {
+            Ecosystem::Cargo => manifest.replace("demo='=1.0.0'", "demo='=2.0.0'"),
+            Ecosystem::Pypi => manifest.replace("(==1.0.0)", "(==2.0.0rc1)"),
+            Ecosystem::Go => manifest.replace("Demo v1.0.0", "Demo v1.2.0"),
+            _ => unreachable!(),
+        };
+        assert_eq!(pinned, expected);
+        assert!(
+            bump::pin_manifest(ecosystem, &pinned, package, target, &[current.to_owned()]).is_err()
+        );
+    }
+}
+
+#[test]
+fn indirect_sources_and_ambiguous_versions_require_a_manual_choice() {
+    let cases = [
+        (
+            Ecosystem::Cargo,
+            "demo",
+            "2.0.0",
+            "Cargo.toml",
+            "[dependencies]\ndemo='=1.0.0'\n[patch.crates-io]\ndemo={path='../demo'}",
+        ),
+        (
+            Ecosystem::Cargo,
+            "demo",
+            "2.0.0",
+            "Cargo.toml",
+            "[dependencies]\ndemo={version='=1.0.0', registry='private'}",
+        ),
+        (
+            Ecosystem::Pypi,
+            "demo",
+            "2.0.0",
+            "pyproject.toml",
+            "[project]\ndependencies=['demo==1.0.0']\n[tool.uv.sources]\ndemo={workspace=true}",
+        ),
+        (
+            Ecosystem::Pypi,
+            "demo",
+            "2.0.0",
+            "pyproject.toml",
+            "[project]\ndependencies=['demo @ file:///local', 'demo==1.*','demo>=1,<2']",
+        ),
+        (
+            Ecosystem::Go,
+            "example.org/d",
+            "v1.1.0",
+            "go.mod",
+            "require example.org/d v1.0.0\nreplace (\nexample.org/d => ./d\n)",
+        ),
+        (
+            Ecosystem::Go,
+            "example.org/d",
+            "v1.1.0",
+            "go.mod",
+            "require example.org/d v1.0.0\nexclude example.org/d v1.1.0",
+        ),
+        (
+            Ecosystem::Go,
+            "example.org/d",
+            "v2.0.0",
+            "go.mod",
+            "require example.org/d v1.0.0",
+        ),
+        (
+            Ecosystem::Go,
+            "example.org/d/v2",
+            "v2.1.0",
+            "go.mod",
+            "require example.org/d/v2 v2.0.0-20260101010000-abcdef123456",
+        ),
+    ];
+    for (ecosystem, package, target, path, body) in cases {
+        let manifests = vec![("acme/client".into(), path.into(), body.into())];
+        let refs = bump::refs_of(&manifests, package, ecosystem);
+        assert!(!refs.is_empty(), "{body}");
+        let repo = RepoRefs {
+            repo: "acme/client".into(),
+            refs,
+        };
+        let report = Report::build(package, ecosystem, target, &[repo]);
+        assert_eq!(
+            report.count(Status::Range),
+            report.repos[0].files.len(),
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn duplicate_pins_are_rechecked_and_pep440_levels_follow_release_components() {
+    let text = "[project]\ndependencies=['demo==1.0rc1','demo==1.0rc1','demo==1.1']";
+    let refs = bump::refs_of(
+        &[("acme/web".into(), "pyproject.toml".into(), text.into())],
+        "demo",
+        Ecosystem::Pypi,
+    );
+    let repo = RepoRefs {
+        repo: "acme/web".into(),
+        refs,
+    };
+    let report = Report::build("demo", Ecosystem::Pypi, "1.1.post1", &[repo])
+        .restrict(&[bump::Level::Minor]);
+    assert_eq!(report.count(Status::Change), 2);
+    assert_eq!(report.count(Status::OtherLevel), 1);
+    let pin = "==1.0rc1".to_owned();
+    assert!(
+        bump::pin_manifest(
+            Ecosystem::Pypi,
+            text,
+            "demo",
+            "1.1.post1",
+            std::slice::from_ref(&pin)
+        )
+        .is_err()
+    );
+    let updated = bump::pin_manifest(
+        Ecosystem::Pypi,
+        text,
+        "demo",
+        "1.1.post1",
+        &[pin.clone(), pin],
+    )
+    .unwrap();
+    assert_eq!(updated, text.replace("1.0rc1", "1.1.post1"));
+}
+
+#[test]
+fn workspace_sources_affect_only_the_selected_package_and_members() {
+    let cargo =
+        "[workspace]\nmembers=['crates/*']\n[patch.crates-io]\nexample={path='vendor/example'}";
+    let python = "[tool.uv.workspace]\nmembers=['crates/*']\nexclude=['crates/isolated']\n[tool.uv.sources]\nexample={workspace=true}";
+    for (eco, file, root, member) in [
+        (
+            Ecosystem::Cargo,
+            "Cargo.toml",
+            cargo,
+            "[dependencies]\nexample='=1.0.0'",
+        ),
+        (
+            Ecosystem::Pypi,
+            "pyproject.toml",
+            python,
+            "[project]\ndependencies=['example==1.0.0']",
+        ),
+    ] {
+        let path = format!("crates/child/{file}");
+        let tree = vec![file.to_owned(), path.clone()];
+        let read = |p: &str| {
+            assert_eq!(p, file);
+            Ok(root.to_owned())
+        };
+        assert!(bump::check_workspace_sources(eco, "example", &path, member, &tree, read).is_err());
+        assert!(bump::check_workspace_sources(eco, "other", &path, member, &tree, read).is_ok());
+        if eco == Ecosystem::Pypi {
+            assert!(
+                bump::check_workspace_sources(
+                    eco,
+                    "example",
+                    "crates/isolated/pyproject.toml",
+                    member,
+                    &tree,
+                    read
+                )
+                .is_ok()
+            );
+        }
+        let refs = bump::refs_of(
+            &[
+                ("acme/app".into(), file.into(), root.into()),
+                ("acme/app".into(), path.clone(), member.into()),
+            ],
+            "example",
+            eco,
+        );
+        assert!(
+            refs.iter()
+                .any(|(p, s)| p == &path && s.starts_with("manual:"))
+        );
+    }
+}
+
+#[test]
+fn incomplete_manifest_scans_cannot_schedule_a_partial_update() {
+    let mut files = BTreeMap::new();
+    files.insert(
+        "Cargo.toml".to_owned(),
+        "[dependencies]\nexample='=1.0.0'".to_owned(),
+    );
+    for i in 0..pipetrain::publishers::MAX_MANIFESTS_PER_REPO {
+        files.insert(
+            format!("crates/{i}/Cargo.toml"),
+            "[package]\nname='example'".to_owned(),
+        );
+    }
+    let server = serve([("acme/app".to_owned(), files)].into());
+    let scan = bump::scan(
+        &mut client(&server),
+        &names(&["acme/app"]),
+        "example",
+        Ecosystem::Cargo,
+    )
+    .unwrap();
+    let report = Report::build("example", Ecosystem::Cargo, "2.0.0", &scan.repos);
+    assert_eq!(report.count(Status::Range), 1);
+    assert_eq!(report.count(Status::Change), 0);
+    assert!(scan.warnings.iter().any(|w| w.contains("incomplete")));
+}
+
+#[test]
+fn explicit_workspace_checks_its_own_lock_and_source_configuration() {
+    let member = "[package]\nworkspace='../workspace'\n[dependencies]\nexample='=1.0.0'";
+    for file in ["Cargo.lock", ".cargo/config.toml"] {
+        let files = vec![
+            "member/Cargo.toml".to_owned(),
+            "workspace/Cargo.toml".to_owned(),
+            format!("workspace/{file}"),
+        ];
+        let result = bump::check_workspace_sources(
+            Ecosystem::Cargo,
+            "example",
+            "member/Cargo.toml",
+            member,
+            &files,
+            |_| Ok("[workspace]".to_owned()),
+        );
+        assert!(result.unwrap_err().to_string().contains(file));
+    }
+}

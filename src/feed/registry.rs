@@ -6,13 +6,16 @@ use anyhow::{Result, bail};
 use serde_json::Value;
 use ureq::Agent;
 
-use crate::feed::{self, Ecosystem, Report};
+use crate::feed::{self, Coordinate, Ecosystem, Report};
 use crate::{github, hint};
+
+mod registries;
+pub(crate) use registries::{exclude_go_retractions, validate_version};
 
 const NPM_ACCEPT: &str = "application/vnd.npm.install-v1+json";
 
-enum Outcome {
-    Body(Value),
+enum Outcome<T = Value> {
+    Body(T),
     NotFound,
     Refused { had_token: bool },
 }
@@ -45,14 +48,26 @@ impl Session {
         if !feed::is_github_packages(url) {
             return None;
         }
-        let token = self.token()?;
-        Some(match ecosystem {
-            Ecosystem::Npm => feed::bearer(token),
-            Ecosystem::Nuget => feed::basic(token),
-        })
+        match ecosystem {
+            Ecosystem::Npm => self.token().map(feed::bearer),
+            Ecosystem::Nuget => self.token().map(feed::basic),
+            _ => None,
+        }
     }
 
     fn get(&self, ecosystem: Ecosystem, url: &str) -> Result<Outcome> {
+        self.get_body(ecosystem, url, |body| {
+            body.read_json()
+                .map_err(|_| anyhow::anyhow!("{} did not answer with valid JSON", feed::host(url)))
+        })
+    }
+
+    fn get_body<T>(
+        &self,
+        ecosystem: Ecosystem,
+        url: &str,
+        decode: impl FnOnce(&mut ureq::Body) -> Result<T>,
+    ) -> Result<Outcome<T>> {
         let authorization = self.authorization(ecosystem, url);
         let mut request = self.agent.get(url);
         if ecosystem == Ecosystem::Npm {
@@ -73,12 +88,9 @@ impl Session {
             Err(other) => bail!("request failed: {host}: {other}"),
         };
         match response.status().as_u16() {
-            200..=299 => response
-                .body_mut()
-                .read_json::<Value>()
-                .map(Outcome::Body)
-                .map_err(|_| anyhow::anyhow!("{host} did not answer with valid JSON")),
+            200..=299 => decode(response.body_mut()).map(Outcome::Body),
             404 => Ok(Outcome::NotFound),
+            410 if ecosystem == Ecosystem::Go => Ok(Outcome::NotFound),
             401 | 403 => Ok(Outcome::Refused {
                 had_token: authorization.is_some(),
             }),
@@ -149,12 +161,17 @@ pub(crate) fn fetch(
     session: &Session,
     ecosystem: Ecosystem,
     package: &str,
+    version: Option<&str>,
     org: Option<&str>,
     registry: Option<&str>,
 ) -> Result<Fetched> {
+    registries::validate_version(ecosystem, version)?;
     match ecosystem {
         Ecosystem::Npm => fetch_npm(session, package, org, registry),
         Ecosystem::Nuget => fetch_nuget(session, package, org, registry),
+        Ecosystem::Cargo | Ecosystem::Pypi | Ecosystem::Go => {
+            registries::fetch(session, ecosystem, package, version, registry)
+        }
     }
 }
 
@@ -168,7 +185,7 @@ pub enum Check {
 pub struct Checker {
     session: Session,
     registry: Option<String>,
-    memo: BTreeMap<(String, String), Check>,
+    memo: BTreeMap<(Coordinate, Option<String>), Check>,
 }
 
 impl Default for Checker {
@@ -200,17 +217,28 @@ impl Checker {
     }
 
     pub fn check(&mut self, package: &str, version: &str, org: Option<&str>) -> Check {
-        let key = (package.to_string(), version.to_string());
+        let coordinate = Coordinate {
+            ecosystem: Ecosystem::default_for(package),
+            package: package.to_string(),
+            version: version.to_string(),
+        };
+        self.check_coordinate(&coordinate, org)
+    }
+
+    pub(crate) fn check_coordinate(&mut self, coordinate: &Coordinate, org: Option<&str>) -> Check {
+        let key = (coordinate.clone(), org.map(str::to_owned));
         if let Some(known) = self.memo.get(&key) {
             return known.clone();
         }
-        let outcome = self.lookup(package, version, org);
+        let outcome = self.lookup(coordinate, org);
         self.memo.insert(key, outcome.clone());
         outcome
     }
 
-    fn lookup(&self, package: &str, version: &str, org: Option<&str>) -> Check {
-        let ecosystem = Ecosystem::default_for(package);
+    fn lookup(&self, coordinate: &Coordinate, org: Option<&str>) -> Check {
+        let ecosystem = coordinate.ecosystem;
+        let package = coordinate.package.as_str();
+        let version = coordinate.version.as_str();
         if ecosystem == Ecosystem::Nuget && org.is_none() && self.registry.is_none() {
             return Check::Failed("no producer PR names the org that publishes it".to_string());
         }
@@ -218,12 +246,18 @@ impl Checker {
             &self.session,
             ecosystem,
             package,
+            Some(version),
             org,
             self.registry.as_deref(),
         ) {
             Err(error) => Check::Failed(short_reason(&error)),
-            Ok(Fetched::Refused { .. }) => {
+            Ok(Fetched::Refused { .. })
+                if matches!(ecosystem, Ecosystem::Nuget | Ecosystem::Npm) =>
+            {
                 Check::Failed("the feed refused the request (401/403): needs read:packages".into())
+            }
+            Ok(Fetched::Refused { .. }) => {
+                Check::Failed("the registry refused the request (401/403)".into())
             }
             Ok(Fetched::NotFound { feed }) => Check::Failed(feed::not_found_message(&feed)),
             Ok(Fetched::Found { feed, versions }) => {

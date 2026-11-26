@@ -56,12 +56,12 @@ Paths below are relative to the repository root. Each line identifies a source m
 - `src/pyproject.rs`: Python manifest publication, references and diff versions.
 - `src/gomod.rs`: Go module publication, references and diff versions.
 - `src/publishers.rs`: manifest candidate selection and publisher/reference maps.
-- `src/feed.rs`: NuGet/npm feed data, version comparison, wait loop and report rendering.
-- `src/feed/registry.rs` owns registry HTTP requests, authentication and exact-version lookups shared by the feed command and publication verification.
+- `src/feed.rs` and `src/feed/ecosystem.rs` model feed coordinates and versions, compare releases and render reports for NuGet, npm, Cargo, PyPI and Go.
+- `src/feed/registry.rs` and its submodules own registry HTTP requests, authentication, exact-version lookups and Go module retractions. Commands pass the ecosystem, package, optional version and selected registry. Publication verification uses the same adapter.
 - `src/publication.rs`: exact new-publication verification and opaque publication evidence.
 - `src/publication/backend.rs`: GitHub workflow/job/log collection and exact NuGet feed adapter.
 - `src/consumer_bump.rs`: evidence-backed pin preparation through the bump gateway.
-- `src/consumer_bump/pin.rs` classifies an existing dependency pin for both the bump preview and consumer preparation.
+- `src/consumer_bump/pin.rs` and its manifest submodules classify pins and check workspace sources, companion files and exact edits for both the bump preview and consumer preparation.
 - `src/consumer_bump/journal.rs`: durable publisher inputs, consumer contracts and preparation markers.
 - `src/consumer_bump/backend.rs`: isolated Git workspaces, pin edits, restore checks, branch reservation and draft PR operations.
 - `src/consumer_bump/backend/process.rs`: owned subprocess trees and platform-specific termination.
@@ -186,7 +186,7 @@ The planner only adds ordering constraints: waiting is cheaper than a wrong para
 
 ### Writable consumer preparation requires publication proof
 
-`src/publication.rs` exposes opaque evidence only after checking execution identity, a matching new NuGet push and the exact feed version. `src/consumer_bump.rs` consumes that evidence; its backend creates isolated workspaces, verifies pins and restores, reserves a fresh remote branch and opens a draft against the consumer head. The journal marks intent before side effects so uncertain partial operations stop for inspection. The reason is to avoid inventing versions, treating duplicate pushes as new publication, changing existing checkouts or bypassing review. Standalone `bump` remains a read-only report. Full constraints and recovery belong to [publication-bump.md](publication-bump.md).
+`src/publication.rs` exposes opaque evidence only after checking execution identity, a matching new NuGet push and the exact feed version. `src/consumer_bump.rs` consumes that evidence; its backend creates isolated workspaces, verifies pins and restores, reserves a fresh remote branch and opens a draft against the consumer head. The journal marks intent before side effects so uncertain partial operations stop for inspection. The reason is to avoid inventing versions, treating duplicate pushes as new publication, changing existing checkouts or bypassing review. Standalone `bump` previews changes by default. With `--apply` it proves the target version before preparing isolated consumer drafts. Full constraints and recovery belong to [publication-bump.md](publication-bump.md).
 
 ### MCP reuses commands and exposes no execution writes
 

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
@@ -9,6 +9,9 @@ use crate::feed::{self, Attempt, Ecosystem, Report, WaitEnd, WaitPlan, Waited};
 use crate::plan::Plan;
 use crate::planner::{Dependency, Rule};
 use crate::progress;
+
+mod sources;
+pub(super) use sources::Restrictions;
 
 pub struct FeedOptions {
     pub package: String,
@@ -24,13 +27,22 @@ fn fetch(session: &Session, ecosystem: Ecosystem, opts: &FeedOptions) -> Result<
         session,
         ecosystem,
         &opts.package,
+        opts.version.as_deref(),
         opts.org.as_deref(),
         opts.registry.as_deref(),
     )
 }
 
 pub(crate) fn publishing_org(package: &str, producers: &[String]) -> Option<String> {
-    match Ecosystem::default_for(package) {
+    registry_org(Ecosystem::default_for(package), package, producers)
+}
+
+pub(crate) fn registry_org(
+    ecosystem: Ecosystem,
+    package: &str,
+    producers: &[String],
+) -> Option<String> {
+    match ecosystem {
         Ecosystem::Npm => {
             let scope = package
                 .trim_start_matches('@')
@@ -43,6 +55,7 @@ pub(crate) fn publishing_org(package: &str, producers: &[String]) -> Option<Stri
                 .cloned()
         }
         Ecosystem::Nuget => producers.first().cloned(),
+        _ => None,
     }
 }
 
@@ -51,37 +64,37 @@ fn is_checkable(dep: &Dependency) -> bool {
 }
 
 pub fn annotate(plan: &mut Plan, checker: &mut Checker) -> usize {
-    let orgs: BTreeMap<&str, &str> = plan
+    let orgs: BTreeMap<String, String> = plan
         .items
         .iter()
-        .map(|item| (item.id.as_str(), item.org.as_str()))
+        .map(|item| (item.id.clone(), item.org.clone()))
         .collect();
-    let mut wanted: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
-    for dep in plan
+    let query = |dep: &Dependency| {
+        let coordinate = dep.feed_coordinate.clone()?;
+        let org = registry_org(
+            coordinate.ecosystem,
+            &coordinate.package,
+            orgs.get(&dep.id)
+                .map(std::slice::from_ref)
+                .unwrap_or_default(),
+        );
+        Some((coordinate, org))
+    };
+    let wanted: BTreeSet<_> = plan
         .items
         .iter()
-        .flat_map(|item| item.after.iter())
+        .flat_map(|item| &item.after)
         .filter(|dep| is_checkable(dep))
-    {
-        let key = (
-            dep.package.clone().unwrap_or_default(),
-            dep.version.clone().unwrap_or_default(),
-        );
-        let producers = wanted.entry(key).or_default();
-        if let Some(org) = orgs.get(dep.id.as_str()) {
-            producers.push((*org).to_string());
-        }
-    }
+        .filter_map(query)
+        .collect();
     let total = wanted.len();
-    if total == 0 {
-        return 0;
+    let mut results = BTreeMap::new();
+    if total > 0 {
+        progress::phase("checking feeds");
     }
-    progress::phase("checking feeds");
-    let mut results: BTreeMap<(String, String), Check> = BTreeMap::new();
-    for (done, ((package, version), producers)) in wanted.into_iter().enumerate() {
-        let org = publishing_org(&package, &producers);
-        let outcome = checker.check(&package, &version, org.as_deref());
-        results.insert((package, version), outcome);
+    for (done, (coordinate, org)) in wanted.into_iter().enumerate() {
+        let outcome = checker.check_coordinate(&coordinate, org.as_deref());
+        results.insert((coordinate, org), outcome);
         progress::count(done + 1, total);
     }
     for dep in plan
@@ -90,29 +103,38 @@ pub fn annotate(plan: &mut Plan, checker: &mut Checker) -> usize {
         .flat_map(|item| item.after.iter_mut())
         .filter(|dep| is_checkable(dep))
     {
-        let key = (
-            dep.package.clone().unwrap_or_default(),
-            dep.version.clone().unwrap_or_default(),
-        );
-        match results.get(&key) {
+        match query(dep).and_then(|key| results.get(&key)) {
             Some(Check::Published) => dep.published = Some(true),
             Some(Check::Absent) => dep.published = Some(false),
             Some(Check::Failed(reason)) => dep.feed_error = Some(reason.clone()),
-            None => {}
+            None => {
+                dep.feed_error = Some(dep.feed_restriction.clone().unwrap_or_else(|| {
+                    "cannot identify one registry source for this dependency".into()
+                }))
+            }
         }
     }
     total
 }
 
-fn lookup(opts: &FeedOptions, notes: &mut Vec<String>) -> Result<Result<Report, i32>> {
+fn lookup(
+    opts: &FeedOptions,
+    notes: &mut Vec<String>,
+    selecting_target: bool,
+) -> Result<Result<Report, i32>> {
     let ecosystem = opts
         .ecosystem
         .unwrap_or_else(|| Ecosystem::default_for(&opts.package));
     let session = Session::new();
     let fetched = fetch(&session, ecosystem, opts)?;
+    let fetched = if selecting_target && ecosystem == Ecosystem::Go {
+        registry::exclude_go_retractions(&session, &opts.package, fetched)?
+    } else {
+        fetched
+    };
     match fetched {
         Fetched::Refused { had_token } => {
-            notes.push(feed::refused_message(had_token));
+            notes.push(refusal(ecosystem, had_token));
             Ok(Err(feed::EXIT_REFUSED))
         }
         Fetched::NotFound { feed } => {
@@ -135,7 +157,7 @@ pub fn versions(opts: &FeedOptions, notes: &mut Vec<String>) -> Result<Result<Ve
         .unwrap_or_else(|| Ecosystem::default_for(&opts.package));
     Ok(match fetch(&Session::new(), ecosystem, opts)? {
         Fetched::Refused { had_token } => {
-            notes.push(feed::refused_message(had_token));
+            notes.push(refusal(ecosystem, had_token));
             Err(feed::EXIT_REFUSED)
         }
         Fetched::NotFound { feed } => {
@@ -147,7 +169,7 @@ pub fn versions(opts: &FeedOptions, notes: &mut Vec<String>) -> Result<Result<Ve
 }
 
 pub fn latest(opts: &FeedOptions, notes: &mut Vec<String>) -> Result<Result<String, i32>> {
-    Ok(match lookup(opts, notes)? {
+    Ok(match lookup(opts, notes, false)? {
         Ok(report) => match report.latest {
             Some(latest) => Ok(latest),
             None => {
@@ -193,7 +215,7 @@ pub fn latest_target(
     prerelease: bool,
     notes: &mut Vec<String>,
 ) -> Result<Result<Target, i32>> {
-    Ok(match lookup(opts, notes)? {
+    Ok(match lookup(opts, notes, true)? {
         Ok(report) => match choose_target(&report, prerelease) {
             Ok(target) => Ok(target),
             Err(message) => {
@@ -206,7 +228,7 @@ pub fn latest_target(
 }
 
 pub fn proof(opts: &FeedOptions, notes: &mut Vec<String>) -> Result<Result<bool, i32>> {
-    Ok(lookup(opts, notes)?.map(|report| report.published == Some(true)))
+    Ok(lookup(opts, notes, false)?.map(|report| report.published == Some(true)))
 }
 
 pub struct WaitOptions {
@@ -278,6 +300,7 @@ pub fn wait_for(
     {
         bail!("--org is required for nuget unless --registry is given");
     }
+    registry::validate_version(ecosystem, opts.version.as_deref())?;
     let session = Session::new();
     Ok(feed::wait_loop(
         plan,
@@ -309,7 +332,14 @@ pub fn run_wait(opts: FeedOptions, wait: WaitOptions) -> Result<i32> {
     let code = waited.exit_code();
     match &waited.end {
         WaitEnd::Published(report) => print_wait(report, &waited, false, opts.json)?,
-        WaitEnd::Refused { had_token } => eprintln!("{}", feed::refused_message(*had_token)),
+        WaitEnd::Refused { had_token } => eprintln!(
+            "{}",
+            refusal(
+                opts.ecosystem
+                    .unwrap_or_else(|| Ecosystem::default_for(&opts.package)),
+                *had_token
+            )
+        ),
         WaitEnd::TimedOut {
             error: Some(reason),
             ..
@@ -346,13 +376,20 @@ fn print_wait(report: &Report, waited: &Waited, timed_out: bool, json: bool) -> 
     Ok(())
 }
 
+pub(crate) fn refusal(ecosystem: Ecosystem, had_token: bool) -> String {
+    match ecosystem {
+        Ecosystem::Nuget | Ecosystem::Npm => feed::refused_message(had_token),
+        _ => "the registry refused the request (401/403)".into(),
+    }
+}
+
 pub struct Rendered {
     pub stdout: Option<String>,
     pub exit: i32,
 }
 
 pub fn render(opts: &FeedOptions, notes: &mut Vec<String>) -> Result<Rendered> {
-    Ok(match lookup(opts, notes)? {
+    Ok(match lookup(opts, notes, false)? {
         Err(code) => Rendered {
             stdout: None,
             exit: code,

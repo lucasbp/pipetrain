@@ -91,7 +91,7 @@ fn boundary(path: &str) -> Option<&'static str> {
             "crate",
             "feed",
             "registry",
-            "Session" | "Checker" | "fetch" | "*",
+            "Session" | "Checker" | "fetch" | "exclude_go_retractions" | "*",
             ..,
         ]
         | ["ureq", _, ..]
@@ -306,6 +306,8 @@ impl<'ast> Visit<'ast> for Guard<'_> {
 
 #[test]
 fn scoped_aliases_keep_data_types_and_reject_client_and_command_paths() {
+    assert!(boundary("crate::feed::registry::exclude_go_retractions").is_some());
+    assert!(boundary("crate::feed::Coordinate").is_none());
     let file = syn::parse_file(
         r#"
         use crate::{github as gh, github::Run};

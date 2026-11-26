@@ -205,7 +205,7 @@ pipetrain plan [OPTIONS] [PRS]...
 | `pipetrain merge --apply` | Merges independent PRs in parallel up to `max_parallel`, with one active PR per repository, and waits for deploys before dependent work. Asks for confirmation unless `--yes` is given. See [Merging the queue](#merging-the-queue). |
 | `pipetrain state show --json` | Inspects local merge state, pending ages, deploy PRs, active jobs and audit history. Uses the same `--state`, `--profile` and `--config` selection as merge. See [State inspection and recovery](docs/state.md). |
 | `pipetrain state discard <id> --reason <text>` | Discards one pending record locally with an audit entry, without confirming a deploy. Requires typing `yes`, or `--yes` without a terminal. Never writes to GitHub. |
-| `pipetrain feed <PACKAGE> [--version <V>]` | Read-only: tells whether a package version is published in its NuGet or npm feed; `--wait` blocks until it is. See [Checking a package feed](#checking-a-package-feed). |
+| `pipetrain feed <PACKAGE> [--version <V>]` | Read-only: tells whether a package version is published in its package registry; `--wait` blocks until it is. See [Checking a package feed](#checking-a-package-feed). |
 | `pipetrain bump <PACKAGE> [--to <V>]` | Shows which manifests of the scanned repos would move to a version of a package. A dry run that writes nothing; with `--apply` it opens one draft PR per repo once the version is in the feed. See [Bumping a package](#bumping-a-package). |
 | `pipetrain profiles` | Read-only: lists the profiles, their orgs and folders, and which one applies from the current folder. |
 | `pipetrain orgs` | Read-only: lists the GitHub orgs your token can see and which profile lists each one. |
@@ -221,7 +221,7 @@ pipetrain plan [OPTIONS] [PRS]...
 | `--mine` | On `plan` and `bundle`. Select and show only PRs by the token's own login. See [Only your PRs](#only-your-prs). Cannot be combined with `--all-authors`. |
 | `--author <login>` | On `plan` and `bundle`. Select and show only PRs by this author; repeatable, `@me` is you. Cannot be combined with `--all-authors`. |
 | `--all-authors` | On `plan` and `bundle`. Ignore the authors set in the config and show every author. |
-| `--verbose` | Log every API request to stderr. On `merge` it also prints the full detail (per-check lines, URLs, every step) instead of the compact output described in [docs/merge.md](docs/merge.md#what-the-text-output-shows). |
+| `--verbose` | Log every API request to stderr. On `plan` it expands the execution order, checks and reasons. On `merge` it also prints the full detail (per-check lines, URLs, every step) instead of the compact output described in [docs/merge.md](docs/merge.md#what-the-text-output-shows). |
 | `--no-cache` | Neither read nor write the [local cache](#local-cache). Cannot be combined with `--refresh`. |
 | `--refresh` | Ignore what the cache has, fetch it again and rewrite it. Cannot be combined with `--no-cache`. |
 | `--check-feeds` | Only on `plan`. Asks the package feeds whether the version each `# wait` line names is already published, and says so on the line: `(published)`, `(not yet)` or `(feed check failed: ...)`. Off by default, so without it there are no extra requests and the output is unchanged. Informational only: order, gates, pauses and the exit code never change. Needs a token that can read packages (`read:packages`) for GitHub Packages feeds. See [Checking a package feed](#checking-a-package-feed). |
@@ -349,7 +349,18 @@ After applying, run `pipetrain plan` again: the retargeted PRs now sit on the de
 
 ## Example output
 
-An invented run for the org `acme`, shown without colors (what `--color never` prints). When a plan has a single org, the `acme/` prefix is dropped from PR names. PRs show their author as a dim `@login` right after the name:
+By default, `pipetrain plan` shows the execution steps and one cause for each waiting or blocked PR. For example:
+
+```text
+pipetrain plan  deploy/29-10-2026 · acme
+2 in plan · 1 skipped · 0 questions
+  step 1  shared-lib#7  Add order status enum
+  step 2  orders-client#12  Expose order status  after shared-lib#7 (acme-core)
+  blocked  billing-api#228  checks failing
+Use --verbose for the full plan, causes and checks.
+```
+
+The longer example below illustrates `pipetrain plan --verbose --color never` for the same org. When a plan has a single org, the `acme/` prefix is dropped from PR names. PRs with an author show `@login` after the name.
 
 ```
 pipetrain plan  (read-only, nothing was merged)
@@ -578,7 +589,7 @@ repos = ["acme/shared-*", "acme/api-*"]
 
 Globs match `org/repo` and ignore case. Two PRs matched by the same glob, or from the same repo, get no edge. The rule applies after `stacked` and before `target`, and it loses to `depends-on`, `package` and `stacked`; a lost `order` edge is reported as an `edge-conflict` question. The position of the rule is in [docs/planner.md](docs/planner.md).
 
-You do not have to write an `[[order]]` block for every library and consumer pair. The `dependency` rule reads the manifests of the repos that have a PR in the plan (`.csproj`, `.props`, `package.json`, `Cargo.toml`, `pyproject.toml` and `go.mod`) and puts the PR of a repo that publishes a NuGet, npm, Cargo, Python or Go package before the PR of a repo that references it. A dependency from one ecosystem to another is not detectable and stays an explicit `[[order]]`. `feed`, `bump` and `plan --check-feeds` only understand NuGet and npm: a `# wait` for a Cargo, Python or Go package is looked up in the wrong feed and ends as a failed check. An explicit `[[order]]` block wins over it, and two repos that reference each other raise a `dependency-cycle` question. Details and limits are in [docs/planner.md](docs/planner.md).
+You do not have to write an `[[order]]` block for every library and consumer pair. The `dependency` rule reads the manifests of the repos that have a PR in the plan (`.csproj`, `.props`, `package.json`, `Cargo.toml`, `pyproject.toml` and `go.mod`) and puts the PR of a repo that publishes a NuGet, npm, Cargo, Python or Go package before the PR of a repo that references it. A dependency from one ecosystem to another is not detectable and stays an explicit `[[order]]`. `plan --check-feeds` uses the package ecosystem from the manifests to check a versioned wait. An explicit `[[order]]` block wins over it, and two repos that reference each other raise a `dependency-cycle` question. Details and limits are in [docs/planner.md](docs/planner.md).
 
 To pin the discovered chain in the config, `pipetrain order suggest [REPOS...]` reads the manifests at the tip of each default branch and prints an `[[order]]` block per group of connected repos, publisher first, with one `#` line of evidence per edge. Without REPOS it uses the exact names (no glob) in the `layer` and `order` entries of the selected profile. It is read-only: it never writes the config, and it exits 3 with a `? (repo)` line when two repos reference each other. A repo name that GitHub does not find is skipped with a warning on stderr, and the run fails only when no name could be read. A dependency from one ecosystem to another (NuGet to npm, for example) is not detectable and stays explicit.
 
@@ -635,7 +646,7 @@ Where it lives: the `pipetrain` folder inside your user cache directory (`%LOCAL
 ## Checking a package feed
 
 ```
-pipetrain feed <PACKAGE> [--version <V>] [--ecosystem nuget|npm] [--org <ORG>] [--registry <URL>] [--json] [--wait [--interval <S>] [--timeout <S>]]
+pipetrain feed <PACKAGE> [--version <V>] [--ecosystem nuget|npm|cargo|pypi|go] [--org <ORG>] [--registry <URL>] [--json] [--wait [--interval <S>] [--timeout <S>]]
 ```
 
 `feed` answers one question: is this package, at this version, published in its feed? It is read-only: it only sends `GET` requests, writes nothing and stores nothing. It does not read a config file or call the GitHub API.
@@ -643,7 +654,18 @@ pipetrain feed <PACKAGE> [--version <V>] [--ecosystem nuget|npm] [--org <ORG>] [
 | Ecosystem | Chosen when | Feed |
 |---|---|---|
 | `npm` | The package starts with `@`, or `--ecosystem npm`. | `https://npm.pkg.github.com` when the package is scoped and `--org` is given, otherwise `https://registry.npmjs.org`. `--registry <BASE URL>` overrides it. The request is `GET {base}/{package}` with `/` written as `%2f`. |
-| `nuget` | Everything else, or `--ecosystem nuget`. | `https://nuget.pkg.github.com/{org}/index.json`, so `--org` is required unless `--registry <SERVICE INDEX URL>` is given. pipetrain reads the `PackageBaseAddress` resource of the service index and then `{base}{lowercase id}/index.json`. |
+| `nuget` | An unscoped name with no explicit ecosystem, or `--ecosystem nuget`. | `https://nuget.pkg.github.com/{org}/index.json`, so `--org` is required unless `--registry <SERVICE INDEX URL>` is given. pipetrain reads the `PackageBaseAddress` resource of the service index and then `{base}{lowercase id}/index.json`. |
+| `cargo` | `--ecosystem cargo` | crates.io sparse index. `--registry` selects a sparse index base. |
+| `pypi` | `--ecosystem pypi` | PyPI project JSON. `--registry` selects a server exposing `/pypi/<name>/json`. |
+| `go` | `--ecosystem go` | Go module proxy. `--registry` selects a proxy implementing the Go module protocol. |
+
+For example, these commands check a Cargo publication, wait for a Python version and preview a Go consumer update:
+
+```text
+pipetrain feed acme-core --ecosystem cargo --version 1.1.0
+pipetrain feed acme-core --ecosystem pypi --version 1.1rc1 --wait
+pipetrain bump example.org/acme/core --ecosystem go --to v1.1.0 --repo acme/app
+```
 
 Output:
 
@@ -652,7 +674,7 @@ Acme.Util 1.2610.2314.49: published
 Acme.Util 2.0.0: not published (latest 1.2610.2314.49)
 ```
 
-Without `--version` it prints the latest version and the last 5, newest first. Versions are compared by their numeric segments, so 4-part NuGet versions work, and a pre-release (`1.0.0-beta`) sorts below `1.0.0`.
+Without `--version` it prints the latest version and the last 5, newest first. Python uses PEP 440 ordering, Cargo and Go use semantic versions, and NuGet supports four numeric components. Cargo yanks and PyPI releases without an available, unyanked file are excluded.
 
 `--json` prints `{"schema": 1, "package", "ecosystem", "feed", "version", "published", "latest", "versions"}`. `version` and `published` are `null` when no `--version` was given, and `versions` holds the last 5. A package the feed does not know prints nothing on stdout, so `--json` stays empty in that case; read the exit code.
 
@@ -719,16 +741,17 @@ With `--check-feeds`, `plan` runs this same lookup once for each distinct packag
 ## Bumping a package
 
 ```
-pipetrain bump <PACKAGE> [--to <VERSION>] [--prerelease] [--ecosystem nuget|npm] [--org <ORG>] [--registry <URL>] [--repo <ORG/REPO>]... [--profile <NAME>] [--only major|minor|patch]... [--changes-only] [--check] [--apply [--yes] [--restore-mode locked|unlocked|skip] [--solution <PATH>]] [--json]
+pipetrain bump <PACKAGE> [--to <VERSION>] [--prerelease] [--ecosystem nuget|npm|cargo|pypi|go] [--org <ORG>] [--registry <URL>] [--repo <ORG/REPO>]... [--profile <NAME>] [--only major|minor|patch]... [--changes-only] [--check] [--apply [--yes] [--restore-mode locked|unlocked|skip] [--solution <PATH>]] [--json]
 ```
 
 `bump` shows which manifests would move to a version of a package. Without `--apply` it is a dry run and writes nothing. With `--apply` it opens one draft pull request per repo; see [Opening the draft PRs](#opening-the-draft-prs-bump---apply).
 
 What it reads:
 
-- The target version: `--to` is used directly without a feed check; otherwise the latest **stable** version (no `-` suffix) is looked up like `pipetrain feed` (same ecosystem rules, same `--org` and `--registry`, same token handling). `--prerelease` lets a newer prerelease be the target. When a newer prerelease exists and was not chosen, the dry run says so (`ignored newer prerelease X; pass --prerelease to use it`) and `--json` adds `ignored_prerelease`. A feed with no stable version is an error that names `--prerelease` and `--to`.
+- The target version: `--to` is used directly without a feed check; otherwise the latest **stable** version for the selected ecosystem is looked up like `pipetrain feed` (same ecosystem rules, same `--org` and `--registry`, same token handling). `--prerelease` lets a newer prerelease be the target. When a newer prerelease exists and was not chosen, the dry run says so (`ignored newer prerelease X; pass --prerelease to use it`) and `--json` adds `ignored_prerelease`. A feed with no stable version is an error that names `--prerelease` and `--to`.
 - The repos to scan: every `--repo`, or, when none is given, the exact repo names in the active profile (`[[layer]]` and `[[order]]`).
-- In each repo, the manifests of the default branch for the ecosystem (`.csproj`, `.fsproj` and `.props` for NuGet, `package.json` for npm), through the same cache-aware GitHub client as `plan`. Only `GET` requests and read-only GraphQL queries.
+- For an automatic Go target, the proxy supplies the publisher's retractions. An explicit `--to` chooses the target yourself and `--apply` still checks that exact version in the registry.
+- In each repo, the manifests of the default branch for the ecosystem (`.csproj`, `.fsproj` and `.props` for NuGet, `package.json` for npm, `Cargo.toml`, `pyproject.toml` or `go.mod`), through the same cache-aware GitHub client as `plan`. Only `GET` requests and read-only GraphQL queries.
 
 What the dry run never does: write a file, create a branch, commit, push, open a pull request or touch a repo. It prints what it found and stops.
 
@@ -763,7 +786,7 @@ Repos that do not reference the package are not listed. A scanned repo name that
 
 ### Opening the draft PRs (`bump --apply`)
 
-`--apply` is opt-in. It takes the manifests the dry run lists as `change` and, for each repo, pushes a new branch `pipetrain/bump/<package>-<version>` from the tip of the default branch with one commit (`bump <package> to <version>`) and opens one draft PR into the default branch. The PR title is `Bump <package> to <version>`; its English body names the package, the files with the version they move from and to, and says pipetrain opened it and does not merge it. Without `--apply`, the behavior and `--json` are exactly the dry run's.
+`--apply` is opt-in. It takes the manifests the dry run lists as `change` and, for each repo, pushes a new branch under `pipetrain/bump/` from the tip of the default branch with one commit (`bump <package> to <version>`) and opens one draft PR into the default branch. The PR title is `Bump <package> to <version>`; its English body names the package, the files with the version they move from and to, and says pipetrain opened it and does not merge it. Without `--apply`, the behavior and `--json` are exactly the dry run's. For Cargo, PyPI and Go, draft branch names include the ecosystem and a digest of the package and version, so similarly named packages have independent drafts.
 
 Safeguards:
 
@@ -772,6 +795,7 @@ Safeguards:
 - **Isolated and never forced.** Each repo gets a new private clone and worktree under the pipetrain cache (`bump-workspaces`), a new branch and a normal push. A bump branch that already exists is never touched: the repo is skipped. The workspace is removed after a success or a skip and kept after a failure, with its path in the message.
 - **Stops at the first failure.** The repos after it are reported as skipped (`stopped after an earlier failure`) and the exit code is 1.
 - **Per ecosystem.** NuGet: one `.sln` or `.slnx` (with several, `--solution <path>` or `solution` under `[bump.repos."org/repo"]` picks one; without a choice the repo is skipped and the message lists the files found). The restore mode decides the proof: `locked` (default) needs a `packages.lock.json` next to every project manifest, then runs `dotnet restore --use-lock-file` and a `--locked-mode` restore; `unlocked` needs no lock file and runs a plain restore plus a build as proof of the pin; `skip` does neither and the PR body says the pin was not proven. Choose with `--restore-mode`, per repo with `restore_mode` under `[bump.repos."org/repo"]`, or for all under `[bump]`; the command line beats the repo entry, which beats `[bump]`. The dry run and the output show the mode of each repo. The commit holds the manifests and the lock files that changed, and only those. npm: the `package.json` is edited in place and there is no restore, so a repo with a lock file (`package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`, `bun.lock`, `bun.lockb`) is skipped, because the lock would go stale.
+- **Cargo, Python and Go.** The standalone command can prepare a manifest-only draft for registry dependencies. Cargo accepts an exact `=1.2.3`; bare `1.2.3` is a compatible range. Python accepts PEP 508 equality pins and exact Poetry versions. Go accepts tagged `require` versions matching the module path's major version. Choose a policy manually for ranges, alternative sources, Cargo build metadata, Go pseudo-versions and Go `+incompatible` versions. A covering Cargo lock or registry configuration, Python lockfile or `uv.toml`, or Go checksum, workspace or vendor metadata also requires review. `--restore-mode` and `--solution` select NuGet verification. The standalone changes do not extend NuGet publication proof in `merge --bump`.
 - **Needs** local `git` with credentials that can push and a commit identity, a token with Contents and Pull requests write, and the .NET SDK for NuGet repos. The restore evaluates MSBuild from the repo's checkout, so use it only on repos you trust.
 
 The text report prints one line per repo (`opened`, `skipped` or `failed`, with the PR URL or the reason) and a summary such as `1 opened, 0 skipped, 0 failed`. With `--json` it prints `{"schema": 1, "applied", "package", "ecosystem", "target", "repos": [{"repo", "status", "detail", "branch", "commit", "pull_request_url", "files"}]}` (NuGet repos also carry `restore_mode`) and `applied` is `true` only when the writes ran. Run it after the version shows in the feed, for instance after `merge --apply` published the package. The MCP `bump` tool stays a dry run. What `merge --bump` covers and what it does not: [publication-backed preparation](docs/publication-bump.md#what-merge---bump-covers).
@@ -855,7 +879,7 @@ The tools, the result format, the errors and the protocol choice are in [docs/mc
 
 ## Out of scope
 
-pipetrain does not approve, comment, label or re-run checks, and it does not execute deployments. It writes to GitHub only through two commands that need `--apply`: `pipetrain bundle --apply` creates a deploy branch and changes the base of the PRs bundled into it, and `pipetrain merge --apply` merges independent PRs in parallel and waits for their deploy. With the additional `--bump` opt-in it can commit and push an isolated bump branch and open a draft PR after proving publication. Default planning and standalone `bump` remain read-only. It decides order, not safety: it does not know whether a migration is backward compatible, only that it has to go first.
+pipetrain does not approve, comment, label or re-run checks, and it does not execute deployments. GitHub writes require an explicit mode. Standalone `bump --apply` can open reviewed consumer drafts on isolated branches. Among the queue commands, `pipetrain bundle --apply` creates a deploy branch and changes the base of the PRs bundled into it, and `pipetrain merge --apply` merges independent PRs in parallel and waits for their deploy. With the additional `--bump` opt-in it can commit and push an isolated bump branch and open a draft PR after proving publication. Planning and the standalone `bump` dry run are read-only. It decides order, not safety: it does not know whether a migration is backward compatible, only that it has to go first.
 
 ## Documentation
 

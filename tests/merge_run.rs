@@ -4592,6 +4592,11 @@ fn package_plan(package: &str, version: Option<&str>, published: Option<bool>) -
     dependency.rule = pipetrain::planner::Rule::Package;
     dependency.package = Some(package.into());
     dependency.version = version.map(str::to_string);
+    dependency.feed_coordinate = version.map(|v| pipetrain::feed::Coordinate {
+        ecosystem: pipetrain::feed::Ecosystem::default_for(package),
+        package: package.into(),
+        version: v.into(),
+    });
     dependency.published = published;
     plan
 }

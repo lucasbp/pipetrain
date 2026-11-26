@@ -430,6 +430,34 @@ fn one_lookup_serves_every_consumer_of_the_same_version() {
 }
 
 #[test]
+fn a_grouped_wait_requires_all_registry_checks_to_pass() {
+    let mut built = npm_plan();
+    let deps = &mut built
+        .items
+        .iter_mut()
+        .find(|item| !item.after.is_empty())
+        .unwrap()
+        .after;
+    let mut second = deps[0].clone();
+    deps[0].published = Some(true);
+    second.published = Some(false);
+    deps.push(second);
+    assert_eq!(waits(&built), [format!("{NPM_WAIT} (not yet)")]);
+    let deps = &mut built
+        .items
+        .iter_mut()
+        .find(|item| !item.after.is_empty())
+        .unwrap()
+        .after;
+    deps[1].published = None;
+    deps[1].feed_error = Some("unknown registry".into());
+    assert_eq!(
+        waits(&built),
+        [format!("{NPM_WAIT} (feed check failed: unknown registry)")]
+    );
+}
+
+#[test]
 fn a_plan_without_versioned_waits_makes_no_request() {
     let server = npm_server(&["1.1.0"]);
     let mut built = nuget_plan("$(AcmeUtilVersion)");

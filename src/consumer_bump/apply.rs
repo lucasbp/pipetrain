@@ -5,7 +5,8 @@ use regex::Regex;
 use serde_json::{Value, json};
 
 use super::backend::{ConsumerRemote, GithubRemote};
-use super::pin::{Status, classify};
+use super::pin::manifests::{check_manifest_only, check_workspace_sources, pin_manifest};
+use super::pin::{Status, classify, directory, sibling};
 use super::{
     BumpGateway, Consumer, RestoreMode, RestoreSettings, ensure_head, pin_commit_push, safe_path,
 };
@@ -68,6 +69,26 @@ pub fn branch_name(package: &str, version: &str) -> String {
     format!("pipetrain/bump/{}-{}", clean(package), clean(version))
 }
 
+pub fn standalone_branch(ecosystem: Ecosystem, package: &str, version: &str) -> String {
+    if matches!(ecosystem, Ecosystem::Nuget | Ecosystem::Npm) {
+        return branch_name(package, version);
+    }
+    let name = match ecosystem {
+        Ecosystem::Pypi => crate::pyproject::normalise(package),
+        Ecosystem::Cargo => package.to_ascii_lowercase(),
+        _ => package.to_string(),
+    };
+    let key = crate::update::checksum::sha256_hex(format!("{name}\0{version}").as_bytes());
+    let readable = branch_name(&name, version);
+    let slug = readable.trim_start_matches("pipetrain/bump/");
+    let short = &slug[..slug.len().min(72)];
+    format!(
+        "pipetrain/bump/{}/{short}-{}",
+        ecosystem.as_str(),
+        &key[..16]
+    )
+}
+
 pub fn pull_request_title(package: &str, version: &str) -> String {
     format!("Bump {package} to {version}")
 }
@@ -99,22 +120,13 @@ pub fn pull_request_body(
         Ecosystem::Npm => {
             "The repository has no npm lock file next to these manifests, so only the manifests changed."
         }
+        Ecosystem::Cargo | Ecosystem::Pypi | Ecosystem::Go => {
+            "Only the selected manifest requirements changed. Review and test the dependency resolution in CI."
+        }
     };
     format!(
         "pipetrain opened this draft pull request with `pipetrain bump --apply`.\n\nIt moves `{package}` to {version}. That version was found in the package feed before this branch was created.\n\n{files}\n\n{closing}\n\nReview it and let CI run before merging; pipetrain does not merge it."
     )
-}
-
-fn directory(path: &str) -> &str {
-    path.rsplit_once('/').map_or("", |(dir, _)| dir)
-}
-
-fn sibling(dir: &str, name: &str) -> String {
-    if dir.is_empty() {
-        name.to_string()
-    } else {
-        format!("{dir}/{name}")
-    }
 }
 
 pub fn find_solution(tree: &[String], chosen: Option<&str>) -> Result<String, String> {
@@ -241,9 +253,11 @@ pub fn pin_npm_manifest(text: &str, package: &str, version: &str) -> Result<Stri
     Ok(patched)
 }
 
-fn pin_npm_commit_push(
+fn pin_manifest_commit_push(
+    ecosystem: Ecosystem,
     package: &str,
     version: &str,
+    candidate: &Candidate,
     consumer: &Consumer,
     gateway: &mut impl BumpGateway,
 ) -> Result<Option<String>> {
@@ -255,7 +269,25 @@ fn pin_npm_commit_push(
     let mut patches = BTreeMap::new();
     for path in &consumer.manifests {
         let original = gateway.read(path)?;
-        let patched = pin_npm_manifest(&original, package, version)?;
+        let patched = if ecosystem == Ecosystem::Npm {
+            pin_npm_manifest(&original, package, version)?
+        } else {
+            check_workspace_sources(
+                ecosystem,
+                package,
+                path,
+                &original,
+                candidate.tree,
+                |ancestor| gateway.read(ancestor),
+            )?;
+            let expected = candidate
+                .rows
+                .iter()
+                .filter(|(file, _)| file == path)
+                .map(|(_, current)| current.clone())
+                .collect::<Vec<_>>();
+            pin_manifest(ecosystem, &original, package, version, &expected)?
+        };
         if patched != original {
             patches.insert(path.clone(), patched);
         }
@@ -298,12 +330,18 @@ pub fn apply_repo(
             Ok(()) => String::new(),
             Err(reason) => return Ok(Applied::Skipped(reason)),
         },
+        other => match check_manifest_only(other, candidate.tree, candidate.rows) {
+            Ok(()) => String::new(),
+            Err(reason) => return Ok(Applied::Skipped(reason)),
+        },
     };
-    let branch = branch_name(package, version);
+    let branch = standalone_branch(ecosystem, package, version);
     let files: Vec<String> = candidate
         .rows
         .iter()
         .map(|(path, _)| path.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
         .collect();
     let consumer = Consumer {
         repository: candidate.repo.to_string(),
@@ -323,7 +361,7 @@ pub fn apply_repo(
             )]);
             pin_commit_push(&pins, &consumer, settings.mode, gateway)?.map(|pinned| pinned.commit)
         }
-        Ecosystem::Npm => pin_npm_commit_push(package, version, &consumer, gateway)?,
+        other => pin_manifest_commit_push(other, package, version, candidate, &consumer, gateway)?,
     };
     let Some(commit) = commit else {
         return Ok(Applied::Skipped(

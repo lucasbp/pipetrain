@@ -108,9 +108,7 @@ enum Command {
     )]
     Init(InitArgs),
 
-    #[command(
-        about = "Read-only: tells whether a package version is published in its NuGet or npm feed"
-    )]
+    #[command(about = "Read-only: tells whether a package version is published in its registry")]
     Feed(FeedArgs),
 
     #[command(
@@ -206,7 +204,7 @@ struct BumpArgs {
     #[arg(
         long,
         value_enum,
-        help = "nuget or npm (default: npm when the package starts with @, else nuget)"
+        help = "Package ecosystem (default: npm when the package starts with @, else nuget)"
     )]
     ecosystem: Option<Ecosystem>,
 
@@ -218,7 +216,7 @@ struct BumpArgs {
 
     #[arg(
         long,
-        help = "Feed to ask instead of the default: the base URL for npm, the service index URL for nuget"
+        help = "Registry base URL (NuGet service index, Cargo sparse index, PyPI site, npm registry or Go module proxy)"
     )]
     registry: Option<String>,
 
@@ -329,7 +327,7 @@ struct FeedArgs {
     #[arg(
         long,
         value_enum,
-        help = "nuget or npm (default: npm when the package starts with @, else nuget)"
+        help = "Package ecosystem (default: npm when the package starts with @, else nuget)"
     )]
     ecosystem: Option<Ecosystem>,
 
@@ -341,7 +339,7 @@ struct FeedArgs {
 
     #[arg(
         long,
-        help = "Feed to ask instead of the default: the base URL for npm, the service index URL for nuget"
+        help = "Registry base URL (NuGet service index, Cargo sparse index, PyPI site, npm registry or Go module proxy)"
     )]
     registry: Option<String>,
 
@@ -541,7 +539,10 @@ struct PlanArgs {
     )]
     date: Option<String>,
 
-    #[arg(long, help = "Log every API request to stderr")]
+    #[arg(
+        long,
+        help = "Show the full plan, causes and checks; log API requests to stderr"
+    )]
     verbose: bool,
 
     #[arg(

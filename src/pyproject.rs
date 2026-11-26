@@ -4,7 +4,7 @@ use std::sync::OnceLock;
 use regex::Regex;
 use toml::{Table, Value};
 
-use crate::detect::side_lines;
+use crate::detect::{side_lines, toml_string as string_value};
 
 const LOCAL_KEYS: [&str; 3] = ["path", "git", "url"];
 
@@ -30,7 +30,7 @@ fn regex(cell: &'static OnceLock<Regex>, pattern: &str) -> &'static Regex {
     cell.get_or_init(|| Regex::new(pattern).expect("valid regex"))
 }
 
-fn normalise(name: &str) -> String {
+pub(crate) fn normalise(name: &str) -> String {
     let mut out = String::new();
     for c in name.trim().to_lowercase().chars() {
         if matches!(c, '-' | '_' | '.') {
@@ -215,7 +215,10 @@ fn section_of(header: &str) -> (Section, Option<String>) {
         r"^(?:project|project\.optional-dependencies|dependency-groups|build-system|tool\.uv)$",
     );
     if let Some(caps) = named.captures(header) {
-        return (Section::Table, Some(normalise(caps[1].trim_matches('"'))));
+        return (
+            Section::Table,
+            Some(normalise(caps[1].trim_matches(['"', '\'']))),
+        );
     }
     if poetry.is_match(header) {
         return (Section::Poetry, None);
@@ -237,12 +240,6 @@ fn flush(pending: Option<Pending>, found: &mut BTreeMap<String, String>) {
     }
 }
 
-fn string_value(value: &str) -> Option<String> {
-    static QUOTED: OnceLock<Regex> = OnceLock::new();
-    let quoted = regex(&QUOTED, r#"^"([^"]*)""#);
-    Some(quoted.captures(value.trim())?[1].trim().to_string())
-}
-
 fn poetry_entry(key: &str, value: &str) -> Option<(String, String)> {
     if key.eq_ignore_ascii_case("python") {
         return None;
@@ -262,9 +259,10 @@ fn poetry_entry(key: &str, value: &str) -> Option<(String, String)> {
 
 fn quoted_requirements(line: &str) -> Vec<(String, String)> {
     static ITEM: OnceLock<Regex> = OnceLock::new();
-    let item = regex(&ITEM, r#""((?:[^"\\]|\\.)*)""#);
-    item.captures_iter(line)
-        .filter_map(|caps| requirement(&caps[1]))
+    let item = regex(&ITEM, r#""(?:[^"\\]|\\.)*"|'[^']*'"#);
+    item.find_iter(line)
+        .filter_map(|value| string_value(value.as_str()))
+        .filter_map(|value| requirement(&value))
         .filter_map(|(name, spec)| Some((name, raw_version(&spec)?)))
         .collect()
 }
@@ -274,7 +272,7 @@ pub fn bumped(patch: &str, prefix: char) -> BTreeMap<String, String> {
     static PAIR: OnceLock<Regex> = OnceLock::new();
     static ARRAY: OnceLock<Regex> = OnceLock::new();
     let header = regex(&HEADER, r"^\[([^\[\]]+)\]\s*(?:#.*)?$");
-    let pair = regex(&PAIR, r#"^("[^"]+"|[A-Za-z0-9_.-]+)\s*=\s*(.+)$"#);
+    let pair = regex(&PAIR, r#"^("[^"]+"|'[^']+'|[A-Za-z0-9_.-]+)\s*=\s*(.+)$"#);
     let array = regex(&ARRAY, r"^[A-Za-z0-9_.-]+\s*=\s*\[");
     let mut found = BTreeMap::new();
     let mut section = Section::Unknown;
@@ -292,8 +290,9 @@ pub fn bumped(patch: &str, prefix: char) -> BTreeMap<String, String> {
             });
             continue;
         }
-        let list_line = line.starts_with('"') || array.is_match(line);
         let pair_caps = pair.captures(line);
+        let list_line =
+            (pair_caps.is_none() && line.starts_with(['"', '\''])) || array.is_match(line);
         match section {
             Section::Other => {}
             Section::Requirements => {
@@ -314,7 +313,7 @@ pub fn bumped(patch: &str, prefix: char) -> BTreeMap<String, String> {
                 let Some(caps) = pair_caps else {
                     continue;
                 };
-                let key = caps[1].trim_matches('"');
+                let key = caps[1].trim_matches(['"', '\'']);
                 let is_setting = matches!(section, Section::Unknown)
                     && SETTING_KEYS.contains(&key.to_lowercase().as_str());
                 if is_setting {

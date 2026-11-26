@@ -1,5 +1,8 @@
 use std::collections::BTreeMap;
 
+mod common;
+
+use pipetrain::command::feed::{Checker, annotate};
 use pipetrain::config::{Config, Rules};
 use pipetrain::detect::{bumped_packages, bumped_versions};
 use pipetrain::emit;
@@ -290,10 +293,10 @@ fn pr(slug: &str, number: u64) -> Pr {
     }
 }
 
-fn queue(prs: Vec<Pr>, manifests: &[Manifest]) -> Vec<String> {
+fn build(prs: Vec<Pr>, manifests: &[Manifest]) -> plan::Plan {
     let cfg = Config::parse("orgs = [\"acme\"]\n").unwrap();
     let rules = Rules::new(&cfg).unwrap();
-    let built = plan::build(
+    plan::build(
         &rules,
         Gathered {
             generated_at: "2026-10-30T09:00:00-03:00".to_string(),
@@ -314,8 +317,7 @@ fn queue(prs: Vec<Pr>, manifests: &[Manifest]) -> Vec<String> {
             requests: 0,
             rate_remaining: None,
         },
-    );
-    emit::queue_lines(&built)
+    )
 }
 
 fn manifest(slug: &str, path: &str, text: &str) -> Manifest {
@@ -334,13 +336,89 @@ fn chain(
     if let Some(patch) = patch {
         app.files = diff(app_path, patch);
     }
-    queue(
+    emit::queue_lines(&build(
         vec![app, lib],
         &[
             manifest("acme/lib", lib_path, lib_text),
             manifest("acme/app", app_path, app_text),
         ],
-    )
+    ))
+}
+
+#[test]
+fn checked_waits_use_the_changed_manifest_without_changing_the_queue_contract() {
+    let cases = [
+        (
+            "Cargo.toml",
+            "[package]\nname = \"acme_lib\"\n",
+            "[dependencies]\n'acme_lib' = '=1.1.0'\n",
+            " [dependencies]\n-'acme_lib' = '=1.0.0'\n+'acme_lib' = '=1.1.0'",
+            "/ac/me/acme_lib",
+            r#"{"name":"acme_lib","vers":"1.1.0","yanked":false}"#,
+            "acme-lib",
+            "1.1.0",
+        ),
+        (
+            "pyproject.toml",
+            "[project]\nname = \"Acme.Lib\"\n",
+            "[project]\ndependencies = ['Acme.Lib==1.1rc2']\n",
+            " [project]\n-dependencies = ['Acme.Lib==1.0']\n+dependencies = ['Acme.Lib==1.1rc2']",
+            "/pypi/acme-lib/json",
+            r#"{"releases":{"1.1rc2":[{"yanked":false}]}}"#,
+            "acme-lib",
+            "1.1rc2",
+        ),
+        (
+            "go.mod",
+            "module example.org/Acme/Lib\n",
+            "module example.org/app\nrequire example.org/Acme/Lib v2.1.0+incompatible\n",
+            "-require example.org/Acme/Lib v2.0.0+incompatible\n+require example.org/Acme/Lib v2.1.0+incompatible",
+            "/example.org/!acme/!lib/@v/list",
+            "v2.1.0+incompatible\n",
+            "example.org/acme/lib",
+            "2.1.0",
+        ),
+    ];
+    for (path, publisher, consumer, patch, endpoint, response, package, version) in cases {
+        let mut app = pr("acme/app", 2);
+        app.files = diff(path, patch);
+        let mut plan = build(
+            vec![app, pr("acme/lib", 1)],
+            &[
+                manifest("acme/lib", path, publisher),
+                manifest("acme/app", path, consumer),
+            ],
+        );
+        let wait = format!(
+            "# wait: package {package} {version} from acme/lib#1 must be published before acme/app#2"
+        );
+        assert_eq!(waits(&emit::queue_lines(&plan)), [&wait]);
+        let (base, requests) = common::serve_bodies(vec![response.into()]);
+        assert_eq!(
+            annotate(&mut plan, &mut Checker::with_registry(Some(base))),
+            1
+        );
+        assert_eq!(
+            waits(&emit::queue_lines(&plan)),
+            [&format!("{wait} (published)")]
+        );
+        let request = &requests.join().unwrap()[0];
+        assert_eq!(
+            request.lines().next(),
+            Some(format!("GET {endpoint} HTTP/1.1").as_str())
+        );
+        assert!(!request.to_ascii_lowercase().contains("authorization:"));
+        let json = serde_json::to_value(&plan).unwrap();
+        let dep = &json["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["id"] == "acme/app#2")
+            .unwrap()["after"][0];
+        assert_eq!(dep["version"], version);
+        assert_eq!(dep["published"], true);
+        assert!(dep.get("feed_coordinate").is_none());
+    }
 }
 
 fn merges(lines: &[String]) -> Vec<&str> {

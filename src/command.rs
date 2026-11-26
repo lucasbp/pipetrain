@@ -195,12 +195,27 @@ fn repos_to_scan(ready: &[(Pr, Scope)]) -> BTreeMap<String, (String, String)> {
     repos
 }
 
-pub(crate) fn scan_repo(
+#[derive(Default)]
+struct ManifestScan {
+    publishers: Publishers,
+    references: References,
+    manifests: Vec<release::Manifest>,
+    restricted_feeds: feed::Restrictions,
+}
+
+pub(crate) struct RepoSnapshot {
+    head: String,
+    tree: Vec<String>,
+    incomplete: bool,
+    manifests: Vec<(String, String, String)>,
+}
+
+fn scan_repo_with_tree(
     client: &mut Client,
     slug: &str,
     sha: &str,
     questions: &mut Vec<Question>,
-) -> Result<Vec<(String, String, String)>> {
+) -> Result<RepoSnapshot> {
     let (tree, truncated) = client.tree(slug, sha)?;
     if truncated {
         questions.push(Question::new(
@@ -223,10 +238,17 @@ pub(crate) fn scan_repo(
         ));
     }
     let blobs = client.blobs(slug, sha, &paths)?;
-    Ok(blobs
+    let incomplete = truncated || cut || blobs.len() != paths.len();
+    let manifests = blobs
         .into_iter()
         .map(|(path, text)| (slug.to_string(), path, text))
-        .collect())
+        .collect();
+    Ok(RepoSnapshot {
+        head: sha.to_owned(),
+        tree,
+        incomplete,
+        manifests,
+    })
 }
 
 fn scan_publishers(
@@ -234,22 +256,31 @@ fn scan_publishers(
     rules: &Rules,
     ready: &[(Pr, Scope)],
     questions: &mut Vec<Question>,
-) -> Result<(Publishers, References, Vec<release::Manifest>)> {
+    check_feeds: bool,
+) -> Result<ManifestScan> {
     let repos = repos_to_scan(ready);
     if repos.len() < 2 && wanted_packages(rules, ready).is_empty() {
-        return Ok((Publishers::new(), References::new(), Vec::new()));
+        return Ok(ManifestScan::default());
     }
     progress::phase("reading manifests");
-    let mut manifests = Vec::new();
+    let mut scan = ManifestScan::default();
     for (index, (slug, sha)) in repos.values().enumerate() {
-        manifests.extend(scan_repo(client, slug, sha, questions)?);
+        let snapshot = scan_repo_with_tree(client, slug, sha, questions)?;
+        if check_feeds {
+            scan.restricted_feeds.record_publishers(slug, &snapshot);
+            for (pr, _) in ready
+                .iter()
+                .filter(|(pr, _)| pr.key.slug().eq_ignore_ascii_case(slug))
+            {
+                scan.restricted_feeds.inspect(pr, sha, &snapshot);
+            }
+        }
+        scan.manifests.extend(snapshot.manifests);
         progress::count(index + 1, repos.len());
     }
-    Ok((
-        publishers::collect(&manifests),
-        publishers::collect_references(&manifests),
-        manifests,
-    ))
+    scan.publishers = publishers::collect(&scan.manifests);
+    scan.references = publishers::collect_references(&scan.manifests);
+    Ok(scan)
 }
 
 fn release_context(
@@ -257,16 +288,15 @@ fn release_context(
     cfg: &Config,
     rules: &Rules,
     ready: &[(Pr, Scope)],
-    scanned: &(Publishers, References, Vec<release::Manifest>),
+    scanned: &ManifestScan,
     with_bumps: bool,
 ) -> Result<release::Context> {
-    let (publishers, references, manifests) = scanned;
     let prs: Vec<&Pr> = ready.iter().map(|(pr, _)| pr).collect();
     let mut context = release::Context::new(
         rules,
-        publishers,
-        references,
-        manifests,
+        &scanned.publishers,
+        &scanned.references,
+        &scanned.manifests,
         &prs,
         cfg.merge.package_max_behind,
     );
@@ -429,11 +459,13 @@ pub fn plan_json(opts: &PlanOptions) -> Result<String> {
     plan_text(&built)
 }
 
-fn emit(built: &Plan, json: bool) -> Result<()> {
+fn emit(built: &Plan, json: bool, verbose: bool) -> Result<()> {
     if json {
         println!("{}", plan_text(built)?);
-    } else {
+    } else if verbose {
         anstream::print!("{}", render::text(built));
+    } else {
+        anstream::print!("{}", render::compact(built));
     }
     Ok(())
 }
@@ -451,14 +483,14 @@ fn print_queue(built: &Plan) {
     }
 }
 
-fn deliver(built: &Plan, json: bool, mode: Option<Emit>) -> Result<i32> {
+fn deliver(built: &Plan, json: bool, mode: Option<Emit>, verbose: bool) -> Result<i32> {
     match mode {
         Some(Emit::Queue) => {
             print_queue(built);
             Ok(emit::exit_code(built))
         }
         None => {
-            emit(built, json)?;
+            emit(built, json, verbose)?;
             Ok(0)
         }
     }
@@ -466,7 +498,7 @@ fn deliver(built: &Plan, json: bool, mode: Option<Emit>) -> Result<i32> {
 
 pub fn plan(opts: PlanOptions) -> Result<i32> {
     let (built, _) = build_plan(&opts)?;
-    let code = deliver(&built, opts.json, opts.emit)?;
+    let code = deliver(&built, opts.json, opts.emit, opts.verbose)?;
     Ok(if opts.strict && !built.has_eligible() {
         emit::EXIT_NO_ELIGIBLE
     } else {
@@ -565,7 +597,13 @@ fn build_plan_with_prepare(
     skipped.extend(colliding);
 
     let external = external_states(&mut client, &ready)?;
-    let scanned = scan_publishers(&mut client, &rules, &ready, &mut questions)?;
+    let scanned = scan_publishers(
+        &mut client,
+        &rules,
+        &ready,
+        &mut questions,
+        opts.check_feeds,
+    )?;
     let release_context = release_context(
         &mut client,
         &cfg,
@@ -574,7 +612,12 @@ fn build_plan_with_prepare(
         &scanned,
         opts.check_bumps,
     )?;
-    let (publishers, references, _) = scanned;
+    let ManifestScan {
+        publishers,
+        references,
+        restricted_feeds,
+        ..
+    } = scanned;
     let mut ready = ready;
     let mut wanted = pair_packages(&release_context, &ready);
     if opts.check_bumps {
@@ -601,6 +644,7 @@ fn build_plan_with_prepare(
     };
     let gathered = into_gathered(&cfg, &explicit, train, deploy_branch, &client, collected);
     let mut built = plan::build(&rules, gathered);
+    restricted_feeds.apply(&mut built);
     release::annotate(&mut built, &release_context);
     built.bumps = bumps;
     built.deploy_resources = detect_deploy_resources(&mut client, &built);

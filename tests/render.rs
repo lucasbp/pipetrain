@@ -93,7 +93,7 @@ fn the_time_line_switches_to_minutes_after_a_minute() {
     assert!(plain.contains("time      1m 05s"), "{plain}");
 }
 
-fn late_gate_text() -> String {
+fn late_gate_plan() -> plan::Plan {
     let cfg =
         Config::parse("orgs = [\"acme\"]\n[packages]\n\"@acme/kit\" = \"acme/kit\"\n").unwrap();
     let rules = Rules::new(&cfg).unwrap();
@@ -111,7 +111,7 @@ fn late_gate_text() -> String {
             ),
         },
     ];
-    let built = plan::build(
+    plan::build(
         &rules,
         Gathered {
             generated_at: "2026-10-30T09:00:00-03:00".to_string(),
@@ -132,8 +132,35 @@ fn late_gate_text() -> String {
             requests: 0,
             rate_remaining: None,
         },
+    )
+}
+
+fn late_gate_text() -> String {
+    anstream::adapter::strip_str(&render::text(&late_gate_plan())).to_string()
+}
+
+#[test]
+fn both_text_views_keep_the_requested_feed_check_and_compact_marks_late_gates() {
+    let mut plan = late_gate_plan();
+    let dep = plan
+        .items
+        .iter_mut()
+        .flat_map(|item| &mut item.after)
+        .find(|dep| dep.package.as_deref() == Some("@acme/kit"))
+        .unwrap();
+    dep.published = Some(false);
+    let compact = anstream::adapter::strip_str(&render::compact(&plan)).to_string();
+    let gate = compact.lines().find(|line| line.contains("web#5")).unwrap();
+    assert!(
+        gate.contains("confirm DDL") && gate.contains("after kit#6"),
+        "{compact}"
     );
-    anstream::adapter::strip_str(&render::text(&built)).to_string()
+    for text in [compact, render::text(&plan)] {
+        assert!(
+            text.contains("feed  npm:@acme/kit 1.1.0 (not yet)"),
+            "{text}"
+        );
+    }
 }
 
 #[test]

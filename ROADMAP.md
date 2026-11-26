@@ -44,11 +44,12 @@ pipetrain plans the merge order of pull requests across repos. This file says wh
 - `bump --only major|minor|patch`, `--changes-only` and `--check`: additive options on the dry run. `--only` (repeatable) leaves the other levels as `other_level`, `--changes-only` lists just the manifests that would change, and `--check` exits 1 when something would. Without them the output and the JSON are unchanged.
 - `pipetrain feed <package> --version <v> --wait [--interval <s>] [--timeout <s>]`: blocks until the version is published, with exit codes a runner can use (0 published, 1 timeout, 2 refused, 3 persistent error). Progress goes to stderr, the result to stdout once, and `--json` gains `waited`, `attempts`, `elapsed_seconds` and `timed_out` with schema 1 intact.
 
-- Package detection for `Cargo.toml`, `pyproject.toml` and `go.mod`, next to NuGet and npm: a repo that publishes a package and another that references it get the `dependency` edge, and a readable version bump in the manifest diff gives the `package` edge and the `# wait` line. `path`, `workspace` and `git` dependencies, compound ranges and Go pseudo-versions never become a version. `feed`, `bump` and `--check-feeds` still know only NuGet and npm.
+- Package detection for `Cargo.toml`, `pyproject.toml` and `go.mod`, next to NuGet and npm: a repo that publishes a package and another that references it get the `dependency` edge, and a readable version bump in the manifest diff gives the `package` edge and the `# wait` line. `path`, `workspace` and `git` dependencies, compound ranges and Go pseudo-versions never become a version. The 0.14.0 release limits feed checks and consumer bumps to NuGet and npm.
 - `plan` and `bundle` accept `repo#12` without the org: the name is looked up in the orgs of the active profile (or `--org`), one `GET /repos` per org and distinct name, never cached. A name in two orgs is an error that lists them, and a name in none is an error with the next step. `org/repo#12` and `--json` and `--emit queue` are unchanged.
 
 - Prebuilt binaries: a tag `v*` triggers a workflow that builds Windows x86_64, Linux x86_64 and aarch64 (static musl) and macOS arm64 and x86_64, plus `.deb` and `.rpm` for Linux x86_64 and aarch64, and publishes them with `SHA256SUMS` and a build provenance attestation to a GitHub Release. `install.sh` and `install.ps1` install into a user folder and verify the SHA-256. Publishing the crate on crates.io is a separate manual step, documented in `docs/releasing.md`.
-- `pipetrain update --check`: read-only, exits 10 when a newer release exists. A passive one-line notice on stderr, at most once every 24 hours, interactive terminals only and off with `--no-update-check` or `PIPETRAIN_NO_UPDATE_CHECK=1`. The in-place swap of the executable exists behind `--experimental-install` and is not ready.
+- `pipetrain update --check` checks for a newer release. Since 0.6.0, plain `pipetrain update` downloads the release, verifies SHA-256 and replaces the executable.
+- Since 0.14.0, `plan` and `merge` simulate the merge order of PRs with the same base in the same repository and identify conflicts introduced by an earlier PR.
 - A GitHub Action (`action.yml`, composite, read-only): installs the release binary for the runner, verifies it against `SHA256SUMS`, runs `plan` with `refs`, `all`, `profile`, `config` and `emit` (`json`, `queue`, `text`), and publishes `queue`, `json`, `text` and `exit-code` as outputs and in the step summary. Exit 3 only fails the step with `fail-on-questions`. See `docs/github-action.md`.
 
 - An opt-in local usage log (`log = true`, `PIPETRAIN_LOG=1`, off with `--no-log`): one JSON line per run with the command name, exit code, error type, duration, request count and cache hit, never tokens, names, arguments or paths, rotated at 1 MiB. `pipetrain log --summary` reads it. Nothing is sent anywhere.
@@ -59,13 +60,21 @@ pipetrain plans the merge order of pull requests across repos. This file says wh
 
 ## Next
 
-Small, well understood, in this order:
+These three items are approved, in the order below. No release date is set. The last published version at the start of this work was 0.14.0.
 
-1. Finish the in-place update (`update` without a flag): download, verify the SHA-256 and swap the executable, on top of the existing experimental path.
-2. A deeper conflict report that simulates the merge, beyond files changed by more than one PR.
-3. `feed`, `bump` and `plan --check-feeds` for Cargo (crates.io), `pyproject.toml` (PyPI) and Go modules: today they only know NuGet and npm.
-4. `cargo audit` (and `cargo deny` if it fits) in the CI workflow, so advisories fail a PR instead of being checked by hand.
-5. Compact `plan` text output by default, the way `merge` already is: per-check detail and full causes move to `--verbose`.
+1. **Registry checks and consumer bumps for Cargo, PyPI and Go modules.** For each ecosystem, stage a producer version in a test registry, detect its publisher and consumer from their manifests, and verify the version with both `plan --check-feeds` and `feed`. Preview the consumer bump, then exercise `bump --apply` against a local Git remote and verify the exact diff in the draft branch. Document supported requirements, registry selection, lock files and cases that need the maintainer's decision before a write.
+2. **Dependency audit on pull requests.** Run `cargo audit` on the application's locked dependencies. The job must pass with a clean lockfile and return a failing exit code for a known advisory in a separate fixture. See the [reproducible audit check](docs/dependency-audit.md). `cargo deny` is optional.
+3. **Compact human-readable plan.** The default view must show execution order, pauses and actionable blockers. The verbose view must give the full reasons and per-check detail. Run the same plan through both modes and verify identical queue output and compatible schema-1 JSON, including existing dependency and wait fields.
+
+Validate the local implementation with the acceptance tests above, formatting, clippy and the locked test suite. Record a shipped version only after the PR checks pass on GitHub, the changes reach the default branch and a published release contains them.
+
+| Item | Local acceptance evidence | Published version |
+|---|---|---|
+| Registry checks and bumps | [Producer, registry, plan and consumer draft](tests/bump_apply.rs), [registry protocols](tests/feed_cli.rs) and [manual-update cases](tests/bump_scan.rs) | Pending |
+| Dependency audit | [CI job](.github/workflows/ci.yml) and [known-advisory failure fixture](docs/dependency-audit.md) | Pending |
+| Compact plan | [CLI checks for compact text, verbose detail, JSON and queue](tests/preflight.rs) and [gate and feed rendering](tests/render.rs) | Pending |
+
+All three items passed local acceptance on Windows on 2026-11-26. Formatting, Clippy and the locked test suite passed. The eight opt-in tests that write to GitHub sandboxes require a separate run. The application lockfile passed the audit, and the isolated known-advisory fixture returned exit code 1. The pull request records hosted checks for each revision. The published version is recorded in the table when a release contains the changes.
 
 ## Later
 
@@ -76,8 +85,7 @@ Bigger or riskier, no order yet:
 - The future S3 backend uses the user's AWS credential provider or named profile and accesses S3 directly, without a central hosting account, authorization service or separate application login. Configuration selects the bucket, region, prefix and credential source; never embed AWS secrets in the executable, repository or state. Credential-provider support and retention policy remain to be decided before implementation.
 - Discover orgs and repos from local clones, and use the token Git already stores as a last-resort credential.
 - Conflict resolution in steps: mechanical rules first (lockfiles, version bumps, append-only files), then proposed diffs for the rest that a human approves, then rebase on a throwaway branch that is always reversible.
-- An execution mode that performs the merges. Opt-in, resumable, with a report. Never the default.
-- Bump consumers automatically after a package release: wait for the new version to reach the feed, update the reference in the dependent repos, then release them. This writes to repos, so it ships as an opt-in mode.
+- Extend opt-in consumer updates after a package release. The existing `merge --apply` already executes and resumes merges with a report. `merge --bump` already prepares reviewed NuGet consumer drafts when it can prove publication. Broader automatic consumer release remains a candidate.
 - Using `pipetrain mcp` from cloud sessions and Codex: a documented path that downloads the release with a SHA-256 check and registers the server, no hosted service and no token stored on a server.
 - Package detection for Maven and Gradle.
 - Other forges.

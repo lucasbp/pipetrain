@@ -41,7 +41,7 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 ```
 
-The crate uses edition 2024. CI runs the format check on Linux and runs Clippy with fatal warnings and the locked test suite on Linux, macOS and Windows for pushes to `main` and pull requests. The suite includes the dependency check above and the CLI/MCP contract tests. CI uses the newest stable Rust through `dtolnay/rust-toolchain@stable`, so run `rustup update stable` before trusting a local Clippy run.
+The crate uses edition 2024. CI runs the format check on Linux and runs Clippy with fatal warnings and the locked test suite on Linux, macOS and Windows for pushes to `main` and pull requests. The suite includes the dependency check above and the CLI/MCP contract tests. A separate Linux job checks Cargo.lock against the RustSec advisory database as described in [Dependency audit](docs/dependency-audit.md). CI uses the newest stable Rust through `dtolnay/rust-toolchain@stable`, so run `rustup update stable` before trusting a local Clippy run.
 
 ## Rules
 

@@ -12,7 +12,7 @@ use super::feed::{self as feed_command, FeedOptions};
 use crate::config::ApiConfig;
 use crate::consumer_bump::RestoreSettings;
 use crate::consumer_bump::apply::{
-    Applied, Candidate, DefaultBranchRemote, apply_repo, branch_name, pull_request_title,
+    Applied, Candidate, DefaultBranchRemote, apply_repo, pull_request_title, standalone_branch,
 };
 use crate::consumer_bump::backend::{LocalBackend, ProcessRunner};
 use crate::feed::{self, Ecosystem};
@@ -135,6 +135,17 @@ fn cleanup(workspace: Option<PathBuf>) {
     }
 }
 
+fn verify_head(ecosystem: Ecosystem, expected: Option<&str>, current: &str) -> Result<()> {
+    if matches!(
+        ecosystem,
+        Ecosystem::Cargo | Ecosystem::Pypi | Ecosystem::Go
+    ) && expected != Some(current)
+    {
+        bail!("the default branch is no longer at the previewed commit; run bump again");
+    }
+    Ok(())
+}
+
 fn open_one(
     client: &mut Client,
     ecosystem: Ecosystem,
@@ -142,8 +153,9 @@ fn open_one(
     (repo, rows): (&str, &[(String, String)]),
     root: &Path,
     settings: &RestoreSettings,
+    expected: Option<&str>,
 ) -> Result<RepoResult> {
-    let branch = branch_name(package, version);
+    let branch = standalone_branch(ecosystem, package, version);
     let meta = client.rest(&format!("/repos/{repo}"))?;
     let default_branch = meta["default_branch"]
         .as_str()
@@ -152,6 +164,7 @@ fn open_one(
     let head = client
         .branch_tip(repo, &default_branch)?
         .context("the default branch was not found")?;
+    verify_head(ecosystem, expected, &head)?;
     if client.branch_tip(repo, &branch)?.is_some() {
         return Ok(result(
             repo,
@@ -224,6 +237,39 @@ pub fn apply_all(
     settings: &BTreeMap<String, RestoreSettings>,
     observe: &mut dyn FnMut(&RepoResult),
 ) -> Vec<RepoResult> {
+    apply_confirmed(
+        client,
+        ecosystem,
+        (package, version),
+        targets,
+        ApplyContext {
+            root,
+            settings,
+            heads: &BTreeMap::new(),
+        },
+        observe,
+    )
+}
+
+struct ApplyContext<'a> {
+    root: &'a Path,
+    settings: &'a BTreeMap<String, RestoreSettings>,
+    heads: &'a BTreeMap<String, String>,
+}
+
+fn apply_confirmed(
+    client: &mut Client,
+    ecosystem: Ecosystem,
+    (package, version): (&str, &str),
+    targets: &Targets,
+    context: ApplyContext<'_>,
+    observe: &mut dyn FnMut(&RepoResult),
+) -> Vec<RepoResult> {
+    let ApplyContext {
+        root,
+        settings,
+        heads,
+    } = context;
     let mut done = Vec::new();
     let mut stopped = false;
     for (repo, rows) in targets {
@@ -238,6 +284,7 @@ pub fn apply_all(
                 (repo, rows),
                 root,
                 &chosen,
+                heads.get(repo).map(String::as_str),
             ) {
                 Ok(found) => found,
                 Err(error) => result(repo, "failed", format!("{error:#}")),
@@ -309,6 +356,7 @@ pub fn run(opts: &BumpOptions, outcome: Outcome) -> Result<i32> {
         exit,
         feed,
         api,
+        heads,
         ..
     } = outcome;
     for note in &before {
@@ -339,7 +387,7 @@ pub fn run(opts: &BumpOptions, outcome: Outcome) -> Result<i32> {
             return Ok(1);
         }
     }
-    let repos = write_all(opts, &report, &api, &targets)?;
+    let repos = write_all(opts, &report, &api, &targets, &heads)?;
     let failed = repos.iter().any(|found| found.status == "failed");
     finish(opts, &report, true, repos)?;
     Ok(i32::from(failed))
@@ -373,6 +421,7 @@ fn write_all(
     report: &Report,
     api: &ApiConfig,
     targets: &Targets,
+    heads: &BTreeMap<String, String>,
 ) -> Result<Vec<RepoResult>> {
     let root = crate::cache::default_dir()
         .map(|root| root.join("bump-workspaces"))
@@ -385,13 +434,16 @@ fn write_all(
         .filter_map(|repo| Some((repo.repo.clone(), repo.restore.clone()?)))
         .collect();
     let mut observe = |found: &RepoResult| eprintln!("{}", result_line(found, color));
-    Ok(apply_all(
+    Ok(apply_confirmed(
         &mut client,
         report.ecosystem,
         (&report.package, &report.target),
         targets,
-        &root,
-        &settings,
+        ApplyContext {
+            root: &root,
+            settings: &settings,
+            heads,
+        },
         &mut observe,
     ))
 }
@@ -423,6 +475,57 @@ fn finish(
 mod tests {
     use super::*;
     use crate::command::bump::RepoRefs;
+
+    #[test]
+    fn changed_default_head_refuses_manifest_writes_before_reading_the_new_tree() {
+        use std::io::BufReader;
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for (path, body) in [
+                ("/repos/acme/demo", r#"{"default_branch":"main"}"#),
+                (
+                    "/repos/acme/demo/git/ref/heads/main",
+                    r#"{"object":{"sha":"bb22"}}"#,
+                ),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                let mut reader = BufReader::new(&stream);
+                reader.read_line(&mut line).unwrap();
+                assert!(line.starts_with(&format!("GET {path} ")), "{line}");
+                for header in reader.lines() {
+                    if header.unwrap().is_empty() {
+                        break;
+                    }
+                }
+                write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+            }
+        });
+        let mut client = Client::with_base_url(
+            "ghp_FAKE0123456789".into(),
+            &ApiConfig::default(),
+            false,
+            &url,
+        );
+        let err = open_one(
+            &mut client,
+            Ecosystem::Cargo,
+            ("demo", "1.1.0"),
+            ("acme/demo", &[("Cargo.toml".into(), "=1.0.0".into())]),
+            Path::new("."),
+            &RestoreSettings::default(),
+            Some("aa11"),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("previewed commit"), "{err}");
+        server.join().unwrap();
+        assert!(verify_head(Ecosystem::Pypi, None, "bb22").is_err());
+        assert!(verify_head(Ecosystem::Go, Some("bb22"), "bb22").is_ok());
+        assert!(verify_head(Ecosystem::Nuget, None, "bb22").is_ok());
+    }
 
     fn report() -> Report {
         let repos = vec![

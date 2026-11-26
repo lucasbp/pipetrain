@@ -14,9 +14,15 @@ pipetrain feed <PACKAGE> --version <V> --wait [--interval <S>] [--timeout <S>] [
 - `--interval`, `--timeout` and `--no-progress` are only valid with `--wait`; otherwise the command stops with exit 1.
 - Ecosystem, `--org`, `--registry` and the token work exactly as in `feed`.
 
+For Cargo, use `--ecosystem cargo` and the crate's published spelling. The default sparse index is `https://index.crates.io`. For Python, use `--ecosystem pypi` and a distribution name. Equivalent spellings share a PyPI project lookup and releases follow PEP 440 ordering. For Go, use `--ecosystem go` and the case-sensitive module path. The default module proxy is `https://proxy.golang.org`. Exact versions missing from the proxy list are checked with the version information endpoint, including pseudo-versions. A module with an empty tag list can supply a version through `@latest`. Cargo and PyPI lookups omit yanked releases. These three adapters send no GitHub credentials.
+
 Usage errors of `--wait` exit with 1 and not with the clap default of 2, because 2 is reserved for a refused token.
 
 ## Loop
+
+For a planned Cargo, Python or Go dependency, the CLI checks the consumer manifest and its workspace at the scanned head before querying a public registry. A governing `.cargo/config`, `.cargo/config.toml`, `uv.toml` or `go.work`, an alternate source for that package, or incomplete head evidence leaves the lookup unconfirmed. Sibling projects' configurations do not affect the consumer. The wait and merge order stay in the queue; the usual manual package confirmation is available.
+
+Automatic Go bump targets also read the highest release's `go.mod` to exclude retracted tags and closed retraction intervals. An explicit Go version keeps the proxy's publication status, including versions still available after retraction.
 
 1. Check the feed with the same lookup as `feed`.
 2. If the version is published, stop with exit 0.
@@ -44,7 +50,7 @@ The outcome at the timeout depends on the last attempt. If it reached the feed a
 |---|---|
 | 0 | Published. |
 | 1 | Timeout with the version not published, or a usage error. |
-| 2 | Refused by the feed (401 or 403). The token is missing or lacks `read:packages`. |
+| 2 | Refused by the registry (401 or 403). GitHub Packages can require `read:packages`. |
 | 3 | The last attempt at the timeout failed with a network, HTTP or parsing error. |
 
 Without `--wait` the exit codes of `feed` do not change.

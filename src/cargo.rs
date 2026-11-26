@@ -4,7 +4,7 @@ use std::sync::OnceLock;
 use regex::Regex;
 use toml::{Table, Value};
 
-use crate::detect::side_lines;
+use crate::detect::{side_lines, toml_string as string_value};
 
 const DEPENDENCY_SECTIONS: [&str; 3] = ["dependencies", "dev-dependencies", "build-dependencies"];
 
@@ -111,8 +111,8 @@ fn section_of(header: &str) -> (Section, Option<String>) {
         r"(?:^|\.)(?:dependencies|dev-dependencies|build-dependencies)$",
     );
     if let Some(caps) = named.captures(header) {
-        let name = caps[1].trim_matches('"').to_string();
-        return (Section::Table, Some(normalise(&name)));
+        let name = caps[1].trim_matches(['"', '\'']).to_string();
+        return (Section::Table, Some(name));
     }
     if plain.is_match(header) {
         return (Section::Dependencies, None);
@@ -131,12 +131,6 @@ fn flush(pending: Option<Pending>, found: &mut BTreeMap<String, String>) {
     }
 }
 
-fn string_value(value: &str) -> Option<String> {
-    static QUOTED: OnceLock<Regex> = OnceLock::new();
-    let quoted = regex(&QUOTED, r#"^"([^"]*)""#);
-    Some(quoted.captures(value.trim())?[1].trim().to_string())
-}
-
 fn inline_entry(key: &str, value: &str) -> Option<(String, String)> {
     let wrapped: Table = toml::from_str(&format!("v = {value}")).ok()?;
     let spec = wrapped.get("v")?.as_table()?;
@@ -145,14 +139,21 @@ fn inline_entry(key: &str, value: &str) -> Option<(String, String)> {
     }
     let version = spec.get("version")?.as_str()?.trim();
     let real = spec.get("package").and_then(Value::as_str).unwrap_or(key);
-    (!version.is_empty()).then(|| (normalise(real), version.to_string()))
+    (!version.is_empty()).then(|| (real.to_string(), version.to_string()))
 }
 
 pub fn bumped(patch: &str, prefix: char) -> BTreeMap<String, String> {
+    bumped_names(patch, prefix)
+        .into_iter()
+        .map(|(name, v)| (normalise(&name), v))
+        .collect()
+}
+
+pub(crate) fn bumped_names(patch: &str, prefix: char) -> BTreeMap<String, String> {
     static HEADER: OnceLock<Regex> = OnceLock::new();
     static PAIR: OnceLock<Regex> = OnceLock::new();
     let header = regex(&HEADER, r"^\[([^\[\]]+)\]\s*(?:#.*)?$");
-    let pair = regex(&PAIR, r#"^("[^"]+"|[A-Za-z0-9_.-]+)\s*=\s*(.+)$"#);
+    let pair = regex(&PAIR, r#"^("[^"]+"|'[^']+'|[A-Za-z0-9_.-]+)\s*=\s*(.+)$"#);
     let mut found = BTreeMap::new();
     let mut section = Section::Unknown;
     let mut pending: Option<Pending> = None;
@@ -172,7 +173,7 @@ pub fn bumped(patch: &str, prefix: char) -> BTreeMap<String, String> {
         let Some(caps) = pair.captures(line) else {
             continue;
         };
-        let key = caps[1].trim_matches('"');
+        let key = caps[1].trim_matches(['"', '\'']);
         let value = caps[2].trim();
         match section {
             Section::Other => {}
@@ -184,7 +185,7 @@ pub fn bumped(patch: &str, prefix: char) -> BTreeMap<String, String> {
                     open.local = true;
                 } else if key == "package" {
                     if let Some(real) = string_value(value) {
-                        open.name = normalise(&real);
+                        open.name = real;
                     }
                 } else if key == "version" && changed {
                     open.version = string_value(value).filter(|v| !v.is_empty());
@@ -202,7 +203,7 @@ pub fn bumped(patch: &str, prefix: char) -> BTreeMap<String, String> {
                     let is_setting = matches!(section, Section::Unknown)
                         && PACKAGE_KEYS.contains(&key.to_lowercase().as_str());
                     if !version.is_empty() && !is_setting {
-                        found.insert(normalise(key), version);
+                        found.insert(key.to_string(), version);
                     }
                 }
             }

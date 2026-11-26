@@ -1,8 +1,8 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
-use clap::ValueEnum;
 use serde_json::{Value, json};
 
 use super::apply::tint;
@@ -11,14 +11,17 @@ use super::order::{Names, configured, names_of, read_repo, requests_line};
 use super::resolve;
 use crate::cache::{Cache, CacheMode};
 use crate::config::ApiConfig;
-pub use crate::consumer_bump::pin::{Status, classify};
+use crate::consumer_bump::pin::manifests as pins;
+pub use crate::consumer_bump::pin::{Level, Status, classify, level_of};
 use crate::consumer_bump::{RestoreMode, RestoreSettings};
 use crate::elapsed;
-use crate::feed::{self, Ecosystem};
+use crate::feed::Ecosystem;
 use crate::github::{self, Client};
 use crate::manifest;
 use crate::progress::{self, Progress};
 use crate::style::{bold, dim, green, yellow};
+
+pub use pins::{check_workspace_sources, pin_manifest};
 
 pub struct BumpOptions {
     pub package: String,
@@ -43,39 +46,6 @@ pub struct BumpOptions {
     pub solution: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum Level {
-    Major,
-    Minor,
-    Patch,
-}
-
-impl Level {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Major => "major",
-            Self::Minor => "minor",
-            Self::Patch => "patch",
-        }
-    }
-}
-
-pub fn level_of(current: &str, target: &str) -> Level {
-    let from = feed::Version::parse(current);
-    let to = feed::Version::parse(target);
-    let (from, to) = (from.numbers(), to.numbers());
-    for index in 0..from.len().max(to.len()) {
-        if from.get(index).unwrap_or(&0) != to.get(index).unwrap_or(&0) {
-            return match index {
-                0 => Level::Major,
-                1 => Level::Minor,
-                _ => Level::Patch,
-            };
-        }
-    }
-    Level::Patch
-}
-
 pub fn target_version(
     to: Option<&str>,
     lookup: impl FnOnce() -> Result<Result<String, i32>>,
@@ -98,11 +68,14 @@ pub struct Scan {
     pub warnings: Vec<String>,
 }
 
-fn in_ecosystem(path: &str, ecosystem: Ecosystem) -> bool {
+pub(crate) fn in_ecosystem(path: &str, ecosystem: Ecosystem) -> bool {
     let lower = path.to_lowercase();
     match ecosystem {
         Ecosystem::Nuget => lower.ends_with("proj") || lower.ends_with(".props"),
         Ecosystem::Npm => lower == "package.json" || lower.ends_with("/package.json"),
+        Ecosystem::Cargo => path.rsplit('/').next() == Some("Cargo.toml"),
+        Ecosystem::Pypi => path.rsplit('/').next() == Some("pyproject.toml"),
+        Ecosystem::Go => path.rsplit('/').next() == Some("go.mod"),
     }
 }
 
@@ -111,15 +84,49 @@ pub fn refs_of(
     package: &str,
     ecosystem: Ecosystem,
 ) -> Vec<(String, String)> {
-    manifests
+    let tree = manifests
+        .iter()
+        .map(|(_, path, _)| path.clone())
+        .collect::<Vec<_>>();
+    checked_refs(manifests, &tree, package, ecosystem).unwrap_or_default()
+}
+
+fn checked_refs(
+    manifests: &[(String, String, String)],
+    tree: &[String],
+    package: &str,
+    ecosystem: Ecosystem,
+) -> Result<Vec<(String, String)>> {
+    let mut refs = Vec::new();
+    for (repo, path, text) in manifests
         .iter()
         .filter(|(_, path, _)| in_ecosystem(path, ecosystem))
-        .flat_map(|(_, path, text)| {
+    {
+        let mut versions = if pins::handles(ecosystem) {
+            pins::versions(ecosystem, text, package).map_err(|_| {
+                anyhow::anyhow!("could not parse {repo}/{path} for dependency updates")
+            })?
+        } else {
             manifest::package_versions(path, text, package)
-                .into_iter()
-                .map(move |spec| (path.clone(), spec))
-        })
-        .collect()
+        };
+        if pins::handles(ecosystem)
+            && !versions.is_empty()
+            && let Err(reason) =
+                check_workspace_sources(ecosystem, package, path, text, tree, |ancestor| {
+                    manifests
+                        .iter()
+                        .find(|(_, p, _)| p == ancestor)
+                        .map(|(_, _, text)| text.clone())
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("could not read ancestor manifest {ancestor}")
+                        })
+                })
+        {
+            versions.fill(format!("manual: {reason}"));
+        }
+        refs.extend(versions.into_iter().map(|v| (path.clone(), v)));
+    }
+    Ok(refs)
 }
 
 pub fn scan(
@@ -128,16 +135,46 @@ pub fn scan(
     package: &str,
     ecosystem: Ecosystem,
 ) -> Result<Scan> {
+    scan_at_heads(client, names, package, ecosystem, &mut BTreeMap::new())
+}
+
+fn scan_at_heads(
+    client: &mut Client,
+    names: &Names,
+    package: &str,
+    ecosystem: Ecosystem,
+    heads: &mut BTreeMap<String, String>,
+) -> Result<Scan> {
     let mut questions = Vec::new();
     let mut found = Scan::default();
     let mut readable = 0;
     progress::phase("reading manifests");
     for (index, repo) in names.values().enumerate() {
         match read_repo(client, repo, &mut questions)? {
-            Some(manifests) => {
+            Some(snapshot) => {
                 readable += 1;
-                let refs = refs_of(&manifests, package, ecosystem);
+                let mut refs =
+                    checked_refs(&snapshot.manifests, &snapshot.tree, package, ecosystem)?;
+                if pins::handles(ecosystem) && (snapshot.incomplete || !refs.is_empty()) {
+                    let guard = if snapshot.incomplete {
+                        let reason = "the repository tree or manifest contents were incomplete";
+                        for (_, current) in &mut refs {
+                            *current = format!("manual: {reason}");
+                        }
+                        Err(reason.to_owned())
+                    } else {
+                        pins::check_manifest_only(ecosystem, &snapshot.tree, &refs)
+                    };
+                    if let Err(reason) = guard {
+                        found.warnings.push(format!(
+                            "warning: {repo}: --apply needs manual review: {reason}"
+                        ));
+                    }
+                }
                 if !refs.is_empty() {
+                    if pins::handles(ecosystem) {
+                        heads.insert(repo.clone(), snapshot.head);
+                    }
                     found.repos.push(RepoRefs {
                         repo: repo.clone(),
                         refs,
@@ -201,7 +238,11 @@ impl Report {
                     .map(|(path, current)| Row {
                         path: path.clone(),
                         current: current.clone(),
-                        status: classify(current, target),
+                        status: if pins::handles(ecosystem) {
+                            pins::classify(ecosystem, package, current, target)
+                        } else {
+                            classify(current, target)
+                        },
                     })
                     .collect(),
                 restore: None,
@@ -234,7 +275,9 @@ impl Report {
         }
         let target = self.target.clone();
         for row in self.repos.iter_mut().flat_map(|repo| repo.files.iter_mut()) {
-            if row.status == Status::Change && !only.contains(&level_of(&row.current, &target)) {
+            if row.status == Status::Change
+                && !only.contains(&pins::level(self.ecosystem, &row.current, &target))
+            {
                 row.status = Status::OtherLevel;
             }
         }
@@ -394,6 +437,7 @@ pub struct Outcome {
     pub elapsed: Duration,
     pub(crate) feed: Option<FeedOptions>,
     pub(crate) api: Option<ApiConfig>,
+    pub(crate) heads: BTreeMap<String, String>,
 }
 
 impl Outcome {
@@ -406,6 +450,7 @@ impl Outcome {
             elapsed: started.elapsed(),
             feed: None,
             api: None,
+            heads: BTreeMap::new(),
         }
     }
 }
@@ -434,6 +479,12 @@ pub fn execute(opts: &BumpOptions) -> Result<Outcome> {
     let ecosystem = opts
         .ecosystem
         .unwrap_or_else(|| Ecosystem::default_for(&opts.package));
+    if pins::handles(ecosystem) && (opts.solution.is_some() || opts.restore_mode.is_some()) {
+        bail!(
+            "--solution and --restore-mode are unavailable for {} manifest-only updates",
+            ecosystem.as_str()
+        );
+    }
     let feed_options = FeedOptions {
         package: opts.package.clone(),
         version: None,
@@ -460,10 +511,19 @@ pub fn execute(opts: &BumpOptions) -> Result<Outcome> {
     if target.is_empty() {
         bail!("--to needs a version");
     }
+    if pins::handles(ecosystem) && !pins::valid_version(ecosystem, &opts.package, &target) {
+        bail!(
+            "{} is not a supported exact {} version for {}; choose an exact published version compatible with the package",
+            target,
+            ecosystem.as_str(),
+            opts.package
+        );
+    }
     let mut client = Client::new(github::token()?, &cfg.api, opts.verbose)
         .with_profile_cache(Cache::at_default(opts.cache), &resolved.info.name);
     let progress = Progress::start(opts.progress);
-    let scanned = scan(&mut client, &names, &opts.package, ecosystem)?;
+    let mut heads = BTreeMap::new();
+    let scanned = scan_at_heads(&mut client, &names, &opts.package, ecosystem, &mut heads)?;
     drop(progress);
     before.extend(scanned.warnings.iter().cloned());
     if scanned.repos.is_empty() {
@@ -502,6 +562,7 @@ pub fn execute(opts: &BumpOptions) -> Result<Outcome> {
         elapsed,
         feed: Some(feed_options),
         api: Some(cfg.api.clone()),
+        heads,
     })
 }
 

@@ -153,7 +153,7 @@ Consumers should switch on `code`, never on `message` or `hint`.
 | `search_requests` | integer | Additive. Search requests spent by this run. |
 | `not_modified` | integer | Additive. Requests answered `304 Not Modified`; they are refunded and not counted above. |
 | `elapsed_ms` | integer | Milliseconds of wall clock from the start of the command until the data was gathered, before rendering. |
-| `feed_checks` | integer (optional) | Distinct package and version pairs looked up in a feed by `plan --check-feeds`. Omitted when `0`, so a plan without the flag is byte-identical to before. |
+| `feed_checks` | integer (optional) | Distinct registry, package and version lookups by `plan --check-feeds`. Identical names from different ecosystems use their respective registries. Omitted when `0`. |
 | `hidden_by_author` | integer (optional) | How many PRs (items and skipped) are hidden by the author filter. Omitted when `0`. |
 
 ## Example

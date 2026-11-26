@@ -225,7 +225,7 @@ A pre-existing branch must contain the current base tip. Inspect a refused branc
 
 #### When to use
 
-Use `feed` for a read-only NuGet or npm publication lookup outside queue execution. Use `--wait` when the next runner step needs a particular version.
+Use `feed` for a read-only NuGet, npm, Cargo, PyPI or Go publication lookup outside queue execution. Use `--wait` when the next runner step needs a particular version.
 
 #### Commands
 
