@@ -3,8 +3,8 @@
 `merge --bump` opts into consumer preparation; the default and `--no-bump` disable it.
 The two flags are mutually exclusive. Writes require `--apply` and its normal
 confirmation. Dry runs and the confirmation explain the potential isolated bump
-branches and draft PRs before any operation. The standalone bump command and MCP
-bump tool remain read-only. Enabling preparation cannot bypass publication proof,
+branches and draft PRs before any operation. Standalone `bump` defaults to a dry run. The MCP
+bump tool always uses the dry run. Enabling preparation cannot bypass publication proof,
 dependency ordering, CI, or human review.
 
 Automatic preparation is limited to selected consumer PRs already eligible for
@@ -68,7 +68,7 @@ restore pair, changed-file allowlist, lock verification, commit and push of a ne
 branch), taken verbatim out of `prepare_many`, and the `BumpGateway` with
 `LocalBackend`. Its own code is small: the feed proof (`feed::proof`), the choice of
 repos from the dry run's `change` rows, the draft PR into the default branch, and an
-npm path that edits `package.json` without a restore.
+manifest-only path for npm, Cargo, Python and Go. The latter three recheck the selected requirements in the isolated workspace before editing. See the [standalone CLI examples and limits](../README.md#bumping-a-package).
 
 It requires `--yes` or a terminal, proves the exact version in the feed before the
 first write, and never forces a push. A bump branch that exists is skipped. The
