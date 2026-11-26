@@ -1,1 +1,1 @@
-<!-- Describe the change and the entry points you tested. For changes to module boundaries, see "Architecture review" in AGENTS.md. -->
+<!-- Describe the change and the entry points you tested. For module boundaries and any inline Why: justification, use the review and validation guidance in AGENTS.md. -->
