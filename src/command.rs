@@ -593,7 +593,7 @@ fn build_plan_with_prepare(
         &scanned,
         opts.check_bumps,
     )?;
-    let (publishers, references, _) = scanned;
+    let (publishers, references, manifests) = scanned;
     let mut ready = ready;
     let mut wanted = pair_packages(&release_context, &ready);
     if opts.check_bumps {
@@ -620,6 +620,7 @@ fn build_plan_with_prepare(
     };
     let gathered = into_gathered(&cfg, &explicit, train, deploy_branch, &client, collected);
     let mut built = plan::build(&rules, gathered);
+    feed::apply_manifest_sources(&mut built, &manifests);
     release::annotate(&mut built, &release_context);
     built.bumps = bumps;
     built.deploy_resources = detect_deploy_resources(&mut client, &built);

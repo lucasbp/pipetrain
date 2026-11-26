@@ -298,6 +298,35 @@ fn is_checkable(dep: &Dependency) -> bool {
     dep.rule == Rule::Package && dep.package.is_some() && dep.version.is_some()
 }
 
+pub(crate) fn apply_manifest_sources(plan: &mut Plan, manifests: &[(String, String, String)]) {
+    use crate::detect;
+    for item in &mut plan.items {
+        let slug = format!("{}/{}", item.org, item.repo);
+        for dep in &mut item.after {
+            let Some(coordinate) = &dep.feed_coordinate else {
+                continue;
+            };
+            let redirected = manifests.iter().any(|(repo, path, body)| {
+                repo.eq_ignore_ascii_case(&slug)
+                    && match coordinate.ecosystem {
+                        Ecosystem::Cargo => detect::is_cargo_toml(path),
+                        Ecosystem::Pypi => detect::is_pyproject(path),
+                        Ecosystem::Go => detect::is_go_mod(path),
+                        _ => false,
+                    }
+                    && detect::source_override(
+                        coordinate.ecosystem,
+                        &coordinate.package,
+                        body.lines(),
+                    )
+            });
+            if redirected {
+                dep.feed_coordinate = None;
+            }
+        }
+    }
+}
+
 pub fn annotate(plan: &mut Plan, checker: &mut Checker) -> usize {
     let orgs: BTreeMap<String, String> = plan
         .items

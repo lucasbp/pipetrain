@@ -93,6 +93,92 @@ fn packument(versions: &[&str]) -> Value {
 }
 
 #[test]
+fn public_registries_exclude_yanked_files_and_order_versions_by_ecosystem() {
+    for (ecosystem, package, metadata, latest, missing) in [
+        ("cargo", "abc", [
+            r#"{"name":"abc","vers":"1.0.0+original","yanked":false}"#,
+            r#"{"name":"abc","vers":"2.0.0","yanked":true}"#,
+            r#"{"name":"abc","vers":"1.0.0-rc.1","yanked":false}"#,
+        ].join("\n"), "1.0.0+original","1.0.0+different"),
+        ("pypi","Test_Util", r#"{"releases":{"1.0rc2":[{"yanked":false}],"1.0.post1":[{"yanked":false}],"1.0.dev12":[{"yanked":false}],"1.0rc11":[{"yanked":false}],"2!1":[{"yanked":true}],"2.0":[]}}"#.into(), "1.0.post1","2!1"),
+    ] {
+        let (base, requests) = common::serve_bodies(vec![metadata.clone(),metadata]);
+        let output = feed(&[package,"--ecosystem",ecosystem,"--registry",&base,"--json"]);
+        assert!(output.status.success(),"{}",stderr(&output));
+        let doc: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(doc["latest"],latest);
+        let output = feed(&[package,"--ecosystem",ecosystem,"--registry",&base,"--version",missing,"--wait","--timeout","0","--json"]);
+        assert_eq!(output.status.code(),Some(1),"{}",stderr(&output));
+        let doc: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(doc["published"],false);
+        assert_eq!(doc["timed_out"],true);
+        assert_eq!(requests.join().unwrap().len(),2);
+    }
+}
+
+#[test]
+fn go_proxy_verifies_an_unlisted_exact_version_and_rejects_a_mismatched_answer() {
+    let wanted = "v0.0.0-20260101000000-abcdefabcdef";
+    for (returned, code) in [(wanted, 0), ("v1.0.0", 3)] {
+        let (base, requests) = common::serve_bodies(vec![
+            "v1.2.0\n".into(),
+            json!({"Version":returned}).to_string(),
+        ]);
+        let output = feed(&[
+            "example.org/Module",
+            "--ecosystem",
+            "go",
+            "--registry",
+            &base,
+            "--version",
+            wanted,
+            "--wait",
+            "--timeout",
+            "0",
+            "--json",
+        ]);
+        assert_eq!(output.status.code(), Some(code), "{}", stderr(&output));
+        let requests = requests.join().unwrap();
+        assert!(requests[0].starts_with("GET /example.org/!module/@v/list "));
+        assert!(requests[1].starts_with(&format!("GET /example.org/!module/@v/{wanted}.info ")));
+    }
+}
+
+#[test]
+fn a_go_module_without_tags_uses_the_proxy_latest_and_a_missing_module_is_not_found() {
+    for (first, second, code) in [
+        (
+            common::canned("200 OK", ""),
+            common::canned(
+                "200 OK",
+                r#"{"Version":"v0.0.0-20260101000000-abcdefabcdef"}"#,
+            ),
+            0,
+        ),
+        (
+            common::canned("410 Gone", ""),
+            common::canned("404 Not Found", ""),
+            1,
+        ),
+    ] {
+        let (base, requests) = common::serve(vec![first, second]);
+        let output = feed(&[
+            "example.org/module",
+            "--ecosystem",
+            "go",
+            "--registry",
+            &base,
+            "--json",
+        ]);
+        assert_eq!(output.status.code(), Some(code), "{}", stderr(&output));
+        if code == 1 {
+            assert!(output.stdout.is_empty());
+        }
+        assert!(requests.join().unwrap()[1].starts_with("GET /example.org/module/@latest "));
+    }
+}
+
+#[test]
 fn npm_version_that_is_published() {
     let server = serve(|_| |_: &str| (200, packument(&["1.0.0", "1.1.0", "1.2.0"])));
     let output = feed(&[

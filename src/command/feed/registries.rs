@@ -125,7 +125,7 @@ fn go_versions(session: &Session, base: &str, opts: &FeedOptions) -> Result<Outc
     if let Some(v) = &requested {
         go_version(v)?;
     }
-    let mut versions =
+    let (mut versions, listed) =
         match session.get_body(Ecosystem::Go, &format!("{root}/@v/list"), |body| {
             let text = body.read_to_string()?;
             let mut versions = Vec::new();
@@ -135,9 +135,8 @@ fn go_versions(session: &Session, base: &str, opts: &FeedOptions) -> Result<Outc
             }
             Ok(versions)
         })? {
-            Outcome::Body(versions) => versions,
-            Outcome::NotFound if requested.is_none() => return Ok(Outcome::NotFound),
-            Outcome::NotFound => Vec::new(),
+            Outcome::Body(versions) => (versions, true),
+            Outcome::NotFound => (Vec::new(), false),
             Outcome::Refused { had_token } => return Ok(Outcome::Refused { had_token }),
         };
     let endpoint = match requested {
@@ -159,6 +158,7 @@ fn go_versions(session: &Session, base: &str, opts: &FeedOptions) -> Result<Outc
                 );
                 versions.push(info.version);
             }
+            Outcome::NotFound if !listed => return Ok(Outcome::NotFound),
             Outcome::NotFound => {}
             Outcome::Refused { had_token } => return Ok(Outcome::Refused { had_token }),
         }
