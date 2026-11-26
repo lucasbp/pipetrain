@@ -75,7 +75,7 @@ The crate uses edition 2024. CI runs the format check on Linux and runs Clippy w
 
 ## Sandbox e2e
 
-The opt-in harness requires authenticated `gh` and writes only to its guarded public sandbox repositories. Run one harness process at a time from the repo root:
+The opt-in harness requires authenticated `gh` with access to the three private sandboxes and the public guarded sandbox. Run one harness process at a time from the repo root:
 
 ```powershell
 $env:PIPETRAIN_E2E='1'; cargo test --test e2e_sandbox -- --ignored --test-threads=1
