@@ -190,8 +190,15 @@ impl Client {
         }
     }
 
-    pub fn with_cache(mut self, cache: Cache) -> Self {
-        self.cache = cache;
+    pub fn with_cache(self, cache: Cache) -> Self {
+        self.with_profile_cache(cache, "")
+    }
+
+    pub fn with_profile_cache(mut self, cache: Cache, profile: &str) -> Self {
+        self.cache = cache.for_github(&self.base, profile, &self.token);
+        if self.http.enabled() {
+            self.http = self.cache.http();
+        }
         self
     }
 
@@ -399,7 +406,9 @@ impl Client {
 
     pub fn get(&mut self, path: &str) -> Result<Reply, ApiError> {
         let url = format!("{}{path}", self.base);
-        let key = self.http.enabled().then(|| {
+        let route = path.split('?').next().unwrap_or(path);
+        let pr_files = route.ends_with("/files") && route.contains("/pulls/");
+        let key = (self.http.enabled() && !pr_files).then(|| {
             (
                 http_key("GET", &url, "", &self.token),
                 freshness_of(path, self.live),
@@ -533,7 +542,7 @@ impl Client {
     pub fn query(&mut self, label: &str, query: &str, variables: Value) -> Result<Reply, ApiError> {
         let url = format!("{}/graphql", self.base);
         let token = self.token.clone();
-        let key = self.http.enabled().then(|| {
+        let key = (self.http.enabled() && !self.live).then(|| {
             (
                 http_key(
                     "POST",

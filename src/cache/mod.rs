@@ -67,6 +67,14 @@ impl Cache {
         Self::open(mode, default_dir())
     }
 
+    pub(crate) fn for_github(mut self, base: &str, profile: &str, token: &str) -> Self {
+        if let Some(dir) = &mut self.dir {
+            let scope = http_key("github-cache", base, profile, token);
+            *dir = dir.join("github").join(scope);
+        }
+        self
+    }
+
     fn entry_path(&self, slug: &str, endpoint: &str, parts: &[&str]) -> Option<PathBuf> {
         if self.mode == CacheMode::Off {
             return None;

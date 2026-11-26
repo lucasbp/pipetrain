@@ -1,9 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 
 mod common;
 
-use common::serve_bodies as serve;
 use pipetrain::cache::{Cache, CacheMode};
 use pipetrain::config::ApiConfig;
 use pipetrain::content::{self, Check};
@@ -62,16 +62,23 @@ fn reply(entries: &[Option<&str>]) -> String {
     json!({ "data": data }).to_string()
 }
 
-fn run(
-    dir: &Path,
-    mode: CacheMode,
-    replies: Vec<String>,
-    checks: &[Check],
-) -> (Vec<bool>, Vec<String>) {
-    let (base, handle) = serve(replies);
-    let mut github = client(&base, dir, mode);
-    let verdicts = content::check(&mut github, checks).unwrap();
-    (verdicts, handle.join().unwrap())
+fn runner(dir: &Path) -> impl Fn(CacheMode, Vec<String>, &[Check]) -> (Vec<bool>, Vec<String>) {
+    let (send, receive) = mpsc::channel::<String>();
+    let server = common::serve_handler(move |_| {
+        let body = receive.try_recv().expect("unexpected extra request");
+        (200, serde_json::from_str(&body).unwrap())
+    });
+    move |mode, replies, checks| {
+        let expected = replies.len();
+        for reply in replies {
+            send.send(reply).unwrap();
+        }
+        let mut github = client(&server.base, dir, mode);
+        let verdicts = content::check(&mut github, checks).unwrap();
+        let requests = std::mem::take(&mut *server.seen.lock().unwrap());
+        assert_eq!(requests.len(), expected);
+        (verdicts, requests)
+    }
 }
 
 fn probe_count(request: &str) -> usize {
@@ -94,13 +101,14 @@ fn asks_live(request: &str, path: &str) -> bool {
 fn second_run_skips_the_fixed_probe() {
     let scratch = temp("second");
     let dir = scratch.join("cache");
+    let run = runner(&dir);
     let checks = wanted(&["src/a.rs"]);
     let full = reply(&[Some("c1"), Some("aaa"), Some("aaa")]);
-    let (first, seen) = run(&dir, CacheMode::Use, vec![full], &checks);
+    let (first, seen) = run(CacheMode::Use, vec![full], &checks);
     assert_eq!(first, vec![true]);
     assert_eq!(probe_count(&seen[0]), 3);
     let live = reply(&[Some("c1"), Some("aaa")]);
-    let (second, seen) = run(&dir, CacheMode::Use, vec![live], &checks);
+    let (second, seen) = run(CacheMode::Use, vec![live], &checks);
     assert_eq!(second, first);
     assert_eq!(probe_count(&seen[0]), 2);
     assert!(!asks_fixed(&seen[0], "src/a.rs"));
@@ -108,16 +116,45 @@ fn second_run_skips_the_fixed_probe() {
 }
 
 #[test]
+fn repeated_probes_share_results_only_within_the_same_repo_and_read() {
+    let scratch = temp("shared");
+    let dir = scratch.join("cache");
+    let run = runner(&dir);
+    let mut checks = wanted(&["a.rs"]);
+    checks.push(checks[0].clone());
+    checks.push(Check {
+        slug: "acme/web".into(),
+        ..checks[0].clone()
+    });
+    let first = reply(&[
+        Some("c1"),
+        Some("x"),
+        Some("x"),
+        Some("c2"),
+        Some("y"),
+        None,
+    ]);
+    let (verdicts, seen) = run(CacheMode::Use, vec![first], &checks);
+    assert_eq!(verdicts, [true, true, false]);
+    assert_eq!(total_probes(&seen), 6);
+    let second = reply(&[Some("c3"), Some("z"), Some("c2"), None]);
+    let (verdicts, seen) = run(CacheMode::Use, vec![second], &checks);
+    assert_eq!(verdicts, [false, false, true]);
+    assert_eq!(total_probes(&seen), 4);
+}
+
+#[test]
 fn deleted_path_is_cached_as_null() {
     let scratch = temp("deleted");
     let dir = scratch.join("cache");
+    let run = runner(&dir);
     let checks = wanted(&["src/gone.rs"]);
     let full = reply(&[Some("c1"), Some("aaa"), None]);
-    let (first, seen) = run(&dir, CacheMode::Use, vec![full], &checks);
+    let (first, seen) = run(CacheMode::Use, vec![full], &checks);
     assert_eq!(first, vec![false]);
     assert_eq!(probe_count(&seen[0]), 3);
     let live = reply(&[Some("c1"), Some("aaa")]);
-    let (second, seen) = run(&dir, CacheMode::Use, vec![live], &checks);
+    let (second, seen) = run(CacheMode::Use, vec![live], &checks);
     assert_eq!(second, vec![false]);
     assert_eq!(probe_count(&seen[0]), 2);
     assert!(!asks_fixed(&seen[0], "src/gone.rs"));
@@ -127,12 +164,13 @@ fn deleted_path_is_cached_as_null() {
 fn cached_oid_never_gives_a_stale_true() {
     let scratch = temp("stale");
     let dir = scratch.join("cache");
+    let run = runner(&dir);
     let checks = wanted(&["src/a.rs"]);
     let full = reply(&[Some("c1"), Some("aaa"), Some("aaa")]);
-    let (first, _) = run(&dir, CacheMode::Use, vec![full], &checks);
+    let (first, _) = run(CacheMode::Use, vec![full], &checks);
     assert_eq!(first, vec![true]);
     let moved = reply(&[Some("c2"), Some("bbb")]);
-    let (second, seen) = run(&dir, CacheMode::Use, vec![moved], &checks);
+    let (second, seen) = run(CacheMode::Use, vec![moved], &checks);
     assert_eq!(second, vec![false]);
     assert_eq!(probe_count(&seen[0]), 2);
 }
@@ -141,10 +179,11 @@ fn cached_oid_never_gives_a_stale_true() {
 fn off_mode_always_sends_every_probe() {
     let scratch = temp("off");
     let dir = scratch.join("cache");
+    let run = runner(&dir);
     let checks = wanted(&["src/a.rs"]);
     for _ in 0..2 {
         let full = reply(&[Some("c1"), Some("aaa"), Some("aaa")]);
-        let (verdicts, seen) = run(&dir, CacheMode::Off, vec![full], &checks);
+        let (verdicts, seen) = run(CacheMode::Off, vec![full], &checks);
         assert_eq!(verdicts, vec![true]);
         assert_eq!(probe_count(&seen[0]), 3);
         assert!(asks_fixed(&seen[0], "src/a.rs"));
@@ -155,19 +194,20 @@ fn off_mode_always_sends_every_probe() {
 fn refresh_mode_asks_everything_and_rewrites() {
     let scratch = temp("refresh");
     let dir = scratch.join("cache");
+    let run = runner(&dir);
     let checks = wanted(&["src/a.rs"]);
     let seed = reply(&[Some("c1"), Some("aaa"), Some("aaa")]);
-    run(&dir, CacheMode::Use, vec![seed], &checks);
+    run(CacheMode::Use, vec![seed], &checks);
     let fresh = reply(&[Some("c1"), Some("ddd"), Some("ddd")]);
-    let (refreshed, seen) = run(&dir, CacheMode::Refresh, vec![fresh], &checks);
+    let (refreshed, seen) = run(CacheMode::Refresh, vec![fresh], &checks);
     assert_eq!(refreshed, vec![true]);
     assert_eq!(probe_count(&seen[0]), 3);
     let again = reply(&[Some("c1"), Some("eee"), Some("eee")]);
-    let (second, seen) = run(&dir, CacheMode::Refresh, vec![again], &checks);
+    let (second, seen) = run(CacheMode::Refresh, vec![again], &checks);
     assert_eq!(second, vec![true]);
     assert_eq!(probe_count(&seen[0]), 3);
     let live = reply(&[Some("c1"), Some("eee")]);
-    let (used, seen) = run(&dir, CacheMode::Use, vec![live], &checks);
+    let (used, seen) = run(CacheMode::Use, vec![live], &checks);
     assert_eq!(used, vec![true]);
     assert_eq!(probe_count(&seen[0]), 2);
 }
@@ -213,18 +253,14 @@ fn second_run_reply(count: usize, bad: Option<usize>) -> String {
 fn many(bad: Option<usize>, name: &str) {
     let scratch = temp(name);
     let dir = scratch.join("cache");
+    let run = runner(&dir);
     let owned = paths_of(30);
     let names: Vec<&str> = owned.iter().map(String::as_str).collect();
     let checks = wanted(&names);
-    let (first, seen) = run(&dir, CacheMode::Use, first_run_replies(30, bad), &checks);
+    let (first, seen) = run(CacheMode::Use, first_run_replies(30, bad), &checks);
     assert_eq!(seen.len(), 2);
     assert_eq!(total_probes(&seen), 61);
-    let (second, seen) = run(
-        &dir,
-        CacheMode::Use,
-        vec![second_run_reply(30, bad)],
-        &checks,
-    );
+    let (second, seen) = run(CacheMode::Use, vec![second_run_reply(30, bad)], &checks);
     assert_eq!(seen.len(), 1);
     assert_eq!(total_probes(&seen), 31);
     assert_eq!(second, first);
@@ -245,9 +281,10 @@ fn many_paths_with_a_changed_file_stay_false() {
 fn cache_files_hold_no_token() {
     let scratch = temp("secret");
     let dir = scratch.join("cache");
+    let run = runner(&dir);
     let checks = wanted(&["src/a.rs"]);
     let full = reply(&[Some("c1"), Some("aaa"), Some("aaa")]);
-    run(&dir, CacheMode::Use, vec![full], &checks);
+    run(CacheMode::Use, vec![full], &checks);
     let mut files = Vec::new();
     walk(&dir, &mut files);
     assert!(!files.is_empty());

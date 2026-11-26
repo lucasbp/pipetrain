@@ -66,16 +66,20 @@ fn wait_for_deploy(
         if clock.timed_out(now) {
             break Deploy::TimedOut(last);
         }
-        let reading = if follow_by_id(expected, &known) {
+        let reading = if settled.is_none() && follow_by_id(expected, &known) {
             client.refresh_runs(slug, &known).map(|runs| (runs, true))
         } else {
             client.workflow_runs(slug, sha, expected.is_none())
         };
         let (runs, complete) = match reading {
-            Ok(reading) => {
+            Ok((runs, complete)) => {
                 consecutive_errors = 0;
-                known = reading.0.clone();
-                reading
+                if complete {
+                    known.clone_from(&runs);
+                } else {
+                    known.clear();
+                }
+                (runs, complete)
             }
             Err(error) if transient_read(&error) => {
                 consecutive_errors += 1;
@@ -258,7 +262,7 @@ fn follow_by_id(expected: Option<&PushRuns>, known: &[crate::github::Run]) -> bo
             .iter()
             .all(|path| known.iter().any(|run| &run.path == path))
         && known.iter().all(|run| run.id != 0)
-        && known.iter().any(|run| run.status != "completed")
+        && known.iter().filter(|run| run.status != "completed").count() == 1
 }
 
 fn transient_read(error: &crate::github::ApiError) -> bool {

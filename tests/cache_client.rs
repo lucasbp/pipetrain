@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 mod common;
 
-use common::{closed_base, serve_bodies as serve};
-use pipetrain::cache::{Cache, CacheMode};
+use common::serve_bodies as serve;
+use pipetrain::cache::{Cache, CacheMode, Stored, http_key};
 use pipetrain::config::ApiConfig;
 use pipetrain::github::Client;
 use pipetrain::model::{ChangedFile, PrKey};
@@ -111,7 +111,7 @@ fn files_are_served_from_the_cache_without_a_request() {
     assert_eq!(first.requests(), 1);
     assert_eq!(server.join().unwrap().len(), 1);
 
-    let mut second = client(&closed_base(), &dir, CacheMode::Use);
+    let mut second = client(&base, &dir, CacheMode::Use);
     let (again, again_complete) = second.files(&key(), HEAD, BASE).unwrap();
     assert_eq!(second.requests(), 0);
     assert_eq!(second.cache_hits(), 1);
@@ -120,6 +120,55 @@ fn files_are_served_from_the_cache_without_a_request() {
     assert_eq!(again.len(), 2);
     assert!(again.iter().all(|f| f.patch.is_none()));
     assert_clean(&dir);
+}
+
+#[test]
+fn both_caches_require_the_same_profile_token_and_api_origin() {
+    let scratch = temp("scopes");
+    let dir = scratch.join("cache");
+    let path = format!("/repos/{SLUG}/contents/package.json?ref={HEAD}");
+    let replies = |marker: &str| {
+        [
+            json!({"tree": [{"type": "blob", "path": marker}], "truncated": false}).to_string(),
+            json!({"name": marker}).to_string(),
+        ]
+    };
+    let (base, server) = serve(
+        ["one", "two", "three"]
+            .into_iter()
+            .flat_map(replies)
+            .collect(),
+    );
+    let (other_base, other_server) = serve(Vec::from(replies("four")));
+    let open = || Cache::open(CacheMode::Use, Some(dir.clone()));
+    let mut legacy = open();
+    legacy.put(
+        SLUG,
+        "tree",
+        &[HEAD],
+        &json!({"paths":["legacy"], "truncated":false}),
+    );
+    legacy.http().save(
+        &http_key("GET", &format!("{base}{path}"), "", FAKE),
+        &Stored::new(None, None, json!({"name":"legacy"})),
+    );
+    let read = |origin: &str, profile: &str, token: &str, marker: &str| {
+        let mut api = Client::with_base_url(token.to_owned(), &ApiConfig::default(), false, origin)
+            .with_profile_cache(open(), profile);
+        let (paths, _) = api.tree(SLUG, HEAD).unwrap();
+        assert_eq!(paths, [marker]);
+        let mut api = api.with_http_cache();
+        assert_eq!(api.rest(&path).unwrap()["name"], marker);
+        api.requests()
+    };
+    assert_eq!(read(&base, "first", FAKE, "one"), 2);
+    assert_eq!(read(&base, "first", FAKE, "one"), 0);
+    assert_eq!(read(&base, "second", FAKE, "two"), 2);
+    assert_eq!(read(&base, "first", "ghp_FAKE2345678901", "three"), 2);
+    assert_eq!(read(&other_base, "first", FAKE, "four"), 2);
+    assert_eq!(read(&base, "first", FAKE, "one"), 0);
+    assert_eq!(server.join().unwrap().len(), 6);
+    assert_eq!(other_server.join().unwrap().len(), 2);
 }
 
 #[test]
@@ -169,7 +218,7 @@ fn a_pr_that_needs_its_patch_is_not_cached() {
         files_reply(&["package.json", "src/a.rs"]),
     ]);
     for _ in 0..2 {
-        let mut api = client(&base, &dir, CacheMode::Use);
+        let mut api = client(&base, &dir, CacheMode::Use).with_http_cache();
         let (files, _) = api.files(&key(), HEAD, BASE).unwrap();
         assert_eq!(api.requests(), 1);
         let manifest = files.iter().find(|f| f.path == "package.json").unwrap();
@@ -193,7 +242,7 @@ fn refresh_requests_and_rewrites_while_off_leaves_nothing() {
     assert_eq!(files.len(), 2);
     assert_eq!(server.join().unwrap().len(), 2);
 
-    let mut after = client(&closed_base(), &dir, CacheMode::Use);
+    let mut after = client(&base, &dir, CacheMode::Use);
     let (rewritten, _) = after.files(&key(), HEAD, BASE).unwrap();
     assert_eq!(after.requests(), 0);
     assert_eq!(rewritten.len(), 2);
@@ -227,7 +276,7 @@ fn a_tree_round_trips_including_truncation() {
     assert_eq!(first.requests(), 1);
     server.join().unwrap();
 
-    let mut second = client(&closed_base(), &dir, CacheMode::Use);
+    let mut second = client(&base, &dir, CacheMode::Use);
     let cached = second.tree(SLUG, HEAD).unwrap();
     assert_eq!(second.requests(), 0);
     assert_eq!(second.cache_hits(), 1);
@@ -276,7 +325,7 @@ fn blobs_fetch_only_the_missing_paths_and_remember_absent_ones() {
     assert!(seen[2].contains(&format!("{HEAD}:d/gone.json")));
     assert!(!seen[2].contains("a/package.json"));
 
-    let mut offline = client(&closed_base(), &dir, CacheMode::Use);
+    let mut offline = client(&base, &dir, CacheMode::Use);
     assert_eq!(offline.blobs(SLUG, HEAD, &all).unwrap(), expected);
     let again = offline.blobs(SLUG, HEAD, &gone).unwrap();
     assert_eq!(again, pairs(&[("a/package.json", "one")]));
