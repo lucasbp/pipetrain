@@ -168,6 +168,7 @@ mod tests {
         };
         assert!(!guard.publisher_mismatch("acme/lib", "kit", &cargo));
         let snapshot = RepoSnapshot {
+            head: "a".repeat(40),
             incomplete: false,
             tree: vec![],
             manifests: vec![
@@ -234,6 +235,7 @@ mod tests {
             let path = format!("workspace/service/{filename}");
             let sibling = format!("other/{filename}");
             let mut snapshot = RepoSnapshot {
+                head: "b".repeat(40),
                 incomplete: false,
                 tree: vec![path.clone(), sibling.clone(), format!("other/{config}")],
                 manifests: vec![
