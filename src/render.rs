@@ -243,14 +243,22 @@ fn feed_checks(out: &mut String, plan: &Plan) {
             if let (Some(package), Some(version)) = (&dep.package, &dep.version)
                 && (dep.published.is_some() || dep.feed_error.is_some())
             {
-                checks.insert((package, version, dep.published, dep.feed_error.as_deref()));
+                let registry = dep.feed_coordinate.as_ref().map(|c| c.ecosystem.as_str());
+                checks.insert((
+                    registry,
+                    package,
+                    version,
+                    dep.published,
+                    dep.feed_error.as_deref(),
+                ));
             }
         }
     }
-    for (package, version, published, error) in checks {
+    for (registry, package, version, published, error) in checks {
+        let prefix = registry.map(|r| format!("{r}:")).unwrap_or_default();
         let _ = writeln!(
             out,
-            "  feed  {package} {version}{}",
+            "  feed  {prefix}{package} {version}{}",
             crate::emit::feed_suffix(published, error)
         );
     }

@@ -263,12 +263,16 @@ fn setup(repos: &[(&str, Vec<(&str, &str)>)], versions: &[&str], refuse_refs: &[
 }
 
 fn bump(env: &Env, args: &[&str]) -> Output {
+    bump_with_registry(env, args, &env.server.base)
+}
+
+fn bump_with_registry(env: &Env, args: &[&str], registry: &str) -> Output {
     let config = env.dir.join("pipetrain.toml");
     Command::new(env!("CARGO_BIN_EXE_pipetrain"))
         .arg("bump")
         .args(args)
         .args(["--config", config.to_str().unwrap()])
-        .args(["--registry", &env.server.base])
+        .args(["--registry", registry])
         .env("PIPETRAIN_API_URL", &env.server.base)
         .env("PIPETRAIN_CACHE_DIR", env.dir.join("cache"))
         .env("GIT_CONFIG_GLOBAL", env.dir.join("gitconfig"))
@@ -279,6 +283,181 @@ fn bump(env: &Env, args: &[&str]) -> Output {
         .stdin(Stdio::null())
         .output()
         .unwrap()
+}
+
+#[test]
+fn published_cargo_python_and_go_versions_reach_only_the_consumer_draft() {
+    for (ecosystem, package, path, producer, manifest, target, response) in [
+        (
+            "cargo",
+            "acme-core",
+            "Cargo.toml",
+            "[package]\nname = \"acme-core\"\nversion = \"1.1.0\"\n",
+            "[dependencies]\nacme-core = \"=1.0.0\"\n",
+            "1.1.0",
+            r#"{"name":"acme-core","vers":"1.1.0","yanked":false}"#,
+        ),
+        (
+            "pypi",
+            "acme-core",
+            "pyproject.toml",
+            "[project]\nname = 'acme-core'\nversion = '1.1.0'\n",
+            "[project]\nname = 'app'\ndependencies = ['acme-core==1.0.0']\n",
+            "1.1.0",
+            r#"{"info":{"name":"acme-core"},"releases":{"1.1.0":[{"yanked":false}]}}"#,
+        ),
+        (
+            "go",
+            "example.org/acme/core",
+            "go.mod",
+            "module example.org/acme/core\n",
+            "module example.org/app\n\nrequire example.org/acme/core v1.0.0\n",
+            "v1.1.0",
+            "v1.1.0\n",
+        ),
+    ] {
+        let env = setup(&[("acme/app", vec![(path, manifest)])], &[], &[]);
+        let (registry, _) = common::serve_bodies(vec![response.to_string(); 3]);
+        let feed = Command::new(env!("CARGO_BIN_EXE_pipetrain"))
+            .args([
+                "feed",
+                package,
+                "--version",
+                target,
+                "--ecosystem",
+                ecosystem,
+                "--registry",
+                &registry,
+                "--json",
+            ])
+            .env("GH_TOKEN", TOKEN)
+            .output()
+            .unwrap();
+        assert!(feed.status.success(), "{ecosystem}: {}", stderr(&feed));
+        let proof: Value = serde_json::from_slice(&feed.stdout).unwrap();
+        assert_eq!(proof["published"], true);
+        let args = [
+            package,
+            "--ecosystem",
+            ecosystem,
+            "--to",
+            target,
+            "--repo",
+            "acme/app",
+            "--json",
+        ];
+        let preview = bump_with_registry(&env, &args, &registry);
+        assert!(
+            preview.status.success(),
+            "{ecosystem}: {}",
+            stderr(&preview)
+        );
+        let report: Value = serde_json::from_slice(&preview.stdout).unwrap();
+        assert_eq!(report["repos"][0]["files"][0]["status"], "change");
+        assert!(env.writes().is_empty());
+        let mut args = args.to_vec();
+        args.extend(["--apply", "--yes"]);
+        let applied = bump_with_registry(&env, &args, &registry);
+        assert!(
+            applied.status.success(),
+            "{ecosystem}: {}",
+            stderr(&applied)
+        );
+        let report: Value = serde_json::from_slice(&applied.stdout).unwrap();
+        assert_eq!(report["repos"][0]["status"], "opened", "{report}");
+        let branch = report["repos"][0]["branch"].as_str().unwrap();
+        assert!(branch.starts_with(&format!("pipetrain/bump/{ecosystem}/")));
+        let bare = env.bare("acme/app");
+        assert_eq!(
+            git_in(&bare, &["show", &format!("main:{path}")]),
+            manifest.trim_end()
+        );
+        assert_eq!(
+            git_in(&bare, &["show", &format!("{branch}:{path}")]),
+            manifest.replace("1.0.0", "1.1.0").trim_end()
+        );
+        assert_eq!(
+            git_in(&bare, &["diff", "--name-only", "main", branch]),
+            path
+        );
+        let request = env
+            .seen()
+            .into_iter()
+            .find(|r| r.starts_with("POST /repos/acme/app/pulls "))
+            .unwrap();
+        let draft: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(draft["draft"], true);
+        assert_eq!(draft["base"], "main");
+        let diff = git_in(&bare, &["diff", "main", branch, "--", path]);
+        let patch = &diff[diff.find("@@").expect("a version bump hunk")..];
+        assert_published_wait(path, producer, manifest, patch, &registry);
+    }
+}
+
+fn assert_published_wait(path: &str, producer: &str, consumer: &str, patch: &str, registry: &str) {
+    use pipetrain::command::feed::{Checker, annotate};
+    use pipetrain::config::{Config, Rules};
+    use pipetrain::model::ChangedFile;
+    use pipetrain::plan::{Gathered, build};
+    use pipetrain::{emit, publishers};
+
+    let manifests = [
+        ("acme/lib".to_owned(), path.to_owned(), producer.to_owned()),
+        ("acme/app".to_owned(), path.to_owned(), consumer.to_owned()),
+    ];
+    let mut app = common::pr("acme/app", 1, "bump", "main");
+    app.files = vec![ChangedFile {
+        path: path.to_owned(),
+        patch: Some(patch.to_owned()),
+    }];
+    let publisher = common::pr("acme/lib", 2, "release", "main");
+    let rules = Rules::new(&Config::parse("orgs = ['acme']").unwrap()).unwrap();
+    let mut plan = build(
+        &rules,
+        Gathered {
+            generated_at: "2026-11-26T09:00:00Z".into(),
+            train: "deploy/test".into(),
+            deploy_branch: "deploy/test".into(),
+            train_prefix: "deploy/".into(),
+            orgs: vec!["acme".into()],
+            ready: vec![(app, "explicit".into()), (publisher, "explicit".into())],
+            skipped: vec![],
+            questions: vec![],
+            external: BTreeMap::new(),
+            publishers: publishers::collect(&manifests),
+            references: publishers::collect_references(&manifests),
+            max_parallel: 1,
+            requests: 0,
+            rate_remaining: None,
+        },
+    );
+    assert_eq!(
+        annotate(
+            &mut plan,
+            &mut Checker::with_registry(Some(registry.into()))
+        ),
+        1,
+        "{path}: {patch}"
+    );
+    let queue = emit::queue_lines(&plan);
+    let wait = queue
+        .iter()
+        .position(|line| line.starts_with("# wait:") && line.ends_with("(published)"))
+        .unwrap();
+    assert!(
+        queue
+            .iter()
+            .position(|line| line == "merge:acme/lib#2")
+            .unwrap()
+            < wait
+    );
+    assert!(
+        queue
+            .iter()
+            .position(|line| line == "merge:acme/app#1")
+            .unwrap()
+            > wait
+    );
 }
 
 fn stdout(output: &Output) -> String {
@@ -647,6 +826,44 @@ fn run_nuget_with(
 
 fn run_nuget(fake: &mut Fake, tree: &[String], rows: &[(String, String)]) -> Result<Applied> {
     run_nuget_with(fake, tree, rows, &RestoreSettings::default())
+}
+
+#[test]
+fn covering_locks_and_workspace_files_require_review_before_any_write() {
+    for (ecosystem, manifest, companion) in [
+        (Ecosystem::Cargo, "Cargo.toml", "Cargo.lock"),
+        (Ecosystem::Cargo, "Cargo.toml", ".cargo/config.toml"),
+        (Ecosystem::Pypi, "pyproject.toml", "uv.lock"),
+        (Ecosystem::Pypi, "pyproject.toml", "uv.toml"),
+        (Ecosystem::Pypi, "pyproject.toml", "pylock.ci.toml"),
+        (Ecosystem::Go, "go.mod", "go.sum"),
+        (Ecosystem::Go, "go.mod", "vendor/modules.txt"),
+        (Ecosystem::Go, "go.mod", "go.work"),
+    ] {
+        let path = format!("packages/app/{manifest}");
+        let guard = format!("packages/{companion}");
+        let candidate = Candidate {
+            repo: "acme/app",
+            default_branch: "main",
+            head_sha: HEAD,
+            tree: &[path.clone(), guard.clone()],
+            rows: &[(path.clone(), "1.0.0".into())],
+        };
+        let mut fake = Fake::nuget("1.0.0");
+        let applied = apply_repo(
+            ecosystem,
+            "core",
+            "1.1.0",
+            &candidate,
+            &RestoreSettings::default(),
+            &mut fake,
+        )
+        .unwrap();
+        assert!(
+            matches!(applied, Applied::Skipped(why) if why.contains(&guard) && why.contains(&path))
+        );
+        assert!(fake.log.is_empty());
+    }
 }
 
 fn settings(mode: RestoreMode, solution: Option<&str>) -> RestoreSettings {

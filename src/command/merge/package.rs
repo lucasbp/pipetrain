@@ -17,7 +17,7 @@ fn options(env: &Env, target: &str) -> Option<FeedOptions> {
             })
     })?;
     let coordinate = dep.feed_coordinate.as_ref()?;
-    let producers = item
+    let matching: Vec<_> = item
         .after
         .iter()
         .filter(|other| {
@@ -25,6 +25,15 @@ fn options(env: &Env, target: &str) -> Option<FeedOptions> {
                 && other.package == dep.package
                 && other.version == dep.version
         })
+        .collect();
+    if matching
+        .iter()
+        .any(|other| other.feed_coordinate.as_ref() != Some(coordinate))
+    {
+        return None;
+    }
+    let producers = matching
+        .into_iter()
         .filter_map(|other| env.plan.items.iter().find(|item| item.id == other.id))
         .map(|item| item.org.clone())
         .collect::<Vec<_>>();

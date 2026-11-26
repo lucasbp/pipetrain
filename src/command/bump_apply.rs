@@ -12,7 +12,7 @@ use super::feed::{self as feed_command, FeedOptions};
 use crate::config::ApiConfig;
 use crate::consumer_bump::RestoreSettings;
 use crate::consumer_bump::apply::{
-    Applied, Candidate, DefaultBranchRemote, apply_repo, branch_name, pull_request_title,
+    Applied, Candidate, DefaultBranchRemote, apply_repo, pull_request_title, standalone_branch,
 };
 use crate::consumer_bump::backend::{LocalBackend, ProcessRunner};
 use crate::feed::{self, Ecosystem};
@@ -143,7 +143,7 @@ fn open_one(
     root: &Path,
     settings: &RestoreSettings,
 ) -> Result<RepoResult> {
-    let branch = branch_name(package, version);
+    let branch = standalone_branch(ecosystem, package, version);
     let meta = client.rest(&format!("/repos/{repo}"))?;
     let default_branch = meta["default_branch"]
         .as_str()

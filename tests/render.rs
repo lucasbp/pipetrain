@@ -156,7 +156,10 @@ fn both_text_views_keep_the_requested_feed_check_and_compact_marks_late_gates() 
         "{compact}"
     );
     for text in [compact, render::text(&plan)] {
-        assert!(text.contains("feed  @acme/kit 1.1.0 (not yet)"), "{text}");
+        assert!(
+            text.contains("feed  npm:@acme/kit 1.1.0 (not yet)"),
+            "{text}"
+        );
     }
 }
 

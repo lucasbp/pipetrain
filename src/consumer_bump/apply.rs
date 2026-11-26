@@ -8,7 +8,7 @@ use super::backend::{ConsumerRemote, GithubRemote};
 use super::{
     BumpGateway, Consumer, RestoreMode, RestoreSettings, ensure_head, pin_commit_push, safe_path,
 };
-use crate::command::bump::{Status, classify, pin_manifest};
+use crate::command::bump::{Status, check_workspace_sources, classify, pin_manifest};
 use crate::feed::Ecosystem;
 use crate::github::Client;
 
@@ -66,6 +66,26 @@ pub fn branch_name(package: &str, version: &str) -> String {
             .to_string()
     };
     format!("pipetrain/bump/{}-{}", clean(package), clean(version))
+}
+
+pub fn standalone_branch(ecosystem: Ecosystem, package: &str, version: &str) -> String {
+    if matches!(ecosystem, Ecosystem::Nuget | Ecosystem::Npm) {
+        return branch_name(package, version);
+    }
+    let name = match ecosystem {
+        Ecosystem::Pypi => crate::pyproject::normalise(package),
+        Ecosystem::Cargo => package.to_ascii_lowercase(),
+        _ => package.to_string(),
+    };
+    let key = crate::update::checksum::sha256_hex(format!("{name}\0{version}").as_bytes());
+    let readable = branch_name(&name, version);
+    let slug = readable.trim_start_matches("pipetrain/bump/");
+    let short = &slug[..slug.len().min(72)];
+    format!(
+        "pipetrain/bump/{}/{short}-{}",
+        ecosystem.as_str(),
+        &key[..16]
+    )
 }
 
 pub fn pull_request_title(package: &str, version: &str) -> String {
@@ -216,6 +236,7 @@ pub(crate) fn check_manifest_only(
         Ecosystem::Pypi => (
             "pyproject.toml",
             &[
+                "uv.toml",
                 "uv.lock",
                 "poetry.lock",
                 "pdm.lock",
@@ -229,6 +250,9 @@ pub(crate) fn check_manifest_only(
         ),
         _ => return Err("unsupported manifest-only ecosystem".into()),
     };
+    if crate::publishers::candidate_paths(tree).1 {
+        return Err("the repository exceeds the manifest scan limit; review all consumer pins before updating".into());
+    }
     let paths: BTreeSet<&str> = tree.iter().map(String::as_str).collect();
     for (path, _) in rows {
         if path.rsplit('/').next() != Some(manifest) || !paths.contains(path.as_str()) {
@@ -311,7 +335,7 @@ fn pin_manifest_commit_push(
     ecosystem: Ecosystem,
     package: &str,
     version: &str,
-    rows: &[(String, String)],
+    candidate: &Candidate,
     consumer: &Consumer,
     gateway: &mut impl BumpGateway,
 ) -> Result<Option<String>> {
@@ -326,7 +350,16 @@ fn pin_manifest_commit_push(
         let patched = if ecosystem == Ecosystem::Npm {
             pin_npm_manifest(&original, package, version)?
         } else {
-            let expected = rows
+            check_workspace_sources(
+                ecosystem,
+                package,
+                path,
+                &original,
+                candidate.tree,
+                |ancestor| gateway.read(ancestor),
+            )?;
+            let expected = candidate
+                .rows
                 .iter()
                 .filter(|(file, _)| file == path)
                 .map(|(_, current)| current.clone())
@@ -380,7 +413,7 @@ pub fn apply_repo(
             Err(reason) => return Ok(Applied::Skipped(reason)),
         },
     };
-    let branch = branch_name(package, version);
+    let branch = standalone_branch(ecosystem, package, version);
     let files: Vec<String> = candidate
         .rows
         .iter()
@@ -406,9 +439,7 @@ pub fn apply_repo(
             )]);
             pin_commit_push(&pins, &consumer, settings.mode, gateway)?.map(|pinned| pinned.commit)
         }
-        other => {
-            pin_manifest_commit_push(other, package, version, candidate.rows, &consumer, gateway)?
-        }
+        other => pin_manifest_commit_push(other, package, version, candidate, &consumer, gateway)?,
     };
     let Some(commit) = commit else {
         return Ok(Applied::Skipped(
