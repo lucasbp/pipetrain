@@ -1,3 +1,4 @@
 /target
 /pipetrain.toml
 *.local.toml
+__pycache__/
