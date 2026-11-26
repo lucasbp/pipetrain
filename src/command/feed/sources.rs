@@ -171,6 +171,7 @@ mod tests {
         let snapshot = RepoSnapshot {
             head: "a".repeat(40),
             incomplete: false,
+            tree_truncated: false,
             tree: vec![],
             manifests: vec![
                 (
@@ -238,6 +239,7 @@ mod tests {
             let mut snapshot = RepoSnapshot {
                 head: "b".repeat(40),
                 incomplete: false,
+                tree_truncated: false,
                 tree: vec![path.clone(), sibling.clone(), format!("other/{config}")],
                 manifests: vec![
                     ("a/b".into(), path.clone(), body.into()),

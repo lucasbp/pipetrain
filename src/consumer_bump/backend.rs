@@ -99,6 +99,9 @@ impl Runner for ProcessRunner {
 }
 
 pub trait ConsumerRemote {
+    fn record_prepared(&mut self, _commit: &str) -> Result<()> {
+        Ok(())
+    }
     fn head(&mut self, consumer: &Consumer) -> Result<String>;
     fn reserve_branch(&mut self, repository: &str, branch: &str, source_sha: &str) -> Result<()>;
     fn open(&mut self, consumer: &Consumer, commit: &str, body: &str) -> Result<String>;
@@ -167,6 +170,7 @@ pub struct LocalBackend<R, G> {
     tree: Option<PathBuf>,
     repository: Option<String>,
     source_sha: Option<String>,
+    create_only_push: bool,
     timeout: Duration,
 }
 
@@ -180,11 +184,16 @@ impl<R: Runner, G: ConsumerRemote> LocalBackend<R, G> {
             tree: None,
             repository: None,
             source_sha: None,
+            create_only_push: false,
             timeout,
         }
     }
     pub fn workspace(&self) -> Option<&Path> {
         self.slot.as_deref()
+    }
+    pub(crate) fn with_create_only_push(mut self) -> Self {
+        self.create_only_push = true;
+        self
     }
     fn execute(&mut self, directory: &Path, program: &str, args: &[String]) -> Result<String> {
         let mut safe_args = Vec::new();
@@ -386,6 +395,16 @@ impl<R: Runner, G: ConsumerRemote> BumpGateway for LocalBackend<R, G> {
         let repo = self.repository.clone().context("missing repository")?;
         let url = format!("https://github.com/{repo}.git");
         let reference = format!("refs/heads/{branch}");
+        self.remote.record_prepared(commit)?;
+        if self.create_only_push {
+            self.git(&[
+                "push",
+                &format!("--force-with-lease={reference}:"),
+                &url,
+                &format!("{commit}:{reference}"),
+            ])?;
+            return Ok(());
+        }
         self.remote.reserve_branch(
             &repo,
             branch,

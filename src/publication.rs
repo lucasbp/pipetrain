@@ -2,6 +2,7 @@ use anyhow::{Result, bail};
 use regex::Regex;
 use serde::Serialize;
 pub mod backend;
+mod destination;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublisherExecution {
@@ -65,6 +66,17 @@ pub fn verify(
     package: &str,
     feed: &mut impl ExactFeed,
 ) -> Result<PublicationResult> {
+    verify_pushes(execution, run, package, |version, _| {
+        feed.contains(package, version)
+    })
+}
+
+pub(crate) fn verify_pushes(
+    execution: &PublisherExecution,
+    run: &PublisherRun,
+    package: &str,
+    contains: impl FnOnce(&str, &[&str]) -> Result<bool>,
+) -> Result<PublicationResult> {
     if !execution.published_this_execution {
         return Ok(PublicationResult::Skipped {
             reason: "publisher did not publish in this execution".into(),
@@ -84,16 +96,17 @@ pub fn verify(
             reason: "publisher push step did not succeed".into(),
         });
     }
-    let pushes = new_nuget_pushes(&run.push_step_log, package)?;
-    let Some(version) = pushes.first() else {
+    let pushes = logged_pushes(&run.push_step_log, package)?;
+    let Some((version, _)) = pushes.first() else {
         return Ok(PublicationResult::Skipped {
             reason: "no new package push proved by the publisher step".into(),
         });
     };
-    if pushes.len() != 1 {
+    if pushes.iter().any(|(other, _)| other != version) {
         bail!("publisher pushed multiple versions of the requested package");
     }
-    if !feed.contains(package, version)? {
+    let destinations: Vec<_> = pushes.iter().map(|(_, destination)| *destination).collect();
+    if !contains(version, &destinations)? {
         bail!("the exact newly published package version is not in the feed yet");
     }
     Ok(PublicationResult::Published {
@@ -108,6 +121,16 @@ pub fn verify(
 }
 
 pub fn new_nuget_pushes(log: &str, package: &str) -> Result<Vec<String>> {
+    let mut versions: Vec<_> = logged_pushes(log, package)?
+        .into_iter()
+        .map(|(v, _)| v)
+        .collect();
+    versions.sort();
+    versions.dedup();
+    Ok(versions)
+}
+
+fn logged_pushes<'a>(log: &'a str, package: &str) -> Result<Vec<(String, &'a str)>> {
     if package.is_empty()
         || !package
             .bytes()
@@ -115,13 +138,13 @@ pub fn new_nuget_pushes(log: &str, package: &str) -> Result<Vec<String>> {
     {
         bail!("invalid NuGet package id");
     }
-    let pushing = Regex::new(r"(?i)Pushing\s+([^\s/\\]+)\.nupkg\s+to\s")?;
+    let pushing = Regex::new(r"(?i)Pushing\s+([^\s/\\]+)\.nupkg\s+to(?:\s+|$)")?;
     let named = Regex::new(&format!(
         r"(?i)^{}\.([0-9]+(?:\.[0-9]+){{1,3}}(?:-[0-9A-Za-z.-]+)?)$",
         regex::escape(package)
     ))?;
     let mut pending = None;
-    let mut versions = Vec::new();
+    let mut pushes = Vec::new();
     let mut saw_push = false;
     for line in log.lines() {
         if let Some(found) = pushing.captures(line) {
@@ -129,10 +152,13 @@ pub fn new_nuget_pushes(log: &str, package: &str) -> Result<Vec<String>> {
                 bail!("publisher log has an incomplete push for the requested package");
             }
             saw_push = true;
-            pending = named.captures(&found[1]).map(|m| m[1].to_string());
+            let destination = &line[found.get(0).expect("matched push").end()..];
+            pending = named
+                .captures(&found[1])
+                .map(|m| (m[1].to_string(), destination.trim()));
         } else if line.contains("Your package was pushed.") {
-            if let Some(version) = pending.take() {
-                versions.push(version);
+            if let Some(push) = pending.take() {
+                pushes.push(push);
             }
         } else if line.to_ascii_lowercase().contains("conflict")
             || line.to_ascii_lowercase().contains("already exists")
@@ -145,7 +171,5 @@ pub fn new_nuget_pushes(log: &str, package: &str) -> Result<Vec<String>> {
     if !saw_push || pending.is_some() {
         bail!("publisher logs do not prove a complete push or duplicate outcome");
     }
-    versions.sort();
-    versions.dedup();
-    Ok(versions)
+    Ok(pushes)
 }

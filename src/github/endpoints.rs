@@ -613,16 +613,53 @@ impl Client {
         branch_sha: &str,
         base_sha: &str,
     ) -> Result<bool> {
+        Ok(self
+            .commit_inclusion(slug, branch_sha, base_sha)?
+            .unwrap_or(false))
+    }
+
+    pub(crate) fn commit_inclusion(
+        &mut self,
+        slug: &str,
+        branch_sha: &str,
+        base_sha: &str,
+    ) -> Result<Option<bool>> {
         if branch_sha == base_sha {
-            return Ok(true);
+            return Ok(Some(true));
         }
         let value = self.rest(&format!(
             "/repos/{slug}/compare/{base_sha}...{branch_sha}?per_page=1"
         ))?;
-        Ok(matches!(
-            value.get("status").and_then(Value::as_str),
-            Some("ahead" | "identical")
-        ))
+        Ok(match value["status"].as_str() {
+            Some("ahead" | "identical") => Some(true),
+            Some("behind" | "diverged") => Some(false),
+            _ => None,
+        })
+    }
+
+    pub(crate) fn bump_pr_from(
+        &mut self,
+        slug: &str,
+        branch: &str,
+        base: &str,
+    ) -> Result<Option<u64>> {
+        let owner = slug.split('/').next().unwrap_or_default();
+        let pulls = self.rest(&format!(
+            "/repos/{slug}/pulls?state=all&head={}&base={}&per_page=2",
+            encode_path(&format!("{owner}:{branch}")),
+            encode_path(base)
+        ))?;
+        match pulls.as_array().map(Vec::as_slice) {
+            Some([]) => Ok(None),
+            Some([pr]) => Ok(Some(
+                pr["number"]
+                    .as_u64()
+                    .ok_or_else(|| anyhow!("missing bump PR number"))?,
+            )),
+            _ => Err(anyhow!(
+                "cannot identify a unique bump PR from {branch} into {base}"
+            )),
+        }
     }
 
     pub fn open_pr_from(&mut self, slug: &str, branch: &str, base: &str) -> Result<Option<u64>> {
@@ -862,21 +899,19 @@ impl Client {
 
     fn fetch_tree(&mut self, slug: &str, sha: &str) -> Result<(Vec<String>, bool)> {
         let value = self.rest(&format!("/repos/{slug}/git/trees/{sha}?recursive=1"))?;
-        let paths = value
-            .get("tree")
-            .and_then(|t| t.as_array())
-            .map(|entries| {
-                entries
-                    .iter()
-                    .filter(|e| e.get("type").and_then(|t| t.as_str()) == Some("blob"))
-                    .filter_map(|e| e.get("path").and_then(|p| p.as_str()).map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let truncated = value
-            .get("truncated")
-            .and_then(|t| t.as_bool())
-            .unwrap_or(false);
+        let entries = value["tree"].as_array();
+        let mut truncated = value["truncated"].as_bool() != Some(false) || entries.is_none();
+        let mut paths = Vec::new();
+        for entry in entries.into_iter().flatten() {
+            match (
+                entry["type"].as_str(),
+                entry["path"].as_str().filter(|path| !path.is_empty()),
+            ) {
+                (Some("blob"), Some(path)) => paths.push(path.to_owned()),
+                (Some("tree" | "commit"), Some(_)) => {}
+                _ => truncated = true,
+            }
+        }
         Ok((paths, truncated))
     }
 

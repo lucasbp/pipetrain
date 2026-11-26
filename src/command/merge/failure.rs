@@ -27,8 +27,19 @@ fn downstream(plan: &Plan, id: &str) -> BTreeSet<String> {
     found
 }
 
-pub(super) fn continuation(plan: &Plan, item: &Item) -> Continuation {
-    let dependents = downstream(plan, &item.id);
+pub(super) fn continuation(env: &super::Env, item: &Item) -> Continuation {
+    let plan = env.plan;
+    let mut dependents = downstream(plan, &item.id);
+    let mut has_consumers = has_consumers(plan, &item.id, &dependents);
+    for contract in env
+        .queued_bumps
+        .iter()
+        .filter(|contract| contract.publishers.contains(&item.id))
+    {
+        has_consumers = true;
+        dependents.insert(contract.id.clone());
+        dependents.extend(downstream(plan, &contract.id));
+    }
     Continuation {
         independent: plan
             .items
@@ -36,7 +47,7 @@ pub(super) fn continuation(plan: &Plan, item: &Item) -> Continuation {
             .filter(|candidate| candidate.id != item.id && !dependents.contains(&candidate.id))
             .map(|candidate| (candidate.id.clone(), candidate.sha.clone()))
             .collect(),
-        has_consumers: has_consumers(plan, &item.id, &dependents),
+        has_consumers,
         dependents: dependents.into_iter().collect(),
     }
 }

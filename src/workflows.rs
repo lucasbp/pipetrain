@@ -121,10 +121,33 @@ pub fn read(client: &mut Client, slug: &str, sha: &str) -> Result<Vec<(String, S
             _ => bail!("a file tree entry has an unreadable type"),
         }
     }
+    read_workflow_files(client, slug, sha, &files)
+}
+
+pub(crate) fn read_from_tree(
+    client: &mut Client,
+    slug: &str,
+    sha: &str,
+    tree: &[String],
+) -> Result<Vec<(String, String)>> {
+    let files: Vec<_> = tree
+        .iter()
+        .filter(|path| is_workflow_path(path))
+        .cloned()
+        .collect();
+    read_workflow_files(client, slug, sha, &files)
+}
+
+fn read_workflow_files(
+    client: &mut Client,
+    slug: &str,
+    sha: &str,
+    files: &[String],
+) -> Result<Vec<(String, String)>> {
     if files.is_empty() {
         return Ok(Vec::new());
     }
-    let found = client.blobs(slug, sha, &files)?;
+    let found = client.blobs(slug, sha, files)?;
     if found.len() != files.len() {
         bail!("not every workflow file of {slug} could be read");
     }

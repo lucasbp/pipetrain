@@ -334,6 +334,21 @@ fn blobs_fetch_only_the_missing_paths_and_remember_absent_ones() {
 }
 
 #[test]
+fn malformed_tree_responses_are_incomplete() {
+    let scratch = temp("malformed-tree");
+    let (base, server) = serve(vec![
+        json!({"tree":[]}).to_string(),
+        json!({"truncated":false}).to_string(),
+        json!({"truncated":false,"tree":[{"type":"blob"}]}).to_string(),
+    ]);
+    let mut api = client(&base, &scratch.join("cache"), CacheMode::Off);
+    for _ in 0..3 {
+        assert!(api.tree(SLUG, HEAD).unwrap().1);
+    }
+    server.join().unwrap();
+}
+
+#[test]
 fn the_cache_directory_holds_no_token_header_or_patch() {
     let scratch = temp("clean");
     let dir = scratch.join("cache");

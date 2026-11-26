@@ -25,10 +25,13 @@ pub(super) fn files_from(value: &Value) -> Option<(Vec<ChangedFile>, bool)> {
 }
 
 pub(super) fn tree_value(paths: &[String], truncated: bool) -> Value {
-    json!({ "paths": paths, "truncated": truncated })
+    json!({ "paths": paths, "truncated": truncated, "checked_entries": true })
 }
 
 pub(super) fn tree_from(value: &Value) -> Option<(Vec<String>, bool)> {
+    if value.get("checked_entries")?.as_bool() != Some(true) {
+        return None;
+    }
     let paths = strings(value.get("paths")?)?;
     let truncated = value.get("truncated")?.as_bool()?;
     Some((paths, truncated))

@@ -140,6 +140,14 @@ impl AuditEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishedTarget {
+    pub base: String,
+    pub head: String,
+    pub commit: Option<String>,
+    pub update_requested_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BumpBehind {
     pub id: String,
     pub package: String,
@@ -149,6 +157,8 @@ pub struct BumpBehind {
     pub pull_request_url: String,
     pub branch: String,
     pub recorded_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication: Option<PublishedTarget>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

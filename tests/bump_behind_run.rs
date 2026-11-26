@@ -21,6 +21,127 @@ use serde_json::{Value, json};
 
 const CAUSE: &str = "needs a bump of Acme.Core to 1.4.0";
 
+#[test]
+fn missing_commit_comparison_does_not_write_an_update_or_release_the_pr() {
+    rejected_publication(false, "ancestry was not reported");
+}
+
+#[test]
+fn existing_multi_commit_pr_is_not_adopted_or_updated() {
+    rejected_publication(true, "does not contain exactly one commit");
+}
+
+fn rejected_publication(existing: bool, expected: &str) {
+    use pipetrain::command::merge::behind::{GithubGateway, published};
+    use pipetrain::planner::behind::QueuedBump;
+
+    let pr = pr("acme/web", 7, "topic", "main");
+    let head = pr.head_sha.clone();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let observed = requests.clone();
+    let branch = "pipetrain/bump/acme.core-1.4.0";
+    let server = serve_requests(move |line, payload| {
+        observed.lock().unwrap().push(line.to_owned());
+        match line {
+            "GET /repos/acme/web/pulls/7" => (
+                200,
+                json!({"state":"open","base":{"ref":"main"},"head":{"repo":{"full_name":"acme/web"},"ref":"topic","sha":head}}),
+            ),
+            "GET /repos/acme/web/git/ref/heads/main" => (200, json!({"object":{"sha":sha(1)}})),
+            "GET /repos/acme/web/pulls/14" => (
+                200,
+                json!({
+                    "html_url":"https://github.com/acme/web/pull/14", "commits":2,
+                    "base":{"ref":"main","sha":sha(1)}, "head":{"repo":{"full_name":"acme/web"},"ref":branch,"sha":sha(14)}
+                }),
+            ),
+            "POST /graphql" => {
+                let version = if payload.contains(&head) {
+                    "1.0.0"
+                } else {
+                    "1.4.0"
+                };
+                let text = format!(
+                    r#"<Project><PackageReference Include="Acme.Core" Version="{version}"/></Project>"#
+                );
+                (200, json!({"data":{"repository":{"f0":{"text":text}}}}))
+            }
+            _ if existing && line.ends_with(branch) => (200, json!({"object":{"sha":sha(14)}})),
+            _ if existing && line.contains(&format!("{branch}&base=")) => {
+                (200, json!([{"number":14}]))
+            }
+            _ if line.contains("/pulls?") => (200, json!([])),
+            _ if line.contains("/git/trees/") => (
+                200,
+                json!({"truncated":false,"tree":[{"type":"blob","path":"App.csproj"}]}),
+            ),
+            _ if line.contains("/compare/") => (200, json!({})),
+            _ => (404, json!({})),
+        }
+    });
+    let cfg = Config::parse("orgs=['acme']").unwrap();
+    let mut client =
+        Client::with_base_url("ghp_FAKE0123456789".into(), &cfg.api, false, &server.base);
+    let contract = QueuedBump {
+        id: pr.key.to_string(),
+        base: pr.base_ref.clone(),
+        head: pr.head_ref.clone(),
+        sha: pr.head_sha.clone(),
+        package: "Acme.Core".into(),
+        from: "1.0.0".into(),
+        owners: vec!["acme/core".into()],
+        publishers: vec!["acme/core#3".into()],
+    };
+    use pipetrain::publication::{
+        ExactFeed, PublicationResult, PublisherExecution, PublisherRun, verify,
+    };
+    struct Feed;
+    impl ExactFeed for Feed {
+        fn contains(&mut self, package: &str, version: &str) -> anyhow::Result<bool> {
+            Ok(package == "Acme.Core" && version == "1.4.0")
+        }
+    }
+    let run = PublisherRun {
+        repository: "acme/core".into(),
+        head_sha: sha(1),
+        id: 1,
+        succeeded: true,
+        push_step_succeeded: true,
+        push_step_log: "Pushing Acme.Core.1.4.0.nupkg to feed\nYour package was pushed.".into(),
+    };
+    let execution = PublisherExecution {
+        repository: run.repository.clone(),
+        merge_sha: run.head_sha.clone(),
+        run_id: run.id,
+        published_this_execution: true,
+    };
+    let PublicationResult::Published { evidence } =
+        verify(&execution, &run, "Acme.Core", &mut Feed).unwrap()
+    else {
+        panic!("expected publication proof")
+    };
+    let (step, ready) = published(
+        &contract,
+        &evidence,
+        &pr,
+        &mut Store::in_memory(),
+        &mut GithubGateway {
+            client: &mut client,
+            cfg: &cfg,
+            options: &Options::default(),
+        },
+    );
+    assert!(!ready);
+    assert!(step.detail.contains(expected), "{}", step.detail);
+    assert!(
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|line| line.starts_with("GET ") || line == "POST /graphql")
+    );
+}
+
 fn sha(number: u64) -> String {
     format!("{number:040x}")
 }
@@ -194,6 +315,7 @@ impl Fixture {
                 pull_request_url: "https://github.com/acme/web/pull/101".into(),
                 branch: "pipetrain/bump/acme.core-1.4.0".into(),
                 recorded_at: "2026-11-18T12:00:00Z".into(),
+                publication: None,
             });
             store.save().unwrap();
         }

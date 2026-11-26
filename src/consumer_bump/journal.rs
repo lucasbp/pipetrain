@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Journal {
     pub publishers: BTreeMap<String, Publisher>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queued_bumps: Vec<crate::planner::behind::QueuedBump>,
     pub contracts: BTreeMap<String, Vec<Contract>>,
     pub consumers: BTreeMap<String, Preparation>,
 }
@@ -20,7 +22,7 @@ pub struct Publisher {
     pub publications: BTreeMap<String, Vec<PublicationInput>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublicationInput {
     pub run_id: u64,
     pub version: String,

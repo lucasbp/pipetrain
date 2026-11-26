@@ -8,6 +8,7 @@ mod reply;
 mod retry;
 mod token;
 
+pub(crate) use client::debug_loopback_env;
 pub use client::{Client, Download, Window, origin};
 pub(crate) use endpoints::RunListing;
 pub use endpoints::{BranchRequirements, BranchWrite, LivePr, PrWrite, Run};

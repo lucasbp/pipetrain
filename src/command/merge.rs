@@ -22,7 +22,7 @@ use crate::merge::{
 };
 use crate::model::{PrKey, PrState};
 use crate::plan::Plan;
-use crate::planner::Item;
+use crate::planner::{Item, behind::QueuedBump};
 use crate::workflows::{self, PushRuns};
 
 mod admin;
@@ -35,6 +35,7 @@ mod failure;
 mod gates;
 mod package;
 mod parallel;
+mod queued;
 mod recovery;
 mod settle;
 mod stacked;
@@ -108,6 +109,7 @@ struct Env<'a> {
     stacked: stacked::Evidence,
     landings: settle::Landings,
     gates: gates::Answers,
+    queued_bumps: &'a [QueuedBump],
 }
 
 impl Env<'_> {
@@ -187,10 +189,13 @@ fn method_of(settings: &Settings, cfg: &Config) -> Result<String> {
     }
 }
 
-fn bump_steps(plan: &Plan) -> Vec<StepReport> {
-    plan.bumps
-        .iter()
+fn bump_steps(named: &[crate::planner::behind::Need], queued: &[QueuedBump]) -> Vec<StepReport> {
+    named.iter()
         .map(|need| StepReport::new(Kind::Bump, &need.id, Status::Planned, &need.step_detail()))
+        .chain(queued.iter().map(|contract| {
+            let detail = format!("bump {} on {} after exact publication by {}; resume this merge with --bump and the same state", contract.package, contract.base, contract.publishers.join(", "));
+            StepReport::new(Kind::Bump, &contract.id, Status::Planned, &detail)
+        }))
         .collect()
 }
 
@@ -204,11 +209,11 @@ fn has_dependents(plan: &Plan, id: &str) -> bool {
     })
 }
 
-fn behind_confirmation(plan: &Plan, store: &Store) -> String {
+fn behind_confirmation(needs: &[crate::planner::behind::Need], store: &Store) -> String {
     let mut text = String::from(
         "\n--bump-behind: this run will push branches and open draft PRs in the consumer repos, then wait for them to be merged\n",
     );
-    for need in &plan.bumps {
+    for need in needs {
         let known = store
             .state
             .bump_behind
@@ -216,8 +221,10 @@ fn behind_confirmation(plan: &Plan, store: &Store) -> String {
             .any(|entry| entry.id == need.id && entry.package == need.package);
         let state = if known {
             "bump PR already open, checking it"
-        } else {
+        } else if need.to.is_some() {
             "opens a draft bump PR"
+        } else {
+            "waits for the queue publication under --bump"
         };
         text.push_str(&format!("  {}: {state}\n", need.step_detail()));
     }
@@ -364,6 +371,13 @@ fn merge_one(
 ) {
     let key = PrKey::new(&item.org, &item.repo, item.number);
     let slug = key.slug();
+    let proved_head = env
+        .queued_bumps
+        .iter()
+        .any(|contract| contract.id == item.id);
+    if proved_head {
+        report.admin_override = None;
+    }
     settle::wait(env, &slug, &item.base, &item.id, hooks);
     if let Some(below) = client.below_reserve() {
         return stop(report, crate::quota::stop_message(&below));
@@ -495,7 +509,8 @@ fn merge_one(
         false
     };
     if live.head_sha != item.sha || pr.head_sha != item.sha {
-        let accepted = pr.head_sha == live.head_sha
+        let accepted = !proved_head
+            && pr.head_sha == live.head_sha
             && match env.stacked.accepts(item, client, &live.head_sha) {
                 Ok(accepted) => accepted,
                 Err(error) => {
@@ -550,7 +565,7 @@ fn merge_one(
         base: item.base.clone(),
         sha: None,
         admin_override: report.admin_override.clone(),
-        continuation: Some(failure::continuation(env.plan, item)),
+        continuation: Some(failure::continuation(env, item)),
         deploy_prediction: None,
     };
     if let Err(error) = store.add(pending) {
@@ -818,7 +833,16 @@ fn set_aside_inherited(
         else {
             continue;
         };
-        if related_to_queue(plan, bundles, pending) {
+        if related_to_queue(plan, bundles, pending)
+            || pending.continuation.as_ref().is_some_and(|saved| {
+                saved.dependents.iter().any(|id| {
+                    plan.skipped
+                        .iter()
+                        .any(|skipped| skipped.id == *id && !skipped.hidden)
+                        || plan.items.iter().any(|item| item.id == *id && !item.hidden)
+                })
+            })
+        {
             continue;
         }
         let Some(reason) = deploy_failed(client, pending) else {
@@ -1186,6 +1210,18 @@ fn merge_plan_inner(
             .as_ref()
             .map_or(crate::profile::IMPLICIT, |profile| profile.name.as_str()),
     );
+    let queued_bumps = bump::queued::contracts(plan, store, settings.bump);
+    let named: Vec<_> = plan
+        .bumps
+        .iter()
+        .filter(|need| {
+            !plan.is_hidden(&need.id)
+                && !queued_bumps.iter().any(|contract| {
+                    contract.id == need.id && contract.package.eq_ignore_ascii_case(&need.package)
+                })
+        })
+        .cloned()
+        .collect();
     let mut env = Env {
         plan,
         cfg,
@@ -1195,6 +1231,7 @@ fn merge_plan_inner(
         stacked: stacked::Evidence::default(),
         landings: settle::Landings::default(),
         gates: gates::Answers::default(),
+        queued_bumps: &queued_bumps,
     };
     let requests = client.requests();
     let mut report = Report {
@@ -1215,6 +1252,9 @@ fn merge_plan_inner(
                 .iter()
                 .filter(|item| !item.hidden && bump::applicable(item, store.state.bump.as_ref()))
                 .map(|item| item.id.clone())
+                .chain(queued_bumps.iter().map(|contract| contract.id.clone()))
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
                 .collect()
         } else {
             Vec::new()
@@ -1259,7 +1299,7 @@ fn merge_plan_inner(
                 .notices
                 .push(format!("Parallelism by stage:\n{}", stages.join("\n")));
         }
-        report.steps.splice(0..0, bump_steps(plan));
+        report.steps.splice(0..0, bump_steps(&named, &queued_bumps));
         report.api_usage = client.usage();
         return Ok(Outcome {
             report,
@@ -1295,8 +1335,13 @@ fn merge_plan_inner(
     set_aside_inherited(&mut report, plan, &bundles, store, client);
     settle::annotate(&mut report.steps, plan, cfg, &store.state);
     let behind_work = settings.bump_behind.is_some()
-        && (!plan.bumps.is_empty() || !store.state.bump_behind.is_empty());
-    if report.steps.is_empty() && !behind_work {
+        && (!named.is_empty()
+            || store
+                .state
+                .bump_behind
+                .iter()
+                .any(|entry| entry.publication.is_none()));
+    if report.steps.is_empty() && !behind_work && queued_bumps.is_empty() {
         return Ok(Outcome {
             report,
             aborted: false,
@@ -1309,7 +1354,10 @@ fn merge_plan_inner(
         render(&report, false)
     };
     if behind_work {
-        confirmation.push_str(&behind_confirmation(plan, store));
+        confirmation.push_str(&behind_confirmation(&named, store));
+    }
+    for contract in &queued_bumps {
+        confirmation.push_str(&format!("\n{} waits for {} from {}. With --bump, this can open a draft against {} and update the consumer branch after integration.\n", contract.id, contract.package, contract.publishers.join(", "), contract.base));
     }
     if !(hooks.confirm)(&confirmation) {
         return Ok(Outcome {
@@ -1321,6 +1369,9 @@ fn merge_plan_inner(
     report.applied = true;
     if store.state.profile.is_none() {
         store.state.profile = profile.map(str::to_string);
+    }
+    if settings.bump {
+        bump::queued::record_selection(store, &queued_bumps)?;
     }
     env.gates = gates::ask(
         plan,
@@ -1336,7 +1387,7 @@ fn merge_plan_inner(
             cfg,
             options,
         };
-        behind_steps = behind::run(&plan.bumps, store, &mut gateway);
+        behind_steps = behind::run(&named, store, &mut gateway);
         for step in &behind_steps {
             (hooks.observe)(step);
             if step.status == Status::Skipped && step.blocked_by.is_some() {
@@ -1374,8 +1425,23 @@ fn merge_plan_inner(
             code,
         });
     }
-    if cfg.max_parallel > 1 || settings.bump {
-        parallel::execute(
+    let resuming_publisher = store.state.bump.as_ref().is_some_and(|journal| {
+        store
+            .state
+            .pending
+            .iter()
+            .any(|pending| journal.publishers.contains_key(&pending.id))
+    });
+    if cfg.max_parallel > 1
+        || settings.bump
+        || resuming_publisher
+        || !queued_bumps.is_empty()
+        || plan
+            .items
+            .iter()
+            .any(|item| behind::is_published_bump(item, &store.state))
+    {
+        let stopped_by = parallel::execute(
             &env,
             client,
             store,
@@ -1384,6 +1450,19 @@ fn merge_plan_inner(
             &bundles,
             &report.held,
         )?;
+        for contract in &queued_bumps {
+            if report.steps.iter().any(|step| {
+                step.target == contract.id
+                    && step.bump.as_ref().is_some_and(|bump| {
+                        bump["source"] == "queue_publication" && bump["package"] == contract.package
+                    })
+            }) {
+                continue;
+            }
+            let (step, _) = queued::prepare(&env, contract, client, store, stopped_by.as_deref());
+            (hooks.observe)(&step);
+            report.steps.push(step);
+        }
         report.steps.splice(0..0, behind_steps);
         report.summary = Summary::from_steps(&report.steps);
         let code = report.exit_code();
@@ -1731,16 +1810,28 @@ pub fn run(opts: MergeOptions) -> Result<i32> {
         eprintln!("aborted, nothing was merged");
         return Ok(outcome.code);
     }
+    let resume_command = || {
+        let mut args: Vec<_> = std::env::args().skip(1).collect();
+        if !settings.bump
+            && outcome.report.steps.iter().any(|step| {
+                step.bump
+                    .as_ref()
+                    .is_some_and(|bump| bump["source"] == "queue_publication")
+            })
+        {
+            args.retain(|arg| arg != "--no-bump");
+            args.push("--bump".into());
+        }
+        compact::command_line(&args, Some(&state_path.display().to_string()))
+    };
     if json {
         println!("{}", serde_json::to_string_pretty(&outcome.report)?);
     } else if full {
         anstream::print!("{}", render_final(&outcome.report, true));
+        print!("{}", queued::summary(&outcome.report, &resume_command()));
     } else if outcome.report.applied {
         let context = compact::Context {
-            command: compact::command_line(
-                &std::env::args().skip(1).collect::<Vec<_>>(),
-                Some(&state_path.display().to_string()),
-            ),
+            command: resume_command(),
             state: Some(state_path.display().to_string()),
             details: compact::enrich(&mut client, &outcome.report),
         };

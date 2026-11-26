@@ -75,11 +75,12 @@ pub fn npm_url(base: &str, package: &str) -> String {
 }
 
 pub fn nuget_index_url(org: Option<&str>, registry: Option<&str>) -> Option<String> {
-    match (registry, org) {
-        (Some(registry), _) => Some(registry.to_string()),
-        (None, Some(org)) => Some(format!("{NUGET_GITHUB}/{org}/index.json")),
-        (None, None) => None,
-    }
+    registry.map(str::to_owned).or_else(|| {
+        org.map(|org| {
+            crate::github::debug_loopback_env("PIPETRAIN_NUGET_INDEX_URL")
+                .unwrap_or_else(|| format!("{NUGET_GITHUB}/{org}/index.json"))
+        })
+    })
 }
 
 pub fn nuget_versions_url(base: &str, package: &str) -> String {

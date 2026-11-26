@@ -174,6 +174,31 @@ fn a_range_is_not_a_pin() {
 }
 
 #[test]
+fn only_the_queue_crossing_the_limit_records_publication_candidates() {
+    let prs = [consumer(), util_release(1), util_release(2)];
+    let manifests = manifests("1.0.0");
+    let context = context("1.0.0", &prs.iter().collect::<Vec<_>>(), limit(2), None);
+    let contracts = |versions: &[&str]| {
+        let mut skipped = Vec::new();
+        let held = behind::hold(
+            &context,
+            &feed(versions),
+            &mut ready(prs.to_vec()),
+            &mut skipped,
+        );
+        behind::queued_bumps(&held, &context, &prs[0], &manifests)
+    };
+    let both = contracts(&["1.0.0", "1.1.0"]);
+    assert_eq!(both.len(), 1);
+    assert_eq!(both[0].id, "acme/sdk#10");
+    assert_eq!(both[0].base, "main");
+    assert_eq!(both[0].head, "feat/s");
+    assert_eq!(both[0].owners, ["acme/util"]);
+    assert_eq!(both[0].publishers, ["acme/util#1", "acme/util#2"]);
+    assert!(contracts(&["1.0.0", "1.1.0", "1.2.0"]).is_empty());
+}
+
+#[test]
 fn queue_releases_count_as_versions_the_pin_will_fall_behind() {
     let feeds = feed(&["1.0.0"]);
     let found = needs(

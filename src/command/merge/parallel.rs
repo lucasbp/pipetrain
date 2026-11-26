@@ -126,32 +126,55 @@ impl scheduler::Coordinator for Coordinator<'_, '_> {
         ) {
             return Ok(Some(scheduler::Status::Blocked(blocked.id)));
         }
-        if self.env.settings.bump {
-            let item = match self.steps[index].kind {
-                Kind::Merge => self
-                    .env
-                    .plan
-                    .items
-                    .iter()
-                    .find(|item| item.id == self.steps[index].target),
+        if self.env.settings.bump
+            || !self.env.queued_bumps.is_empty()
+            || !self.store.state.bump_behind.is_empty()
+        {
+            let target = match self.steps[index].kind {
+                Kind::Merge => Some(&self.steps[index].target),
                 Kind::Wait => self.steps[index + 1..]
                     .iter()
                     .find(|step| step.kind == Kind::Merge)
-                    .and_then(|step| {
-                        self.env
-                            .plan
-                            .items
-                            .iter()
-                            .find(|item| item.id == step.target)
-                    }),
+                    .map(|step| &step.target),
                 _ => None,
             };
-            if let Some(item) =
-                item.filter(|item| bump::applicable(item, self.store.state.bump.as_ref()))
+            let Some(item) =
+                target.and_then(|id| self.env.plan.items.iter().find(|item| &item.id == id))
+            else {
+                return Ok(None);
+            };
+            if queued::candidate_draft(item, self.env.queued_bumps, self.store) {
+                return Ok(Some(scheduler::Status::Blocked(
+                    "review and merge the shared bump separately, then resume this queue".into(),
+                )));
+            }
+            if let Some(reason) = self.bump_checked.get(&item.id) {
+                return Ok(reason.clone().map(scheduler::Status::Blocked));
+            }
+            let mut blocked = None;
+            for contract in self
+                .env
+                .queued_bumps
+                .iter()
+                .filter(|contract| contract.id == item.id)
             {
-                if let Some(reason) = self.bump_checked.get(&item.id) {
-                    return Ok(reason.clone().map(scheduler::Status::Blocked));
+                let (event, ready) = queued::prepare(
+                    self.env,
+                    contract,
+                    &mut self.control_client,
+                    self.store,
+                    None,
+                );
+                if !ready {
+                    blocked = Some(event.detail.clone());
                 }
+                (self.hooks.observe)(&event);
+                self.events.push(event);
+            }
+            if blocked.is_none()
+                && self.env.settings.bump
+                && bump::applicable(item, self.store.state.bump.as_ref())
+            {
                 self.progress(&job.id, "verifying publication and preparing consumer bump");
                 let outcome = bump::prepare(
                     item,
@@ -159,7 +182,7 @@ impl scheduler::Coordinator for Coordinator<'_, '_> {
                     &self.env.settings.bump_options,
                     self.store,
                 );
-                let (status, detail, blocked) = match &outcome {
+                let (status, detail, cause) = match &outcome {
                     bump::Outcome::Skipped { reason } => (Status::Skipped, reason.clone(), None),
                     bump::Outcome::NeedsReview {
                         pull_request_url, ..
@@ -177,9 +200,10 @@ impl scheduler::Coordinator for Coordinator<'_, '_> {
                     Some(serde_json::to_value(outcome).map_err(|error| error.to_string())?);
                 (self.hooks.observe)(&event);
                 self.events.push(event);
-                self.bump_checked.insert(item.id.clone(), blocked.clone());
-                return Ok(blocked.map(scheduler::Status::Blocked));
+                blocked = cause;
             }
+            self.bump_checked.insert(item.id.clone(), blocked.clone());
+            return Ok(blocked.map(scheduler::Status::Blocked));
         }
         Ok(None)
     }
@@ -243,7 +267,16 @@ impl scheduler::Coordinator for Coordinator<'_, '_> {
                 if !valid {
                     return Err("checkpoint does not belong to this step".to_string());
                 }
-                if self.env.settings.bump {
+                let resuming_publisher = matches!(
+                    &operation,
+                    StoreOperation::SetSha { .. } | StoreOperation::Remove(_)
+                ) && self
+                    .store
+                    .state
+                    .bump
+                    .as_ref()
+                    .is_some_and(|journal| journal.publishers.contains_key(target));
+                if self.env.settings.bump || resuming_publisher {
                     bump::track(
                         self.env.plan,
                         self.store,
@@ -362,7 +395,7 @@ fn jobs(
             after.push(prior);
         }
         let publisher = item
-            .map(|item| failure::continuation(env.plan, item).has_consumers)
+            .map(|item| failure::continuation(env, item).has_consumers)
             .or_else(|| {
                 pending.and_then(|pending| {
                     pending
@@ -407,7 +440,7 @@ pub(super) fn execute(
     steps: &mut Vec<StepReport>,
     bundles: &BTreeMap<String, Bundled>,
     held: &[Pending],
-) -> Result<()> {
+) -> Result<Option<String>> {
     store.state.active_jobs.clear();
     store.save()?;
     let initial_steps = steps.to_vec();
@@ -449,6 +482,7 @@ pub(super) fn execute(
     let stacked = env.stacked.clone();
     let landings = env.landings.clone();
     let answers = env.gates.clone();
+    let queued_bumps = env.queued_bumps;
     let result = scheduler::run_with(
         &jobs,
         states,
@@ -488,6 +522,7 @@ pub(super) fn execute(
                 stacked: stacked.clone(),
                 landings: landings.clone(),
                 gates: gates::Answers::default(),
+                queued_bumps,
             };
             let mut confirm = |_: &str| false;
             let mut gate = |_: &str| false;
@@ -611,5 +646,7 @@ pub(super) fn execute(
     }
     let events = std::mem::take(&mut coordinator.events);
     steps.extend(events);
-    Ok(())
+    Ok(result
+        .stopped
+        .then(|| stopped_by.unwrap_or_else(|| "the scheduler stopped".into())))
 }

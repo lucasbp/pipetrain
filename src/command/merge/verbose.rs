@@ -113,7 +113,7 @@ fn render_with_steps(report: &Report, color: bool, include_steps: bool) -> Strin
         }
     }
     if report.bump_enabled && include_steps {
-        out.push_str("--bump enabled: with --apply this run may create isolated bump branches and draft PRs targeting consumer heads, then block those consumers for CI and review. Dry runs perform no writes.\n");
+        out.push_str("--bump enabled: with --apply this run may create isolated bump branches and draft PRs targeting consumer heads or a shared base, then block those consumers for CI and review. Dry runs perform no writes.\n");
         for target in &report.bump_candidates {
             out.push_str(&format!("potential dependency bump: {target} (only after a new publication is verified; no version chosen yet)\n"));
         }

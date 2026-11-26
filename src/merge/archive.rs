@@ -141,6 +141,7 @@ fn carries_only_stale_pending(state: &State, stale: &[bool]) -> bool {
             journal.publishers.is_empty()
                 && journal.contracts.is_empty()
                 && journal.consumers.is_empty()
+                && journal.queued_bumps.is_empty()
         })
 }
 

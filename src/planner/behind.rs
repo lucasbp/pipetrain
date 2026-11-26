@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::discovery::{Scope, Skipped};
 use crate::feed;
@@ -11,6 +11,64 @@ use crate::workflows::MaxBehind;
 pub const PREFIX: &str = "needs a bump of ";
 
 pub use crate::publishers::Feeds;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedBump {
+    pub id: String,
+    pub base: String,
+    pub head: String,
+    pub sha: String,
+    pub package: String,
+    pub from: String,
+    pub owners: Vec<String>,
+    pub publishers: Vec<String>,
+}
+
+pub fn queued_bumps(
+    needs: &[Need],
+    context: &Context,
+    pr: &Pr,
+    manifests: &[crate::planner::release::Manifest],
+) -> Vec<QueuedBump> {
+    let mut contracts = Vec::new();
+    let id = pr.key.to_string();
+    for need in needs.iter().filter(|need| {
+        need.id == id && need.queue_published && context.nuget_releases.contains(&need.package)
+    }) {
+        let Some(publishers) = context.releases.get(&need.package) else {
+            continue;
+        };
+        if need.behind.saturating_sub(publishers.len()) >= need.limit as usize {
+            continue;
+        }
+        let repo = pr.key.slug();
+        let nuget_pin = manifests.iter().any(|(slug, path, text)| {
+            slug.eq_ignore_ascii_case(&repo)
+                && (path.to_ascii_lowercase().ends_with("proj")
+                    || path.to_ascii_lowercase().ends_with(".props"))
+                && crate::manifest::package_versions(path, text, &need.package).contains(&need.from)
+        });
+        if nuget_pin {
+            contracts.push(QueuedBump {
+                id: need.id.clone(),
+                base: pr.base_ref.clone(),
+                head: pr.head_ref.clone(),
+                sha: pr.head_sha.clone(),
+                package: need.package.clone(),
+                from: need.from.clone(),
+                owners: context
+                    .publishers
+                    .get(&need.package)
+                    .into_iter()
+                    .flatten()
+                    .cloned()
+                    .collect(),
+                publishers: publishers.iter().cloned().collect(),
+            });
+        }
+    }
+    contracts
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Need {
@@ -224,11 +282,16 @@ pub fn hold(
     skipped: &mut Vec<Skipped>,
 ) -> Vec<Need> {
     let needs = find(context, ready, feeds);
+    hold_needs(&needs, ready, skipped);
+    needs
+}
+
+pub(crate) fn hold_needs(needs: &[Need], ready: &mut Vec<(Pr, Scope)>, skipped: &mut Vec<Skipped>) {
     if needs.is_empty() {
-        return needs;
+        return;
     }
     let mut causes: BTreeMap<&str, Vec<String>> = BTreeMap::new();
-    for need in &needs {
+    for need in needs {
         causes.entry(&need.id).or_default().push(need.cause());
     }
     let taken = std::mem::take(ready);
@@ -238,5 +301,4 @@ pub fn hold(
             None => ready.push((pr, scope)),
         }
     }
-    needs
 }
